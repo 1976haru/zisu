@@ -13,7 +13,10 @@ with WorkspaceTemp() as temp:
     app.update_idletasks()
     assert len(app.profiles)>=1
     assert app.active_id
-    assert len(app.frames)==7
+    assert len(app.frames)==8
+    assert hasattr(app,"autopilot_start_button")
+    assert hasattr(app,"autopilot_exception_tree")
+    assert hasattr(app,"autopilot_controller")
     assert len(app.ai_tree.get_children())==0
     assert hasattr(app,"ai_credential_entry") and hasattr(app,"ai_pause_button")
     assert hasattr(app,"ai_gemini_test_button")

@@ -13,6 +13,10 @@ from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess
 
 MARKETS = ("JP", "KR")
 
+
+class ActiveResearchSessionError(RuntimeError):
+    """A profile already has an in-flight fit-target research job."""
+
 def normalize_related_genres(primary, related=()):
     """Validate and canonicalize related genre IDs; legacy subgenre stays untouched."""
     if primary not in GENRES:
@@ -144,6 +148,19 @@ def initialize(path=None):
           calls_used INTEGER NOT NULL DEFAULT 0, duplicate_count INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS autopilot_run_settings (
+          session_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, settings_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS autopilot_reports (
+          session_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, report_json TEXT NOT NULL,
+          exceptions_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS autopilot_comment_drafts (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, session_id TEXT NOT NULL,
+          drafts_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id,session_id),
+          FOREIGN KEY(profile_id,video_id) REFERENCES candidates(profile_id,video_id) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
           ON candidates(profile_id,genre_decision,status);
         """)
@@ -523,9 +540,26 @@ def ai_usage_summary(profile_id, path=None):
                           (profile_id, datetime.now(timezone.utc).strftime("%Y-%m-%d") + "%")).fetchall()
         return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
 
+def ai_usage_for_session(profile_id, session_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT COUNT(*) AS requests,SUM(cost_estimate) AS estimated_cost_usd,"
+                         "SUM(CASE WHEN cost_estimate IS NULL THEN 1 ELSE 0 END) AS unknown_cost "
+                         "FROM ai_usage WHERE profile_id=? AND session_id=?", (profile_id, session_id)).fetchone()
+    return {"requests": int(row["requests"] or 0),
+            "estimated_cost_usd": float(row["estimated_cost_usd"] or 0.0),
+            "unknown_cost": int(row["unknown_cost"] or 0)}
+
 def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash="", target_mode="candidate_count"):
     session_id = uuid.uuid4().hex
     with connect(path) as db:
+        # Serialize the check + insert across processes. The in-process GUI lock
+        # alone cannot prevent a second app instance from spending the same budget.
+        db.execute("BEGIN IMMEDIATE")
+        if target_mode == "fit_target" and db.execute(
+            "SELECT 1 FROM research_sessions WHERE profile_id=? AND target_mode='fit_target' AND state='running' LIMIT 1",
+            (profile_id,),
+        ).fetchone():
+            raise ActiveResearchSessionError("A fit-target research session is already running for this profile.")
         row = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not row or row["market"] != market or row["genre"] != genre:
             raise ValueError("조사 프로필이 변경되었습니다. 새 계획을 만드세요.")
@@ -563,3 +597,71 @@ def checkpoint_research_session(session_id, profile_id, *, state=None, query_ind
             raise ValueError("조사 세션과 프로필이 일치하지 않습니다.")
         db.execute("UPDATE research_sessions SET " + ",".join(fields) + " WHERE id=? AND profile_id=?",
                    (*values, session_id, profile_id))
+
+def save_autopilot_settings(profile_id, session_id, settings, path=None):
+    """Persist non-secret resume settings for an Autopilot session."""
+    allowed = {"provider_id", "model", "target", "max_search_calls", "cost_estimate_usd",
+               "cost_limit_usd", "paid_external_approved", "report_version"}
+    if not isinstance(settings, dict) or set(settings) - allowed:
+        raise ValueError("Invalid Autopilot settings.")
+    payload = json.dumps(settings, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?",
+                          (session_id, profile_id)).fetchone():
+            raise ValueError("Autopilot session does not match the profile.")
+        db.execute("INSERT INTO autopilot_run_settings(session_id,profile_id,settings_json) VALUES(?,?,?) "
+                   "ON CONFLICT(session_id) DO UPDATE SET settings_json=excluded.settings_json,updated_at=CURRENT_TIMESTAMP",
+                   (session_id, profile_id, payload))
+
+def get_autopilot_settings(profile_id, session_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT settings_json FROM autopilot_run_settings WHERE profile_id=? AND session_id=?",
+                         (profile_id, session_id)).fetchone()
+    return json.loads(row["settings_json"]) if row else None
+
+def save_autopilot_report(profile_id, session_id, report, exceptions=(), path=None):
+    report_json = json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    exceptions_json = json.dumps(list(exceptions), ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?",
+                          (session_id, profile_id)).fetchone():
+            raise ValueError("Autopilot report does not match the profile session.")
+        db.execute("INSERT INTO autopilot_reports(session_id,profile_id,report_json,exceptions_json) VALUES(?,?,?,?) "
+                   "ON CONFLICT(session_id) DO UPDATE SET report_json=excluded.report_json,"
+                   "exceptions_json=excluded.exceptions_json,updated_at=CURRENT_TIMESTAMP",
+                   (session_id, profile_id, report_json, exceptions_json))
+
+def get_autopilot_report(profile_id, session_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT report_json,exceptions_json FROM autopilot_reports WHERE profile_id=? AND session_id=?",
+                         (profile_id, session_id)).fetchone()
+    if not row:
+        return None
+    return {"report": json.loads(row["report_json"]), "exceptions": json.loads(row["exceptions_json"])}
+
+def get_latest_autopilot_report(profile_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT report_json,exceptions_json FROM autopilot_reports WHERE profile_id=? "
+                         "ORDER BY updated_at DESC,session_id DESC LIMIT 1", (profile_id,)).fetchone()
+    if not row:
+        return None
+    return {"report": json.loads(row["report_json"]), "exceptions": json.loads(row["exceptions_json"])}
+
+def save_autopilot_comment_drafts(profile_id, video_id, session_id, drafts, path=None):
+    if not isinstance(drafts, (list, tuple)) or len(drafts) != 3 or any(not isinstance(x, str) or len(x) > 400 for x in drafts):
+        raise ValueError("Autopilot requires exactly three bounded comment drafts.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM candidates WHERE profile_id=? AND video_id=?", (profile_id, video_id)).fetchone():
+            raise ValueError("Comment draft candidate does not belong to this profile.")
+        db.execute("INSERT INTO autopilot_comment_drafts(profile_id,video_id,session_id,drafts_json) VALUES(?,?,?,?) "
+                   "ON CONFLICT(profile_id,video_id,session_id) DO UPDATE SET drafts_json=excluded.drafts_json",
+                   (profile_id, video_id, session_id, json.dumps(list(drafts), ensure_ascii=False)))
+
+def list_autopilot_comment_drafts(profile_id, video_id=None, path=None):
+    sql = "SELECT * FROM autopilot_comment_drafts WHERE profile_id=?"
+    args = [profile_id]
+    if video_id is not None:
+        sql += " AND video_id=?"; args.append(video_id)
+    sql += " ORDER BY created_at DESC,video_id"
+    with connect(path) as db:
+        return [{**dict(row), "drafts": json.loads(row["drafts_json"])} for row in db.execute(sql, args)]

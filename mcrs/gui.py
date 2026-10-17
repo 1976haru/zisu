@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import platform
+import json
 import queue
 import re
 import sqlite3
@@ -21,6 +22,7 @@ from . import oauth
 from . import ai_research
 from . import comments
 from . import timers
+from . import autopilot
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .startup_probe import write_stage as _write_smoke_stage
@@ -121,7 +123,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.5.7 · AI 보조 장르 안전 조사")
+        self.title("ZISU Research Studio V4.5.8 · AI Autopilot 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -168,7 +170,7 @@ class Studio(tk.Tk):
         self.tabs=ttk.Notebook(self)
         self.tabs.pack(fill="both",expand=True,padx=15,pady=8)
         self.frames=[]
-        for label in ("① 계정 연결","② 장르별 채널 검색","③ 후보·장르 검토","④ 댓글 초안","⑤ 국가별 성과","⑥ 예약·도움말","⑦ AI 연구 도우미"):
+        for label in ("① 계정 연결","② 장르별 채널 검색","③ 후보·장르 검토","④ 댓글 초안","⑤ 국가별 성과","⑥ 예약·도움말","⑦ AI 연구 도우미","⑧ AI 자동 조사 · Autopilot"):
             tab=ttk.Frame(self.tabs,padding=14)
             self.tabs.add(tab,text=label)
             self.frames.append(tab)
@@ -179,6 +181,7 @@ class Studio(tk.Tk):
         self._metrics_ui(self.frames[4])
         self._help_ui(self.frames[5])
         self._ai_research_ui(self.frames[6])
+        self._autopilot_ui(self.frames[7])
         ttk.Label(self,textvariable=self.footer).pack(anchor="w",padx=24,pady=(0,9))
         self.reload_profiles()
         if first_run and not smoke_report:
@@ -188,13 +191,14 @@ class Studio(tk.Tk):
         if smoke_report:
             _write_smoke_stage("gui_widgets_ready")
             self.after(250, lambda: self._complete_exe_smoke(smoke_report))
+        self.protocol("WM_DELETE_WINDOW", self._autopilot_window_close)
 
     def _complete_exe_smoke(self, report_path):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.5.7",
-            "gui_initialized": len(self.frames) == 7 and bool(self.winfo_exists()),
+            "app_version": "4.5.8",
+            "gui_initialized": len(self.frames) == 8 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
             "python_executable": Path(sys.executable).name,
@@ -232,6 +236,9 @@ class Studio(tk.Tk):
         payload["database_integrity"] = database_integrity
         if profile_test is not None:
             payload["profile_test"] = profile_test
+        payload["autopilot_ui"] = bool(hasattr(self, "autopilot_start_button") and
+                                       hasattr(self, "autopilot_exception_tree") and
+                                       hasattr(self, "autopilot_controller"))
         _write_smoke_stage("offline_smoke_complete", **payload)
         self.destroy()
 
@@ -294,6 +301,7 @@ class Studio(tk.Tk):
         self.reload_candidates()
         self.reload_metrics()
         self.schedule_text.set(profile["schedule"])
+        self._autopilot_refresh_profile()
         self.footer.set("채널을 전환했습니다. 다른 채널의 검색 후보와 성과는 분리됩니다.")
 
     def add_profile(self):
@@ -1131,6 +1139,315 @@ class Studio(tk.Tk):
         self.ai_pause_event=None
         self._ai_refresh_credential_status()
         ttk.Button(results,text="선택한 영상 직접 열기",command=self._ai_open_selected).pack(anchor="e",pady=5)
+
+    def _autopilot_ui(self,tab):
+        tab.columnconfigure(0,weight=1)
+        tab.rowconfigure(12,weight=1)
+        ttk.Label(tab,text="AI 자동 조사 · Autopilot",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(2,8))
+        self.autopilot_profile_text=tk.StringVar(value="작업 프로필을 선택하세요.")
+        ttk.Label(tab,textvariable=self.autopilot_profile_text,wraplength=1050).grid(row=1,column=0,sticky="w",pady=3)
+        self.autopilot_scope_text=tk.StringVar(value="적합 목표 10 · 규칙 전용 · 검색 3회 이내")
+        ttk.Label(tab,textvariable=self.autopilot_scope_text,wraplength=1050).grid(row=2,column=0,sticky="w",pady=3)
+        self.autopilot_start_button=ttk.Button(tab,text="AI 자동 조사 시작",command=self._autopilot_start,
+                                                style="Accent.TButton")
+        self.autopilot_start_button.grid(row=3,column=0,sticky="ew",ipady=10,pady=(7,5))
+        self.autopilot_progress=ttk.Progressbar(tab,mode="determinate",maximum=100)
+        self.autopilot_progress.grid(row=4,column=0,sticky="ew",pady=4)
+        self.autopilot_stage_text=tk.StringVar(value="대기 중 · 시작을 누르면 승인된 범위 안에서 순차 조사합니다.")
+        ttk.Label(tab,textvariable=self.autopilot_stage_text,wraplength=1050).grid(row=5,column=0,sticky="w",pady=4)
+        self.autopilot_counts_text=tk.StringVar(value="검색 0회 · 후보 0 · 중복 0 · 추천 적합 0/10 · AI 0 · 사람 확인 0 · 잔여 예산 확인 전")
+        ttk.Label(tab,textvariable=self.autopilot_counts_text,wraplength=1050).grid(row=6,column=0,sticky="new",pady=4)
+        detail=ttk.LabelFrame(tab,text="상세 설정 (필요할 때만 열기)")
+        detail.grid(row=7,column=0,sticky="ew",pady=4)
+        self.autopilot_detail_panel=ttk.Frame(detail)
+        self.autopilot_detail_panel.pack(fill="x")
+        row=ttk.Frame(self.autopilot_detail_panel); row.pack(fill="x",pady=3)
+        ttk.Label(row,text="추천 적합 목표").pack(side="left")
+        self.autopilot_target=ttk.Combobox(row,textvariable=self.ai_target,values=("5","10","20"),state="readonly",width=5)
+        self.autopilot_target.pack(side="left",padx=5)
+        ttk.Label(row,text="검색 호출 상한").pack(side="left",padx=(10,0))
+        self.autopilot_search_limit=ttk.Combobox(row,textvariable=self.ai_max_calls,
+            values=tuple(str(x) for x in range(1,13)),state="readonly",width=5)
+        self.autopilot_search_limit.pack(side="left",padx=5)
+        ttk.Label(row,text="AI 보조").pack(side="left",padx=(10,0))
+        self.autopilot_provider=ttk.Combobox(row,textvariable=self.ai_provider_choice,
+            values=tuple(self.ai_provider_ids),state="readonly",width=16)
+        self.autopilot_provider.pack(side="left",padx=5)
+        ttk.Label(row,text="Gemini 모델").pack(side="left",padx=(10,0))
+        ttk.Label(row,textvariable=self.ai_gemini_model).pack(side="left",padx=5)
+        ttk.Label(self.autopilot_detail_panel,text="유료 AI 예산은 사용자 입력 기반 예상치이며 실제 청구액을 보장하지 않습니다. 기존 AI 연구 도우미에서 추정액과 1일 상한을 설정하세요.",
+                  wraplength=1020,foreground="#8a4b08").pack(anchor="w",pady=3)
+        self.autopilot_detail_panel.pack_forget()
+        self.autopilot_details_button=ttk.Button(detail,text="상세 설정 열기",command=self._autopilot_toggle_details)
+        self.autopilot_details_button.pack(anchor="w",padx=5,pady=3)
+        actions=ttk.Frame(tab); actions.grid(row=8,column=0,sticky="ew",pady=4)
+        self.autopilot_pause_button=ttk.Button(actions,text="일시 정지",command=self._autopilot_pause,state="disabled")
+        self.autopilot_pause_button.pack(side="left",padx=3)
+        self.autopilot_resume_button=ttk.Button(actions,text="이어하기",command=self._autopilot_resume)
+        self.autopilot_resume_button.pack(side="left",padx=3)
+        self.autopilot_stop_button=ttk.Button(actions,text="안전 중단",command=self._autopilot_stop,state="disabled")
+        self.autopilot_stop_button.pack(side="left",padx=3)
+        ttk.Button(actions,text="결과 보고서 내보내기",command=self._autopilot_export).pack(side="left",padx=3)
+        ttk.Button(actions,text="AI 상세 화면",command=lambda:self.tabs.select(self.frames[6])).pack(side="left",padx=3)
+        ttk.Label(tab,text="예외 / 사람 확인 대기함",font=("Malgun Gothic",11,"bold")).grid(row=9,column=0,sticky="w",pady=(6,2))
+        self.autopilot_exception_tree=ttk.Treeview(tab,columns=("type","impact","action","retry","status"),show="headings",height=4)
+        for col,label,width in (("type","유형",125),("impact","영향",220),("action","권장 조치",390),("retry","재시도",75),("status","상태",85)):
+            self.autopilot_exception_tree.heading(col,text=label); self.autopilot_exception_tree.column(col,width=width,stretch=col=="action")
+        self.autopilot_exception_tree.grid(row=10,column=0,sticky="nsew",pady=3)
+        ttk.Label(tab,text="최근 조사 보고서",font=("Malgun Gothic",11,"bold")).grid(row=11,column=0,sticky="w",pady=(6,2))
+        self.autopilot_report=tk.Text(tab,height=7,wrap="word",font=("Consolas",9))
+        self.autopilot_report.grid(row=12,column=0,sticky="nsew",pady=3)
+        self.autopilot_report.insert("1.0","보고서는 프로필별로 저장됩니다. AI 판정은 사람의 실제 청취 정답과 분리되며 댓글은 게시되지 않습니다.")
+        self.autopilot_report.configure(state="disabled")
+        self.autopilot_controller=autopilot.AutopilotController()
+        self.autopilot_events=queue.Queue()
+        self.autopilot_result=None
+        self.autopilot_close_pending=False
+        self.ai_target.trace_add("write",lambda *_: self._autopilot_refresh_profile())
+        self.ai_max_calls.trace_add("write",lambda *_: self._autopilot_refresh_profile())
+        self.ai_provider_choice.trace_add("write",lambda *_: self._autopilot_refresh_profile())
+        self._autopilot_refresh_profile()
+
+    def _autopilot_toggle_details(self):
+        if self.autopilot_detail_panel.winfo_ismapped():
+            self.autopilot_detail_panel.pack_forget(); self.autopilot_details_button.configure(text="상세 설정 열기")
+        else:
+            self.autopilot_detail_panel.pack(fill="x",before=self.autopilot_details_button); self.autopilot_details_button.configure(text="상세 설정 접기")
+
+    def _autopilot_refresh_profile(self):
+        if not hasattr(self,"autopilot_profile_text"): return
+        self.autopilot_exception_tree.delete(*self.autopilot_exception_tree.get_children())
+        self.autopilot_saved_report=None
+        self.autopilot_report.configure(state="normal")
+        self.autopilot_report.delete("1.0","end")
+        self.autopilot_report.insert("1.0","보고서는 프로필별로 저장됩니다. AI 판정은 사람의 실제 청취 정답과 분리되며 댓글은 게시되지 않습니다.")
+        self.autopilot_report.configure(state="disabled")
+        profile=self.current_profile()
+        if not profile:
+            self.autopilot_profile_text.set("작업 프로필 없음 · 먼저 프로필을 추가하세요.")
+            return
+        connected=oauth.is_connected(profile["id"])
+        account=profile.get("connected_email") or ("Google 읽기 전용 연결됨" if connected else "Google 연결 전")
+        self.autopilot_profile_text.set(f"프로필: {profile['name']} · {profile['market']} · {GENRES[profile['genre']].title} · 계정: {account}")
+        provider_id=self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
+        model=self.ai_gemini_model.get() if provider_id=="gemini" else ("로컬 모델" if provider_id=="ollama" else provider_id)
+        self.autopilot_scope_text.set(f"추천 적합 목표 {self.ai_target.get()}개 · AI {model} · 검색 호출 최대 {self.ai_max_calls.get()}회 · 사람 승인/실청취 라벨은 별도")
+        recoverable=store.list_resumable_sessions(profile["id"])
+        autopilot_sessions=[s for s in recoverable if store.get_autopilot_settings(profile["id"],s["id"])]
+        if autopilot_sessions:
+            self.autopilot_stage_text.set(f"저장된 작업 {len(autopilot_sessions)}개 복구 가능 · 이어하기를 누르면 원래 승인 범위만 사용합니다.")
+        saved_report=store.get_latest_autopilot_report(profile["id"])
+        if saved_report:
+            self.autopilot_saved_report=saved_report["report"]
+            self.autopilot_report.configure(state="normal")
+            self.autopilot_report.delete("1.0","end")
+            self.autopilot_report.insert("1.0",json.dumps(self.autopilot_saved_report,ensure_ascii=False,indent=2))
+            self.autopilot_report.configure(state="disabled")
+            for item in saved_report["exceptions"]: self._autopilot_show_exception(item)
+
+    def _autopilot_show_exception(self,item):
+        values=(item.get("type","unknown"),item.get("impact",""),item.get("recommended_action",""),
+                "가능" if item.get("retry_allowed") else "불가",item.get("status","pending"))
+        self.autopilot_exception_tree.insert("","end",values=values)
+
+    def _autopilot_start(self,session_settings=None):
+        profile=self.current_profile()
+        if not profile:
+            self._autopilot_show_exception({"type":"profile_required","impact":"조사 프로필이 없습니다.","recommended_action":"국가와 핵심 장르를 선택해 프로필을 추가하세요.","retry_allowed":False})
+            return
+        if self.autopilot_controller.running:
+            self.autopilot_stage_text.set("이미 Autopilot 작업이 실행 중입니다. 중복 실행은 차단했습니다.")
+            return
+        if not session_settings:
+            active=[s for s in store.list_resumable_sessions(profile["id"])
+                    if store.get_autopilot_settings(profile["id"],s["id"])]
+            if active:
+                self.autopilot_stage_text.set("복구 가능한 Autopilot 세션이 있습니다. 새 작업 대신 이어하기를 선택하세요.")
+                return
+            self.ai_target_mode.set("추천 적합 수")
+            try:
+                target=int(self.ai_target.get()); max_calls=int(self.ai_max_calls.get())
+                plan=ai_research.preview_plan(profile["id"],target,max_search_calls=max_calls,target_mode="fit_target")
+            except (ValueError,KeyError):
+                self._autopilot_show_exception({"type":"settings","impact":"목표 또는 검색 한도를 사용할 수 없습니다.","recommended_action":"상세 설정에서 추천 목표와 1~12회 검색 상한을 선택하세요.","retry_allowed":False})
+                return
+            provider_id=self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
+            key=self.api_key.get().strip()
+            if not key and not oauth.is_connected(profile["id"]):
+                self._autopilot_show_exception({"type":"google_auth","impact":"검색 권한 또는 YouTube API 키가 없습니다.","recommended_action":"이 프로필의 읽기 전용 Google 연결을 완료하거나 공개 조회용 API 키를 설정하세요.","retry_allowed":False})
+                self.autopilot_stage_text.set("시작 전 확인 필요 · 검색은 아직 호출하지 않았습니다.")
+                return
+            provider=None
+            paid=provider_id in {"gemini","openai"}
+            cost_estimate=cost_limit=None
+            if paid:
+                if not CredentialStore().configured(provider_id):
+                    self._autopilot_show_exception({"type":"ai_credential","impact":"선택한 AI 키가 안전 저장소에 없습니다.","recommended_action":"상세 AI 화면에서 키를 등록하거나 규칙 전용/Ollama를 선택하세요.","retry_allowed":False})
+                    return
+                if provider_id=="gemini" and self.ai_gemini_available_models and self.ai_gemini_model.get() not in self.ai_gemini_available_models:
+                    self._autopilot_show_exception({"type":"model_unavailable","impact":"선택 모델이 계정에서 확인되지 않았습니다.","recommended_action":"Gemini 사용 가능 모델을 조회한 뒤 선택하세요.","retry_allowed":False})
+                    return
+                try:
+                    cost_estimate,cost_limit=ai_research.validate_cost_budget(self.ai_cost_estimate.get(),self.ai_cost_limit.get())
+                except (TypeError,ValueError):
+                    self._autopilot_show_exception({"type":"cost_budget_required","impact":"유료 AI 예산이 확인되지 않았습니다.","recommended_action":"상세 AI 화면에서 보수적 추정액과 1일 상한을 설정하세요. 예산 확인 전 외부 호출은 없습니다.","retry_allowed":False})
+                    return
+                provider=(ai_research.GeminiProvider(model=self.ai_gemini_model.get()) if provider_id=="gemini"
+                          else ai_research.OpenAIProvider())
+            elif provider_id=="ollama":
+                provider=ai_research.OllamaProvider()
+            summary=(f"프로필 {profile['name']} ({profile['market']} / {GENRES[profile['genre']].title})\n"
+                     f"목표 적합 {target}개 · YouTube 검색 호출 최대 {max_calls}회 · 검색어 {len(plan['search_terms'])}개\n"
+                     f"AI: {provider_id} / {getattr(provider,'model','none')} · AI 호출은 최대 10회/작업이며 검색 한도와 별도입니다.\n"
+                     f"유료 AI 비용 추정 {cost_estimate if cost_estimate is not None else '없음'} USD, 입력 상한 {cost_limit if cost_limit is not None else '없음'} USD\n"
+                     "계속을 누르면 이 승인 범위 안에서는 단계별 팝업 없이 진행합니다. 외부 권한·예산을 늘리지 않으며 사람 라벨과 댓글 게시를 자동 수행하지 않습니다.")
+            if not messagebox.askyesno("AI 자동 조사 승인",summary,parent=self):
+                self.autopilot_stage_text.set("사용자 승인 취소 · 외부 요청 0회")
+                return
+            config=autopilot.AutopilotConfig(profile_id=profile["id"],target=target,
+                max_search_calls=max_calls,provider_id=provider_id,allow_paid_external=paid,
+                cost_estimate_usd=cost_estimate,cost_limit_usd=cost_limit)
+        else:
+            settings,session_id=session_settings
+            provider_id=settings["provider_id"]
+            provider=(ai_research.GeminiProvider(model=settings["model"]) if provider_id=="gemini" else
+                      ai_research.OpenAIProvider() if provider_id=="openai" else
+                      ai_research.OllamaProvider(model=settings["model"]) if provider_id=="ollama" else None)
+            if provider_id in {"gemini","openai"} and not CredentialStore().configured(provider_id):
+                self._autopilot_show_exception({"type":"ai_credential","impact":"저장된 조사에서 AI 키를 사용할 수 없습니다.","recommended_action":"기존 승인 범위의 키를 복구하거나 같은 공급자에 키를 다시 등록하세요. 예산은 늘리지 않았습니다.","retry_allowed":False})
+                return
+            config=autopilot.AutopilotConfig(profile_id=profile["id"],target=settings["target"],
+                max_search_calls=settings["max_search_calls"],provider_id=provider_id,
+                allow_paid_external=settings["paid_external_approved"],
+                cost_estimate_usd=settings["cost_estimate_usd"],cost_limit_usd=settings["cost_limit_usd"],
+                session_id=session_id)
+        key=self.api_key.get().strip()
+        profile_id=profile["id"]
+        self.autopilot_result=None
+        self.autopilot_exception_tree.delete(*self.autopilot_exception_tree.get_children())
+        self.autopilot_progress.configure(value=0)
+        self.autopilot_stage_text.set("시작 · 프로필 전용 체크포인트를 생성합니다.")
+        self.autopilot_start_button.configure(state="disabled")
+        self.autopilot_pause_button.configure(state="normal")
+        self.autopilot_stop_button.configure(state="normal")
+        self.profile_combo.configure(state="disabled")
+        def worker():
+            try:
+                token=oauth.get_access_token(profile_id) if not key else None
+                def collect(term,market,limit,page_token=None):
+                    return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
+                                         page_token=page_token,return_page=True)
+                outcome=self.autopilot_controller.run(config,collect,provider=provider,
+                                                       on_event=self.autopilot_events.put)
+                self.autopilot_events.put({"stage":"result","result":outcome,"profile_id":profile_id})
+            except Exception:
+                self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
+                    "exception":{"type":"startup","impact":"조사를 시작하지 못했습니다.",
+                                 "recommended_action":"프로필 연결·읽기 권한·저장 경로를 확인하세요. 개인 키는 로그에 기록하지 않았습니다.",
+                                 "retry_allowed":False,"status":"pending"}})
+        threading.Thread(target=worker,name="zisu-autopilot",daemon=True).start()
+        self.after(100,self._autopilot_poll)
+
+    def _autopilot_poll(self):
+        if not self.winfo_exists(): return
+        try:
+            while True:
+                event=self.autopilot_events.get_nowait()
+                stage=event.get("stage")
+                if stage=="result":
+                    self.autopilot_result=event["result"]
+                    self.profile_combo.configure(state="readonly")
+                    self.autopilot_start_button.configure(state="normal")
+                    self.autopilot_pause_button.configure(state="disabled")
+                    self.autopilot_stop_button.configure(state="disabled")
+                    self._autopilot_render_result(self.autopilot_result)
+                elif stage=="fatal":
+                    self.profile_combo.configure(state="readonly")
+                    self.autopilot_start_button.configure(state="normal")
+                    self.autopilot_pause_button.configure(state="disabled")
+                    self.autopilot_stop_button.configure(state="disabled")
+                    self._autopilot_show_exception(event["exception"])
+                    self.autopilot_stage_text.set(event["exception"]["impact"]+" "+event["exception"]["recommended_action"])
+                elif stage=="progress":
+                    max_calls=max(1,int(self.ai_max_calls.get()))
+                    self.autopilot_progress.configure(value=min(95,100*event.get("calls_used",0)/max_calls))
+                    self.autopilot_counts_text.set(f"검색 {event.get('calls_used',0)}회 / 잔여 {event.get('budget_remaining',0)} · 후보 {event.get('candidate_count',0)} · 중복 {event.get('duplicate_count',0)} · 추천 적합 {event.get('recommended_fit_count',0)}/{self.ai_target.get()} · AI 검토 {event.get('ai_review_count',0)} · 사람 확인 {event.get('human_reviewed_count',0)} · 불확실 {event.get('uncertain_count',0)}")
+                    self.autopilot_stage_text.set("후보 수집·규칙 판정·필요한 경우에만 AI 검토 중")
+                elif stage=="search":
+                    self.autopilot_stage_text.set(event.get("message") or f"검색 중 · {event.get('keyword','')}")
+                elif stage in {"validate","session","resume","drafts","report"}:
+                    self.autopilot_stage_text.set(event.get("message",stage))
+                elif stage=="exception":
+                    for item in event.get("exceptions",[]): self._autopilot_show_exception(item)
+                elif stage=="complete":
+                    self.autopilot_progress.configure(value=100 if event.get("state")=="complete" else self.autopilot_progress["value"])
+                else:
+                    if event.get("exception"): self._autopilot_show_exception(event["exception"])
+        except queue.Empty:
+            pass
+        if self.autopilot_controller.running or not self.autopilot_events.empty():
+            self.after(100,self._autopilot_poll)
+        elif self.autopilot_close_pending:
+            self.destroy()
+
+    def _autopilot_render_result(self,result):
+        report=result.report
+        self.autopilot_saved_report=report
+        self.autopilot_progress.configure(value=100 if result.state=="complete" else self.autopilot_progress["value"])
+        self.autopilot_stage_text.set(f"조사 {result.state} · 목표 {report.get('target_fits',0)}개 / 확보 {report.get('counts',{}).get('ai_recommended_fit',0)}개 / 부족 {report.get('shortfall',0)}개")
+        self.autopilot_counts_text.set(f"검색 {report.get('search_calls_used',0)}회 / 잔여 {report.get('search_calls_remaining',0)} · 후보 {report.get('candidate_total',0)} · 중복 {report.get('duplicate_removed',0)} · 추천 적합 {report.get('counts',{}).get('ai_recommended_fit',0)}/{report.get('target_fits',0)} · AI 요청 {report.get('ai_requests_used',0)}/10 · 사람 확인 {report.get('counts',{}).get('human_verified',0)}")
+        self.autopilot_exception_tree.delete(*self.autopilot_exception_tree.get_children())
+        for item in result.exceptions: self._autopilot_show_exception(item)
+        self.autopilot_report.configure(state="normal"); self.autopilot_report.delete("1.0","end")
+        self.autopilot_report.insert("1.0",json.dumps(report,ensure_ascii=False,indent=2)); self.autopilot_report.configure(state="disabled")
+        if result.run:
+            self.ai_reviews={item.video_id:item for item in result.run.reviews}
+            self.ai_candidate_rows={str(item.get("video_id")):item for item in result.run.candidates}
+            self.ai_tree.delete(*self.ai_tree.get_children())
+            for item in result.run.reviews:
+                row=self.ai_candidate_rows.get(item.video_id,{})
+                proposal=ai_research.proposed_verdict(store.get_profile(result.profile_id),item,row)
+                self.ai_tree.insert("","end",iid=item.video_id,values=(ai_research.PROPOSED_VERDICT_LABELS[proposal],item.rule_verdict,
+                    item.ai_opinion.verdict if item.ai_opinion else "미호출",row.get("video_title",item.video_id)))
+        self._autopilot_refresh_profile()
+
+    def _autopilot_pause(self):
+        if self.autopilot_controller.pause(): self.autopilot_stage_text.set("일시 정지 요청 · 현재 페이지 완료 후 체크포인트 저장")
+
+    def _autopilot_stop(self):
+        if self.autopilot_controller.cancel(): self.autopilot_stage_text.set("안전 중단 요청 · 현재 읽기 요청 완료 후 결과와 세션을 보존")
+
+    def _autopilot_resume(self):
+        profile=self.current_profile()
+        if not profile: return
+        for session in store.list_resumable_sessions(profile["id"]):
+            settings=store.get_autopilot_settings(profile["id"],session["id"])
+            if settings:
+                self._autopilot_start((settings,session["id"]))
+                return
+        self._autopilot_show_exception({"type":"no_recovery","impact":"이어갈 Autopilot 작업이 없습니다.","recommended_action":"현재 프로필을 확인하거나 새 조사를 시작하세요.","retry_allowed":False,"status":"info"})
+
+    def _autopilot_export(self):
+        report=getattr(self,"autopilot_saved_report",None)
+        if not report:
+            self._autopilot_show_exception({"type":"report_unavailable","impact":"내보낼 보고서가 없습니다.","recommended_action":"Autopilot 조사를 완료하거나 저장된 세션을 재개하세요.","retry_allowed":False})
+            return
+        target=filedialog.asksaveasfilename(parent=self,defaultextension=".json",initialfile="zisu_autopilot_report.json",filetypes=[("JSON","*.json")])
+        if target:
+            try:
+                autopilot.export_report(report,target)
+                self.autopilot_stage_text.set("프로필 전용 조사 보고서를 JSON으로 내보냈습니다.")
+            except OSError:
+                self._autopilot_show_exception({"type":"report_export","impact":"보고서 파일을 쓸 수 없습니다.","recommended_action":"다른 저장 경로와 폴더 쓰기 권한을 확인하세요.","retry_allowed":True})
+
+    def _autopilot_window_close(self):
+        if self.autopilot_controller.running:
+            self.autopilot_controller.pause()
+            self.autopilot_close_pending=True
+            self.autopilot_stage_text.set("앱 종료 대기 · 현재 요청 완료 후 세션을 일시 정지 저장합니다.")
+            self.after(100,self._autopilot_poll)
+        else:
+            self.destroy()
 
     def _ai_refresh_credential_status(self):
         try:

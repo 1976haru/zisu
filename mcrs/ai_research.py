@@ -525,29 +525,36 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
         else:
             started = time.monotonic()
             cacheable = True
-            try:
-                if provider.name in ("openai", "gemini") and not allow_paid_external:
-                    raise ProviderFailure("consent")
-                if provider.name in ("openai", "gemini", "ollama"):
-                    allowed = store.reserve_ai_usage(profile_id, provider.name, provider.model, session_id,
-                        cost_estimate=cost_estimate_usd, cost_limit=cost_limit_usd, path=path)
-                    if not allowed:
-                        code = "consent" if provider.name in ("openai", "gemini") and (cost_estimate_usd is None or cost_limit_usd is None) else "budget"
-                        raise ProviderFailure(code)
-                try:
-                    supports_related = "related_genres" in inspect.signature(provider.review).parameters
-                except (TypeError, ValueError):
-                    supports_related = False
-                if supports_related:
-                    opinion = provider.review(candidate, profile["genre"], related_genres=related)
-                else:
-                    opinion = provider.review(candidate, profile["genre"])
-                opinion = _validated_opinion(opinion, candidate)
-            except Exception as exc:
-                # Do not persist exception text: providers may include endpoint details.
-                opinion = AIOpinion(genres.REVIEW, (), (), (), "AI 검토 실패: " + _friendly_provider_error(exc),
+            if getattr(provider, "circuit_open", False):
+                opinion = AIOpinion(genres.REVIEW, (), (), (), "AI 공급자 이전 요청 실패로 이번 세션의 추가 호출을 중단했습니다.",
                                     "규칙 판정을 유지하고 직접 확인하세요.")
                 cacheable = False
+            else:
+                try:
+                    if provider.name in ("openai", "gemini") and not allow_paid_external:
+                        raise ProviderFailure("consent")
+                    if provider.name in ("openai", "gemini", "ollama"):
+                        allowed = store.reserve_ai_usage(profile_id, provider.name, provider.model, session_id,
+                            cost_estimate=cost_estimate_usd, cost_limit=cost_limit_usd, path=path)
+                        if not allowed:
+                            code = "consent" if provider.name in ("openai", "gemini") and (cost_estimate_usd is None or cost_limit_usd is None) else "budget"
+                            raise ProviderFailure(code)
+                    try:
+                        supports_related = "related_genres" in inspect.signature(provider.review).parameters
+                    except (TypeError, ValueError):
+                        supports_related = False
+                    if supports_related:
+                        opinion = provider.review(candidate, profile["genre"], related_genres=related)
+                    else:
+                        opinion = provider.review(candidate, profile["genre"])
+                    opinion = _validated_opinion(opinion, candidate)
+                except Exception as exc:
+                    # Do not persist exception text: providers may include endpoint details.
+                    if getattr(provider, "stop_after_failure", False):
+                        provider.circuit_open = True
+                    opinion = AIOpinion(genres.REVIEW, (), (), (), "AI 검토 실패: " + _friendly_provider_error(exc),
+                                        "규칙 판정을 유지하고 직접 확인하세요.")
+                    cacheable = False
             if persist_cache and cacheable:
                 store.save_ai_review(profile_id, candidate.video_id, digest, profile["genre"], provider.name, provider.model,
                                      opinion, int((time.monotonic() - started) * 1000), path, cache_scope)
@@ -673,7 +680,8 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
         max_search_calls: int = 8, provider: ReviewProvider | None = None, path=None,
         cancel_event: threading.Event | None = None, pause_event: threading.Event | None = None,
         progress=None, session_id: str | None = None, allow_paid_external: bool = False,
-        cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None) -> AutoResearchRun:
+        cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None,
+        session_ready=None) -> AutoResearchRun:
     """Search pages until the requested number of rule-supported fits or budget.
 
     A search attempt counts once before dispatch and is never automatically retried
@@ -689,6 +697,8 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
     settings_hash = _profile_settings_hash(profile, path, max_search_calls) + ":fit-target-v1"
     cancel_event = cancel_event or threading.Event()
     pause_event = pause_event or threading.Event()
+    resuming = bool(session_id)
+    recovery_warning = ""
     if session_id:
         session = store.get_research_session(session_id, profile_id, path)
         if (not session or session.get("target_mode") != "fit_target" or
@@ -703,21 +713,31 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
         calls_used = int(session.get("calls_used", 0))
         duplicate_count = int(session.get("duplicate_count", 0))
         if session.get("in_flight"):
-            # Search is read-only. Repeating an uncertain in-flight page is safe;
-            # candidate IDs are deduplicated before persistence.
-            pass
+            # The API may have completed before the process died. Skip this
+            # uncertain page rather than repeat a quota-consuming request.
+            query_index += 1
+            page_token = ""
+            recovery_warning = "중단 시 응답 여부가 불확실한 검색 페이지 1회는 중복 호출을 막기 위해 건너뛰었습니다."
+            store.checkpoint_research_session(session_id, profile_id, state="running",
+                query_index=query_index, page_token=page_token, calls_used=calls_used,
+                duplicate_count=duplicate_count, candidates=list(candidates.values()),
+                processed=sorted(processed), reviews=[_review_to_payload(item) for item in reviews],
+                in_flight=False, path=path)
     else:
         session_id = store.start_research_session(profile_id, profile["market"], profile["genre"],
             target, max_search_calls, path, settings_hash, target_mode="fit_target")
         candidates, reviews, processed = {}, [], set()
         query_index, page_token, calls_used, duplicate_count = 0, "", 0, 0
+    if session_ready:
+        session_ready(session_id, resuming)
 
     related_scope=store.normalize_related_genres(profile["genre"],profile.get("related_genres_json","[]"))
     def fit_count():
         return sum(1 for item in reviews if proposed_verdict(profile,item,
             candidates.get(item.video_id,{}),related_scope)=="auto_fit")
 
-    warning = ""
+    warning = recovery_warning
+    search_failed = False
     while (query_index < len(terms) and calls_used < max_search_calls and fit_count() < target
            and not cancel_event.is_set() and not pause_event.is_set()):
         current = store.get_profile(profile_id, path)
@@ -740,7 +760,9 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
                 payload = collector(term, profile["market"], 50)
         except Exception:
             calls_used = next_call
-            warning = "검색 요청이 실패했습니다. 예산에서 호출 1회를 사용한 것으로 기록했으며 자동 재시도하지 않았습니다. 필요하면 저장된 조사에서 이어가세요."
+            failure = "검색 요청이 실패했습니다. 예산에서 호출 1회를 사용한 것으로 기록했으며 자동 재시도하지 않았습니다. 필요하면 저장된 조사에서 이어가세요."
+            warning = (warning + " " + failure).strip()
+            search_failed = True
             store.checkpoint_research_session(session_id, profile_id, state="paused", query_index=query_index,
                 page_token=page_token, calls_used=calls_used, duplicate_count=duplicate_count,
                 candidates=list(candidates.values()), processed=sorted(processed),
@@ -793,7 +815,7 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
                 "human_reviewed_count": sum(1 for item in store.list_genre_audit(profile_id, labeled=True, path=path)),
                 "uncertain_count": sum(1 for item in reviews if item.final_verdict == genres.REVIEW),
                 "profile_id": profile_id})
-    state = "cancelled" if cancel_event.is_set() else "paused" if pause_event.is_set() or warning else "complete"
+    state = "cancelled" if cancel_event.is_set() else "paused" if pause_event.is_set() or search_failed else "complete"
     store.checkpoint_research_session(session_id, profile_id, state=state, query_index=query_index,
         page_token=page_token, calls_used=calls_used, duplicate_count=duplicate_count,
         candidates=list(candidates.values()), processed=sorted(processed),
