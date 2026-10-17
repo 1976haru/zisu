@@ -3,6 +3,7 @@ import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from mcrs import oauth, store
 from mcrs.credential_store import CredentialStore
@@ -111,8 +112,16 @@ class OAuthManagementTests(unittest.TestCase):
         error=oauth._oauth_failure(OAuthFailure(),"callback")
         self.assertEqual("test_user_required",error.code)
         self.assertNotIn("secret",str(error))
+        class DeniedFailure(Exception): error="access_denied"; description="user canceled consent"
+        self.assertEqual("access_denied",oauth._oauth_failure(DeniedFailure(),"callback").code)
         class RedirectFailure(Exception): error="redirect_uri_mismatch"; description="full callback URL secret"
         self.assertEqual("redirect_uri_mismatch",oauth._oauth_failure(RedirectFailure(),"callback").code)
+        class ClientFailure(Exception): error="invalid_client"; description="client secret must stay private"
+        self.assertEqual("invalid_client",oauth._oauth_failure(ClientFailure(),"callback").code)
+        api_error=HTTPError("https://private.invalid",403,"private body",{},None)
+        self.assertEqual("api_permission",oauth._oauth_failure(api_error,"youtube_api").code)
+        api_error.close()
+        self.assertEqual("token_storage",oauth._oauth_failure(PermissionError("private path"),"token_storage").code)
         self.assertEqual("local_callback",oauth._oauth_failure(ConnectionRefusedError(),"oauth_callback").code)
         self.assertEqual("network_timeout",oauth._oauth_failure(TimeoutError(),"oauth_callback").code)
 

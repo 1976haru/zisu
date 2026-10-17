@@ -91,6 +91,8 @@ def _oauth_failure(exc, stage):
         return OAuthError(code="token_storage", stage=stage)
     if isinstance(exc, (TimeoutError,)):
         return OAuthError(code="network_timeout", stage=stage)
+    if isinstance(exc, HTTPError) and stage == "youtube_api":
+        return OAuthError(code="api_permission", stage=stage)
     if isinstance(exc, URLError):
         reason = getattr(exc, "reason", None)
         if isinstance(reason, TimeoutError):
@@ -98,8 +100,6 @@ def _oauth_failure(exc, stage):
         if stage == "oauth_callback":
             return OAuthError(code="local_callback", stage=stage)
         return OAuthError(code="unknown", stage=stage)
-    if isinstance(exc, HTTPError) and stage == "youtube_api":
-        return OAuthError(code="api_permission", stage=stage)
     if isinstance(exc, OSError) and stage == "oauth_callback":
         return OAuthError(code="local_callback", stage=stage)
     return OAuthError(code="unknown", stage=stage)
