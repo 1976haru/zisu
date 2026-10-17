@@ -30,11 +30,22 @@ def write_stage(stage: str, **details) -> None:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         **details,
     }
+    try:
+        origin = int(os.environ["ZISU_EXE_SMOKE_START_COUNTER"])
+        frequency = int(os.environ["ZISU_EXE_SMOKE_COUNTER_FREQUENCY"])
+        if frequency > 0:
+            origin_ns = origin * 1_000_000_000 // frequency
+            event["launch_elapsed_ms"] = round(
+                (time.perf_counter_ns() - origin_ns) / 1_000_000, 1
+            )
+    except (KeyError, ValueError):
+        pass
     _EVENTS.append(event)
     payload = {
         "schema": 2,
         "stage": stage,
         "elapsed_ms": event["elapsed_ms"],
+        **({"launch_elapsed_ms": event["launch_elapsed_ms"]} if "launch_elapsed_ms" in event else {}),
         "events": list(_EVENTS),
         **details,
     }

@@ -53,6 +53,8 @@ try {
     $start.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
     $start.EnvironmentVariables['ZISU_DATA_DIR'] = $data
     $start.EnvironmentVariables['ZISU_EXE_SMOKE_REPORT'] = $report
+    $start.EnvironmentVariables['ZISU_EXE_SMOKE_START_COUNTER'] = [string][Diagnostics.Stopwatch]::GetTimestamp()
+    $start.EnvironmentVariables['ZISU_EXE_SMOKE_COUNTER_FREQUENCY'] = [string][Diagnostics.Stopwatch]::Frequency
     $process = [System.Diagnostics.Process]::Start($start)
 
     while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds -and -not $process.HasExited) {
@@ -68,9 +70,7 @@ try {
                 }
                 if ($current.stage -eq 'gui_ready') {
                     $guiEvent = $current.events | Where-Object { $_.stage -eq 'gui_ready' } | Select-Object -Last 1
-                    if ($guiEvent) {
-                        $launchToGuiMs = ([DateTimeOffset]::Parse($guiEvent.timestamp_utc).UtcDateTime - $startedAt.ToUniversalTime()).TotalMilliseconds
-                    }
+                    if ($null -eq $launchToGuiMs -and $guiEvent) { $launchToGuiMs = [double]$guiEvent.launch_elapsed_ms }
                 }
             } catch {
                 # Atomic report replacement can briefly leave a partial read.
@@ -155,10 +155,8 @@ if ($result.python_executable -ne 'ZisuResearchStudio.exe') { throw 'Frozen proc
 $residual = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
 if ($residual.Count -gt 0) { throw "EXE process(es) remained after normal exit: $($residual.Id -join ', ')" }
 $guiEvent = $result.events | Where-Object { $_.stage -eq 'gui_ready' } | Select-Object -Last 1
-if (-not $launchToGuiMs -and $guiEvent) {
-    $launchToGuiMs = ([DateTimeOffset]::Parse($guiEvent.timestamp_utc).UtcDateTime - $startedAt.ToUniversalTime()).TotalMilliseconds
-}
-if (-not $launchToGuiMs) { throw 'GUI-ready wall-clock timing was not captured.' }
+if ($null -eq $launchToGuiMs -and $guiEvent) { $launchToGuiMs = [double]$guiEvent.launch_elapsed_ms }
+if ($null -eq $launchToGuiMs -or $launchToGuiMs -lt 0) { throw 'GUI-ready monotonic timing was not captured.' }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
 [ordered]@{
     exe_smoke = 'PASS'

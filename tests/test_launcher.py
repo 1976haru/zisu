@@ -1,6 +1,7 @@
 import unittest
 import os
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 import main
@@ -20,7 +21,11 @@ class LauncherTests(unittest.TestCase):
     def test_exe_smoke_report_records_timed_startup_events_without_identity(self):
         with WorkspaceTemp() as root:
             report=root/"日本語 startup report.json"
-            with patch.dict(os.environ, {"ZISU_EXE_SMOKE_REPORT": str(report)}):
+            with patch.dict(os.environ, {
+                "ZISU_EXE_SMOKE_REPORT": str(report),
+                "ZISU_EXE_SMOKE_START_COUNTER": str(time.perf_counter_ns()),
+                "ZISU_EXE_SMOKE_COUNTER_FREQUENCY": "1000000000",
+            }):
                 main._write_smoke_report("python_entrypoint")
                 write_stage("database_initialized")
                 payload=json.loads(report.read_text(encoding="utf-8"))
@@ -28,6 +33,7 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(["python_entrypoint","database_initialized"],[e["stage"] for e in payload["events"]])
             self.assertGreaterEqual(payload["elapsed_ms"],0)
             self.assertIn("timestamp_utc",payload["events"][-1])
+            self.assertGreaterEqual(payload["events"][-1]["launch_elapsed_ms"],0)
             self.assertNotIn("email",payload)
             self.assertNotIn("token",report.read_text(encoding="utf-8").lower())
     def test_launcher_and_diagnostics_are_present(self):
@@ -69,6 +75,7 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("gui_window_detected",smoke)
         self.assertIn("python_removed_from_path",smoke)
         self.assertIn("launch_to_gui_ready_ms",smoke)
+        self.assertIn("ZISU_EXE_SMOKE_START_COUNTER",smoke)
         self.assertIn("EXE process(es) remained",smoke)
         self.assertIn("_internal",package)
         self.assertIn("Refusing to overwrite existing package",package)
