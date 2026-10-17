@@ -32,7 +32,7 @@ try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     if (-not $ZipManifestPath) { $ZipManifestPath = Join-Path (Split-Path -Parent $PackageZip) 'RELEASE_SHA256SUMS.txt' }
     if (-not $ExpectedZipSha256 -and (Test-Path -LiteralPath $ZipManifestPath -PathType Leaf)) {
-        $manifestLine = Get-Content -LiteralPath $ZipManifestPath -Encoding ascii | Where-Object { $_ -match 'ZISU-Research-Studio-V4\.5\.1-Windows\.zip$' } | Select-Object -First 1
+        $manifestLine = Get-Content -LiteralPath $ZipManifestPath -Encoding ascii | Where-Object { $_ -match 'ZISU-Research-Studio-V4\.5\.3-Windows\.zip$' } | Select-Object -First 1
         if ($manifestLine -match '^([0-9a-fA-F]{64})\s+') { $ExpectedZipSha256 = $Matches[1].ToLowerInvariant() }
     }
     if (-not $ExpectedZipSha256) { $ExpectedZipSha256 = (Read-Host 'Paste expected ZIP SHA-256 from RELEASE_SHA256SUMS.txt').Trim() }
