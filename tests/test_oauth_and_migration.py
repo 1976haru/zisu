@@ -69,6 +69,7 @@ class OAuthAndMigrationTests(unittest.TestCase):
         captured={}
         class Credentials:
             token="access"
+            scopes=oauth.SCOPES
             def to_json(self): return "{}"
         class Flow:
             @classmethod

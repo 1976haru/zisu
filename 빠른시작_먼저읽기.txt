@@ -1,7 +1,7 @@
-ZISU Research Studio V4.5.3 — Windows first-run guide
+ZISU Research Studio V4.5.6 — Windows first-run guide
 ====================================================
 1. Keep your existing V2.1 installation and data. Do not delete the old database.
-2. Extract the entire V4.5.3 ZIP to a new folder. Keep ZisuResearchStudio.exe beside the complete _internal folder; do not separate or move only the EXE.
+2. Extract the entire V4.5.6 ZIP to a new folder. Keep ZisuResearchStudio.exe beside the complete _internal folder; do not separate or move only the EXE.
 3. The packaged EXE does not require Python or a separate Google OAuth module installation.
 4. Optional offline verification: run 검증하기.cmd from the validation tools. If Windows Sandbox is available, it launches an offline isolated check; otherwise it checks on this PC with Python removed from the child process PATH. That is not proof of a Python-uninstalled PC.
 5. Compare the ZIP hash to RELEASE_SHA256SUMS.txt from the same GitHub Actions artifact. After extraction, compare the EXE hash to SHA256SUMS.txt in the package. Do not run files when hashes differ.

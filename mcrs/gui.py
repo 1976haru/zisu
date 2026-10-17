@@ -20,6 +20,7 @@ from .youtube_api import lookup_videos, APIError
 from . import oauth
 from . import ai_research
 from .credential_store import CredentialStore, CredentialError
+from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
@@ -118,7 +119,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.5.5 · AI 보조 장르 안전 조사")
+        self.title("ZISU Research Studio V4.5.6 · AI 보조 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -135,7 +136,12 @@ class Studio(tk.Tk):
         self.profiles=[]
         self.active_id=None
         self.profile_choice=tk.StringVar()
-        self.api_key=tk.StringVar(value=os.environ.get("YOUTUBE_API_KEY",""))
+        self.credential_store=CredentialStore()
+        try:
+            saved_youtube_key=self.credential_store.load("youtube-data") or ""
+        except CredentialError:
+            saved_youtube_key=""
+        self.api_key=tk.StringVar(value=os.environ.get("YOUTUBE_API_KEY","") or saved_youtube_key)
         self.search_status=tk.StringVar(value="장르를 선택한 후 검색을 시작하세요.")
         self.active_account_banner=tk.StringVar(value="현재 작업 계정을 확인하세요.")
         self.filter=tk.StringVar()
@@ -146,6 +152,10 @@ class Studio(tk.Tk):
         self.timer_text=tk.StringVar(value="감상 타이머 대기")
         self.footer=tk.StringVar(value="Google OAuth 조회 전용 · 비밀번호 수집 안 함 · 연결 토큰은 로컬 PC에만 저장")
         self.oauth_client_file=tk.StringVar(value="")
+        self.oauth_registry=OAuthClientRegistry()
+        self.oauth_client_choice=tk.StringVar(value="")
+        self.oauth_client_ids={}
+        self.oauth_accounts_summary=tk.StringVar(value="연결된 Google 계정 없음")
         self.oauth_status=tk.StringVar(value="계정 상태 확인 중...")
         self.oauth_busy=False
         self.search_inflight=False
@@ -181,7 +191,7 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.5.5",
+            "app_version": "4.5.6",
             "gui_initialized": len(self.frames) == 7 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -327,25 +337,31 @@ class Studio(tk.Tk):
         panel.grid(row=2,column=0,sticky="ew",pady=14)
         panel.columnconfigure(0,weight=1)
         ttk.Label(panel,textvariable=self.oauth_status,font=("Malgun Gothic",12,"bold"),wraplength=950).grid(row=0,column=0,columnspan=3,sticky="w",pady=(0,13))
-        ttk.Button(panel,text="1. Google Cloud OAuth JSON 선택",command=self.choose_client_file).grid(row=1,column=0,sticky="w",pady=6)
-        ttk.Button(panel,text="2. 새 계정으로 Google 로그인 및 연결",command=self.connect_google,
+        ttk.Button(panel,text="OAuth 클라이언트 등록 (최초 1회)",command=self.register_oauth_client).grid(row=1,column=0,sticky="w",pady=6)
+        ttk.Button(panel,text="기존 JSON 파일 경로 사용",command=self.choose_client_file).grid(row=1,column=1,sticky="w",pady=6,padx=8)
+        self.oauth_client_combo=ttk.Combobox(panel,textvariable=self.oauth_client_choice,state="readonly",width=38)
+        self.oauth_client_combo.grid(row=1,column=2,sticky="w",pady=6)
+        ttk.Button(panel,text="2. Google 계정 추가 / 연결",command=self.connect_google,
                    style="Accent.TButton").grid(row=2,column=0,sticky="w",pady=6)
         ttk.Button(panel,text="연결 상태 새로고침",command=self.refresh_account_status).grid(row=3,column=0,sticky="w",pady=8)
         ttk.Button(panel,text="선택 프로필 연결 해제",command=self.disconnect_google).grid(row=3,column=1,sticky="w",pady=8,padx=15)
         ttk.Label(panel,textvariable=self.oauth_client_file,wraplength=800,foreground="#697A88").grid(row=4,column=0,columnspan=3,sticky="w",pady=7)
+        ttk.Label(panel,text="프로필별 Google 계정 / 채널 목록 (프로필 전환은 상단 선택기에서)").grid(row=5,column=0,columnspan=3,sticky="w",pady=(8,2))
+        ttk.Label(panel,textvariable=self.oauth_accounts_summary,wraplength=950,justify="left").grid(row=6,column=0,columnspan=3,sticky="w",pady=3)
         ttk.Button(panel,text="Google Cloud 없이 먼저 유튜브 열기 (브라우저 로그인만)",
-                   command=lambda:webbrowser.open("https://www.youtube.com/",new=2)).grid(row=5,column=0,columnspan=3,sticky="w",pady=7)
+                   command=lambda:webbrowser.open("https://www.youtube.com/",new=2)).grid(row=7,column=0,columnspan=3,sticky="w",pady=7)
         ttk.Label(tab,text="연결을 위한 준비 (최초 1회)",font=("Malgun Gothic",12,"bold")).grid(row=3,column=0,sticky="w",pady=(14,7))
         instructions=("① 'OAuth_모듈_설치하기.bat' 더블클릭 (최초 1회)\n"
                       "② Google Cloud에서 YouTube Data API v3 사용 설정\n"
-                      "③ OAuth 동의 화면 및 '데스크톱 앱' OAuth 클라이언트 생성\n"
+                      "③ 보통 Google Cloud 프로젝트 하나와 Desktop OAuth JSON 하나로 여러 Google 계정을 연결할 수 있습니다.\n"
+                      "   JSON은 [OAuth 클라이언트 등록]으로 한 번 등록해 Windows 사용자 DPAPI에 보관하고 재사용할 수 있습니다.\n"
                       "④ 테스트 모드라면 연결할 구글 계정을 테스트 사용자에 추가\n"
-                      "⑤ 클라이언트 JSON을 선택하고 [2. 새 계정으로 로그인] 클릭\n"
-                      "⑥ 브라우저에서 Morning Chill Rap 새 구글 계정 선택 → 이메일·채널명 확인 후 승인\n"
+                      "⑤ 등록된 OAuth 클라이언트를 선택하고 [Google 계정 추가 / 연결]을 클릭\n"
+                      "⑥ 브라우저에서 연결할 Google 계정을 선택 → 이메일·채널 확인 후 승인\n"
                       "    (유튜브 채널을 아직 만들지 않은 조사 전용 구글 계정도 연결 가능)\n\n"
                       "간편 체험: 위 '유튜브 열기'로 새 계정에 로그인하고 웹 검색만 먼저 써도 됩니다.\n"
                       "(브라우저 로그인은 앱의 OAuth 계정 연결과 별개입니다.)\n"
-                      "계정마다 작업 프로필을 추가한 뒤 각각 연결하세요.\n"
+                      "계정별 토큰은 프로필별로 따로 저장됩니다. 같은 계정을 여러 프로필에서 쓸 때도 각각 연결해야 하며 토큰을 자동 복사하지 않습니다.\n"
                       "중요: JP/KR 지역 검색은 해당 지역에서 볼 수 있는 영상을 찾는 것으로, 현지 운영자 인증이 아닙니다.\n"
                       "계정 연결은 유튜브 홈 추천, 접속 IP, 시청자 지역을 변경하지 않습니다.\n"
                       "댓글·좋아요·구독·영상 자동재생은 실행되지 않습니다.")
@@ -357,12 +373,47 @@ class Studio(tk.Tk):
         row.grid(row=5,column=0,sticky="w",pady=12)
         ttk.Button(row,text="Google Cloud 설정 열기",command=lambda:webbrowser.open("https://console.cloud.google.com/apis/credentials")).pack(side="left",padx=(0,10))
         ttk.Button(row,text="공식 OAuth 안내 열기",command=lambda:webbrowser.open("https://developers.google.com/youtube/v3/guides/auth/installed-apps")).pack(side="left")
+        self._refresh_oauth_clients()
         tab.rowconfigure(4,weight=1)
 
     def choose_client_file(self):
         path=filedialog.askopenfilename(title="Google Cloud '데스크톱 앱' OAuth JSON 선택",filetypes=[("Google OAuth JSON","*.json")])
         if path:
             self.oauth_client_file.set(path)
+
+    def _refresh_oauth_clients(self):
+        if not hasattr(self,"oauth_client_combo"):
+            return
+        try:
+            rows=self.oauth_registry.list_clients()
+        except OAuthClientRegistryError:
+            rows=[]
+        self.oauth_client_ids={row["label"]+" · "+row["id"]:row["id"] for row in rows}
+        values=list(self.oauth_client_ids)
+        self.oauth_client_combo.configure(values=values)
+        if values and self.oauth_client_choice.get() not in values:
+            self.oauth_client_choice.set(values[0])
+        elif not values:
+            self.oauth_client_choice.set("")
+
+    def register_oauth_client(self):
+        path=filedialog.askopenfilename(title="등록할 Desktop OAuth JSON 선택",filetypes=[("Google OAuth JSON","*.json")])
+        if not path:
+            return
+        if not messagebox.askyesno("OAuth 클라이언트 저장 승인",
+                "선택한 Desktop OAuth 클라이언트 JSON을 현재 Windows 사용자 전용 DPAPI 저장소에 암호화해 보관합니다.\n"
+                "JSON은 소스 폴더나 Git에 복사되지 않습니다. 등록하시겠습니까?",parent=self):
+            return
+        try:
+            registered=self.oauth_registry.register_file(path,approved=True)
+            self._refresh_oauth_clients()
+            for label,ident in self.oauth_client_ids.items():
+                if ident==registered["id"]:
+                    self.oauth_client_choice.set(label)
+            self.oauth_client_file.set("보안 저장된 공통 OAuth 클라이언트: "+registered["label"])
+            messagebox.showinfo("등록 완료","이 OAuth 클라이언트를 여러 Google 계정 연결에 재사용할 수 있습니다. 계정별 토큰은 프로필마다 따로 저장됩니다.",parent=self)
+        except OAuthClientRegistryError as exc:
+            messagebox.showerror("등록 실패",str(exc),parent=self)
 
     def refresh_account_status(self):
         if not self.active_id or not hasattr(self,'oauth_status'):return
@@ -376,13 +427,27 @@ class Studio(tk.Tk):
         else:
             self.oauth_status.set("미연결: " + profile['name'] + " · " + profile['market']
                 + " · " + GENRES[profile['genre']].title)
+        accounts=[]
+        for item in store.list_profiles():
+            if oauth.is_connected(item["id"]):
+                accounts.append(f"{item['name']} — {item.get('connected_email') or '이메일 확인 안 됨'} — {item.get('youtube_channel_title') or '채널명 없음'}")
+        self.oauth_accounts_summary.set("\n".join(accounts) if accounts else "연결된 Google 계정 없음 · 프로필을 선택하고 Google 계정 추가 / 연결을 누르세요.")
 
     def connect_google(self):
         if self.oauth_busy:return
         profile=store.get_profile(self.active_id)
         if not profile:return
         client_file=self.oauth_client_file.get().strip()
-        if not client_file:
+        selected_label=self.oauth_client_choice.get()
+        selected_id=self.oauth_client_ids.get(selected_label)
+        client_config=None
+        if selected_id:
+            try:
+                client_config=self.oauth_registry.load_config(selected_id)
+            except OAuthClientRegistryError as exc:
+                messagebox.showerror("OAuth 클라이언트 확인",str(exc),parent=self)
+                return
+        if not client_config and (not client_file or not Path(client_file).is_file()):
             messagebox.showinfo("준비 필요","먼저 Google Cloud 데스크톱 앱 OAuth JSON을 선택하세요.")
             return
         profile_id=profile['id']
@@ -390,12 +455,12 @@ class Studio(tk.Tk):
         self.oauth_status.set("브라우저에서 Google 로그인 중... 새 계정을 직접 선택하세요.")
         def worker():
             try:
-                channels,token_json=oauth.begin_connect(client_file)
+                channels,token_json=oauth.begin_connect(client_file or None,client_config=client_config)
                 error=None
             except oauth.OAuthError as exc:
-                channels,token_json,error=[],None,str(exc)
+                channels,token_json,error=[],None,f"[{exc.code} / {exc.stage}] {exc}"
             except Exception as exc:
-                channels,token_json,error=[],None,type(exc).__name__
+                channels,token_json,error=[],None,"[unknown / oauth_callback] Google 인증을 완료하지 못했습니다. 민감한 진단 정보는 표시하지 않았습니다."
             def finish():
                 self.oauth_busy=False
                 if error:
@@ -415,8 +480,24 @@ class Studio(tk.Tk):
                     +chosen['channel_title']+"\n"+(chosen['email'] or '(이메일 확인 안 됨)')+"\n"+(chosen['channel_id'] or '(조사용 Google 계정)')
                     +"\n\n다른 계정이면 취소 후 새 계정으로 다시 로그인하세요."):
                     return
+                existing=store.get_profile(profile_id) or {}
+                identity_changed=(
+                    (existing.get("connected_email") and chosen.get("email") and
+                     existing["connected_email"].casefold()!=chosen["email"].casefold()) or
+                    (existing.get("youtube_channel_id") and
+                     existing.get("youtube_channel_id")!=chosen.get("channel_id",""))
+                )
+                allow_account_change=False
+                if identity_changed:
+                    allow_account_change=messagebox.askyesno(
+                        "연결 계정 변경 확인",
+                        "이 프로필은 이미 다른 Google 계정 또는 YouTube 채널에 연결되어 있습니다.\n"
+                        "기존 후보·메모·사람 검토·성과 데이터는 유지하고, 이 프로필의 인증 연결만 새 계정으로 바꿀까요?",
+                        parent=self)
+                    if not allow_account_change:
+                        return
                 try:
-                    oauth.save_connection(profile_id,chosen,token_json)
+                    oauth.save_connection(profile_id,chosen,token_json,allow_account_change=allow_account_change)
                     self.reload_profiles(profile_id)
                     self.tabs.select(self.frames[1])
                     messagebox.showinfo("연결 성공","읽기 전용으로 계정이 연결되었습니다. 이제 장르별 검색을 시작하세요.")
@@ -436,13 +517,32 @@ class Studio(tk.Tk):
         except (OSError,ValueError) as exc:
             messagebox.showerror("연결 해제 실패",str(exc))
 
+    def _save_youtube_key(self):
+        key=self.api_key.get().strip()
+        try:
+            self.credential_store.save("youtube-data",key)
+            messagebox.showinfo("저장 완료","공개 YouTube Data API 키를 현재 Windows 사용자 DPAPI로 암호화해 저장했습니다. 키는 화면에 다시 표시하지 않습니다.",parent=self)
+        except CredentialError as exc:
+            self.api_key.set("")
+            messagebox.showwarning("안전 저장 실패",str(exc),parent=self)
+
+    def _delete_youtube_key(self):
+        try:
+            self.credential_store.delete("youtube-data")
+            self.api_key.set("")
+            messagebox.showinfo("삭제 완료","저장된 공개 YouTube API 키를 삭제했습니다. Google OAuth 토큰은 변경하지 않았습니다.",parent=self)
+        except CredentialError as exc:
+            messagebox.showwarning("삭제 실패",str(exc),parent=self)
+
     def _search_ui(self,tab):
         tab.columnconfigure(0,weight=1)
         tab.rowconfigure(3,weight=1)
         panel=ttk.Frame(tab)
         panel.grid(row=0,column=0,sticky="ew",pady=8)
-        ttk.Label(panel,text="추가 API 키 (선택 · 연결 계정만으로도 검색 가능)").pack(side="left")
+        ttk.Label(panel,text="공개 영상 검색용 YouTube API 키 (OAuth 계정 연결과 별도)").pack(side="left")
         ttk.Entry(panel,textvariable=self.api_key,width=40,show="●").pack(side="left",padx=10)
+        ttk.Button(panel,text="현재 키 DPAPI 저장",command=self._save_youtube_key).pack(side="left",padx=3)
+        ttk.Button(panel,text="저장 키 삭제",command=self._delete_youtube_key).pack(side="left",padx=3)
         ttk.Label(panel,text="연결 계정은 읽기 전용 · 계정이 없으면 웹 검색 가능").pack(side="left")
         ttk.Label(tab,textvariable=self.active_account_banner,font=("Malgun Gothic",11,"bold"),
                   foreground="#9A3412",wraplength=1100).grid(row=1,column=0,sticky="w",pady=(4,1))

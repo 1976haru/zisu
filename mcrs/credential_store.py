@@ -74,15 +74,17 @@ class WindowsDPAPI:
 class CredentialStore:
     def __init__(self, directory: str | Path | None = None, protector=None):
         if directory is None:
-            root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share")
-            directory = root / "ZisuResearchStudio" / "provider_credentials"
+            from .store import data_dir
+            directory = data_dir() / "provider_credentials"
         self.directory = Path(directory)
         self.protector = protector or WindowsDPAPI()
 
     @staticmethod
     def _provider(provider: str) -> str:
-        if provider not in _PROVIDERS:
-            raise CredentialError("지원하지 않는 AI 공급자입니다.")
+        # OAuth client JSON and public YouTube API keys reuse the existing
+        # per-user DPAPI vault without changing the separate OAuth token files.
+        if provider not in _PROVIDERS | {"youtube-data"}:
+            raise CredentialError("지원하지 않는 보안 저장 항목입니다.")
         return provider
 
     def _path(self, provider: str) -> Path:

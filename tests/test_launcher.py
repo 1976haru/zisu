@@ -64,21 +64,21 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
-        self.assertIn("V4.5.5-Windows.zip",workflow)
+        self.assertIn("V4.5.6-Windows.zip",workflow)
         self.assertIn("validate_windows_release.ps1",workflow)
         self.assertIn("create_windows_sandbox_config.ps1",workflow)
-    def test_v455_version_is_consistent_across_runtime_and_release_paths(self):
+    def test_v456_version_is_consistent_across_runtime_and_release_paths(self):
         gui=(ROOT/"mcrs/gui.py").read_text(encoding="utf-8")
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
         workflow=(ROOT/".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         launcher=(ROOT/"ZISU_바로실행.cmd").read_text(encoding="utf-8")
-        self.assertIn("V4.5.5",gui)
-        self.assertIn('"app_version": "4.5.5"',gui)
-        self.assertIn("V4.5.5-Windows.zip",package)
-        self.assertIn("V4.5.5-Windows.zip",workflow)
-        self.assertIn("V4.5.5",launcher)
+        self.assertIn("V4.5.6",gui)
+        self.assertIn('"app_version": "4.5.6"',gui)
+        self.assertIn("V4.5.6-Windows.zip",package)
+        self.assertIn("V4.5.6-Windows.zip",workflow)
+        self.assertIn("V4.5.6",launcher)
         for contents in (gui,package,workflow,launcher):
-            self.assertNotIn("V4.5.4",contents)
+            self.assertNotIn("V4.5.5",contents)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):
         smoke=(ROOT/"scripts/windows_exe_smoke.ps1").read_text(encoding="utf-8")
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
@@ -107,7 +107,7 @@ class LauncherTests(unittest.TestCase):
         command=(ROOT/"검증하기.cmd").read_text(encoding="utf-8")
         for marker in ("Get-FileHash", "RELEASE_SHA256SUMS.txt", "SHA256SUMS.txt", "_internal", "fresh-path", "profile_create_switch_isolation", "network_oauth", "ZISU Validation 한글_日本語"):
             self.assertIn(marker,validator)
-        self.assertIn("ZISU-Research-Studio-V4\\.5\\.3-Windows\\.zip$",validator)
+        self.assertIn("ZISU-Research-Studio-V4\\.5\\.6-Windows\\.zip$",validator)
         self.assertIn("WindowsSandbox.exe",sandbox)
         self.assertIn("<Networking>Disable</Networking>",sandbox)
         self.assertIn("validate_windows_release.ps1",command)

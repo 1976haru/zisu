@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 import json
 from contextlib import contextmanager, closing
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess
 
@@ -438,7 +438,9 @@ def reserve_ai_usage(profile_id, provider, model, session_id="", *,
         db.execute("BEGIN IMMEDIATE")
         if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
             raise ValueError("조사 프로필을 확인하세요.")
-        day = datetime.now().strftime("%Y-%m-%d")
+        # SQLite CURRENT_TIMESTAMP stores UTC. Use the same calendar basis for
+        # daily request/cost limits or UTC/local midnight can bypass the cap.
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         daily = db.execute("SELECT COUNT(*) FROM ai_usage WHERE profile_id=? AND provider=? AND created_at LIKE ?",
                            (profile_id, provider, day + "%")).fetchone()[0]
         job = db.execute("SELECT COUNT(*) FROM ai_usage WHERE profile_id=? AND provider=? AND session_id=?",
@@ -465,7 +467,7 @@ def ai_usage_summary(profile_id, path=None):
     with connect(path) as db:
         rows = db.execute("SELECT provider,COUNT(*) AS requests,SUM(CASE WHEN provider IN ('openai','gemini') AND cost_estimate IS NULL THEN 1 ELSE 0 END) AS unknown_cost "
                           "FROM ai_usage WHERE profile_id=? AND created_at LIKE ? GROUP BY provider",
-                          (profile_id, datetime.now().strftime("%Y-%m-%d") + "%")).fetchall()
+                          (profile_id, datetime.now(timezone.utc).strftime("%Y-%m-%d") + "%")).fetchall()
         return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
 
 def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash=""):

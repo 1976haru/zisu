@@ -19,6 +19,11 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"ai_gemini_test_button")
     assert hasattr(app,"ai_gemini_models_button")
     assert hasattr(app,"ai_gemini_model_combo")
+    assert hasattr(app,"oauth_client_combo")
+    assert hasattr(app,"oauth_accounts_summary")
+    assert callable(app.register_oauth_client)
+    assert callable(app._save_youtube_key)
+    assert "readonly" in app.oauth_client_combo.state()
     with patch.object(ProfileDialog,"wait_window",lambda self: None):
         dialog=ProfileDialog(app)
         assert {key for key,var in dialog.related_vars.items() if var.get()} == {"CHILL_RAP","RNB_HIPHOP","CAFE_CHILL"}

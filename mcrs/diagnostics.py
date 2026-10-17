@@ -22,7 +22,7 @@ def _module_available(name):
 def collect(database=None):
     target = Path(database or db_path())
     report = {
-        "app_version": "4.5.4",
+        "app_version": "4.5.6",
         "python": platform.python_version(),
         "platform": platform.platform(),
         "frozen_executable": bool(getattr(sys, "frozen", False)),
