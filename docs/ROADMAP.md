@@ -1,0 +1,36 @@
+# ZISU V3 로드맵 / 상태 보고 (2026-10-17)
+
+## V4 통합 작업 기록 (2026-10-17)
+
+- 안전 백업: V3 소스와 `%LOCALAPPDATA%\ZisuResearchStudio\zisu_v2.db`를
+  `_local_backups/`에 복사하고 SHA-256을 확인했습니다. 이 경로는 Git에서 제외됩니다.
+- 기능 브랜치: `feature/v4-multichannel-onboarding-genre`.
+- 완료: 첫 실행 5단계 안내, 채널 없는 조사 계정 지원, 프로필별 OAuth 토큰 경로,
+  6개 장르 KR/JP 독립 검색어, 인접 장르 검토 보류, V2 사본 마이그레이션 보존.
+- 자동화 검증: 28개 단위 테스트 통과, Windows Tkinter GUI 스모크 통과,
+  실제 V2 DB 백업 사본의 행 수 보존 확인.
+- 미검증: 실제 Google OAuth, 실제 KR/JP 영상 표본 정밀도, Python 미설치 PC의 V4 EXE.
+- 빌드 차단: 현재 로컬 Python 3.14 환경에 PyInstaller가 설치되어 있지 않습니다.
+
+## 정의
+- **프로젝트 전체 진행률 = 추정치**. 점수처럼 표시해도 시험 완료를 뜻하지 않음.
+- **검증된 완료**: 단위 테스트와 GUI smoke 성공, SQLite 이전버전 마이그레이션 테스트, OAuth 가짜 응답 테스트.
+- **검증 안 됨**: 실제 Morning Chill Google 계정 OAuth 승인·YouTube API 호출, Windows 10/11 PC 구동 및 EXE 빌드, 친구 대상 설치 테스트.
+
+## 단계와 우선순위
+1. P0 사용자 PC에서 V3 GUI 및 기존 DB 업데이트 후 백업 검증
+2. P0 실제 새 Morning Chill Google 계정: Cloud desktop client 설정, OAuth 연결, Google 인증된 이메일 확인, API 검색 성공
+3. P0 여러 Google 계정 / JP-KR 동시 운영 시험; 연결 해제, 재인증, 토큰 갱신 경계 테스트
+4. P0 일본/한국 실제 영상 100~200건 기반 장르 오판정 점검, 필터 개선 (장르 혼합 방지 최우선)
+5. P1 GitHub `1976haru/zisu` 기능 브랜치로 소스 동기화, 코드 리뷰 및 CI 실행
+6. P1 Windows 11 EXE 빌드 및 초보 사용자 2명 이상 사용성 테스트
+7. P1 사용자 친화형 Google Cloud OAuth 설정/오류 처리 간소화, 도움말·백업 복원 기능 개선
+8. P2 YouTube Analytics API 읽기 전용 연동으로 JP/KR 조회수와 실제 유입 자동 분석 (추가 API/Scope 필요)
+9. P2 검색 예약 독립 서비스화, 종료 상태에서도 예약 실행(Windows 작업 스케줄러)
+
+## 차단/제외
+- 조회수 부풀리기를 위한 자동·반복 재생, 무인 댓글·좋아요·구독 매크로는 YouTube 참여 조작 정책상 구현 대상 아님.
+- 개인 추천 홈피드 재현은 YouTube Data API에 동일 기능이 없으며 API 읽기 권한만으로 만들 수 없음.
+
+## 보고 형식
+모든 개발 보고에 전체 프로젝트 진행률(추정·검증 구분) / 지금 작업 중 / 완료 검증 / 남은 P0·P1·P2 / 다음 행동 한 개를 포함.
