@@ -14,6 +14,12 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual("report.json",os.environ["ZISU_EXE_SMOKE_REPORT"])
             with self.assertRaises(SystemExit):
                 main._apply_offline_smoke_arguments(["--data-dir"])
+    def test_exe_smoke_report_marks_startup_stages_without_extra_identity(self):
+        with patch.dict(os.environ, {"ZISU_EXE_SMOKE_REPORT": str(ROOT/".test_tmp"/"launcher-report.json")}):
+            main._write_smoke_report("bootstrap_started")
+            report=Path(os.environ["ZISU_EXE_SMOKE_REPORT"])
+            self.assertEqual("bootstrap_started",__import__("json").loads(report.read_text(encoding="utf-8"))["stage"])
+            report.unlink()
     def test_launcher_and_diagnostics_are_present(self):
         for f in ("실행하기.bat","START_ZISU.cmd","오류진단하기.bat","설치안내_문제해결.html","main.py","mcrs/gui.py"):
             self.assertTrue((ROOT/f).exists(),f)
@@ -39,6 +45,7 @@ class LauncherTests(unittest.TestCase):
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
         self.assertIn("--offline-smoke-report",smoke)
         self.assertIn("--data-dir",smoke)
+        self.assertIn("last diagnostic stage",smoke)
         self.assertIn("python_removed_from_path",smoke)
         for marker in ("client_secret","oauth_tokens","token\\.json","\\.db$","\\.log$"):
             self.assertIn(marker,package)

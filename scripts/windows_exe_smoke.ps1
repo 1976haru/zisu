@@ -16,14 +16,19 @@ try {
     # Keep only Windows runtime paths. This checks that the EXE does not launch
     # python.exe or import project sources from the runner PATH.
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-    $arguments = @(
-        '--data-dir', ('"{0}"' -f $data),
-        '--offline-smoke-report', ('"{0}"' -f $report)
-    )
-    $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $exe
+    $start.Arguments = '--data-dir "{0}" --offline-smoke-report "{1}"' -f $data, $report
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::Start($start)
     if (-not $process.WaitForExit(30000)) {
         Stop-Process -Id $process.Id -Force
-        throw 'EXE did not close itself within 30 seconds.'
+        $stage = 'no report'
+        if (Test-Path -LiteralPath $report) {
+            $stage = (Get-Content -LiteralPath $report -Raw -Encoding utf8 | ConvertFrom-Json).stage
+        }
+        throw "EXE did not close itself within 30 seconds (last diagnostic stage: $stage)."
     }
     if ($process.ExitCode -ne 0) {
         throw "EXE returned exit code $($process.ExitCode)."

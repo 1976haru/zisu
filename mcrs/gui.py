@@ -148,6 +148,7 @@ class Studio(tk.Tk):
         payload = {
             "schema": 1,
             "app_version": "4.4",
+            "stage": "completed",
             "gui_initialized": len(self.frames) == 6 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
