@@ -12,15 +12,15 @@ $report = Join-Path $root 'exe-smoke-report.json'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
 $oldPath = $env:PATH
-$oldData = $env:ZISU_DATA_DIR
-$oldReport = $env:ZISU_EXE_SMOKE_REPORT
 try {
     # Keep only Windows runtime paths. This checks that the EXE does not launch
     # python.exe or import project sources from the runner PATH.
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-    $env:ZISU_DATA_DIR = $data
-    $env:ZISU_EXE_SMOKE_REPORT = $report
-    $process = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+    $arguments = @(
+        '--data-dir', ('"{0}"' -f $data),
+        '--offline-smoke-report', ('"{0}"' -f $report)
+    )
+    $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru -WindowStyle Hidden
     if (-not $process.WaitForExit(30000)) {
         Stop-Process -Id $process.Id -Force
         throw 'EXE did not close itself within 30 seconds.'
@@ -30,8 +30,6 @@ try {
     }
 } finally {
     $env:PATH = $oldPath
-    $env:ZISU_DATA_DIR = $oldData
-    $env:ZISU_EXE_SMOKE_REPORT = $oldReport
 }
 
 if (-not (Test-Path -LiteralPath $report)) { throw 'EXE smoke report was not created.' }
