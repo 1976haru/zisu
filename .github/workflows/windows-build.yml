@@ -96,6 +96,15 @@ jobs:
           $dirBytes = ($dirFiles | Measure-Object Length -Sum).Sum
           $zipBytes = (Get-Item dist/release/ZISU-Research-Studio-V4.5.1-Windows.zip).Length
           Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY "## EXE startup comparison`n`n- Onefile GUI ready average/min/max: $([math]::Round($oneTime.Average)) / $([math]::Round($oneTime.Minimum)) / $([math]::Round($oneTime.Maximum)) ms; EXE: $($oneExe.Length) bytes`n- Onedir GUI ready average/min/max: $([math]::Round($dirTime.Average)) / $([math]::Round($dirTime.Minimum)) / $([math]::Round($dirTime.Maximum)) ms; EXE+runtime: $dirBytes bytes; release ZIP: $zipBytes bytes`n- Measurements: 3 fresh-path and 3 warm-process launches per layout (plus one warm-up); OS: $($onedir.fresh_path_launches[0].os.product_name), build $($onedir.fresh_path_launches[0].os.os_build). OS file cache was not flushed.`n"
+      - name: Upload isolated EXE startup failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exe-startup-failure-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/zisu-*-fresh-run-*/exe-smoke-failure.json
+            ${{ runner.temp }}/zisu-*-fresh-run-*/exe-smoke-report.json
+          if-no-files-found: ignore
       - name: Upload Windows release package
         uses: actions/upload-artifact@v7
         with:
