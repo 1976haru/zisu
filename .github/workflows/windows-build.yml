@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           $target = Join-Path $env:RUNNER_TEMP 'ZISU 배포 日本語 path'
-          Expand-Archive -LiteralPath dist/release/ZISU-Research-Studio-V4.5.0-Windows.zip -DestinationPath $target
+          Expand-Archive -LiteralPath dist/release/ZISU-Research-Studio-V4.5.1-Windows.zip -DestinationPath $target
           $expected = (Get-Content -LiteralPath (Join-Path $target 'SHA256SUMS.txt') -Raw).Trim().Split(' ')[0]
           $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $target 'ZisuResearchStudio.exe')).Hash.ToLowerInvariant()
           if ($expected -ne $actual) { throw 'Packaged EXE hash mismatch.' }
@@ -94,7 +94,7 @@ jobs:
           $dirTime = ($onedir.fresh_path_launches + $onedir.warm_process_launches | Measure-Object launch_to_gui_ready_ms -Average -Minimum -Maximum)
           $dirFiles = @(Get-Item (Join-Path $target 'ZisuResearchStudio.exe')) + @(Get-ChildItem -LiteralPath (Join-Path $target '_internal') -File -Recurse)
           $dirBytes = ($dirFiles | Measure-Object Length -Sum).Sum
-          $zipBytes = (Get-Item dist/release/ZISU-Research-Studio-V4.5.0-Windows.zip).Length
+          $zipBytes = (Get-Item dist/release/ZISU-Research-Studio-V4.5.1-Windows.zip).Length
           Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY "## EXE startup comparison`n`n- Onefile GUI ready average/min/max: $([math]::Round($oneTime.Average)) / $([math]::Round($oneTime.Minimum)) / $([math]::Round($oneTime.Maximum)) ms; EXE: $($oneExe.Length) bytes`n- Onedir GUI ready average/min/max: $([math]::Round($dirTime.Average)) / $([math]::Round($dirTime.Minimum)) / $([math]::Round($dirTime.Maximum)) ms; EXE+runtime: $dirBytes bytes; release ZIP: $zipBytes bytes`n- Measurements: 3 fresh-path and 3 warm-process launches per layout (plus one warm-up); OS: $($onedir.fresh_path_launches[0].os.product_name), build $($onedir.fresh_path_launches[0].os.os_build). OS file cache was not flushed.`n"
       - name: Upload Windows release package
         uses: actions/upload-artifact@v7
@@ -103,7 +103,7 @@ jobs:
           path: |
             dist/onedir/ZisuResearchStudio/**
             dist/SHA256SUMS.txt
-            dist/release/ZISU-Research-Studio-V4.5.0-Windows.zip
+            dist/release/ZISU-Research-Studio-V4.5.1-Windows.zip
             dist/release/RELEASE_SHA256SUMS.txt
             scripts/windows_exe_smoke.ps1
             scripts/validate_windows_release.ps1

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from http.client import IncompleteRead
 import json
-import os
 import time
 import threading
 import csv
@@ -18,8 +18,28 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import genres, store
+from .credential_store import CredentialStore, CredentialError
 
 PROMPT_VERSION = "genre-review-v1"
+MAX_PROVIDER_RESPONSE = 64_000
+PROVIDER_ERROR_MESSAGES = {
+    "missing_key": "API 키가 등록되지 않았습니다. 키 설정을 확인하거나 규칙 전용 모드를 사용하세요.",
+    "auth": "공급자 인증에 실패했습니다. 키 권한과 공급자 설정을 확인하세요.",
+    "rate_limit": "공급자 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요.",
+    "server": "공급자 서버에 일시적인 문제가 있습니다. 규칙 판정은 유지됩니다.",
+    "timeout": "공급자 응답 시간이 초과되었습니다. 연결을 확인하고 다시 시도하세요.",
+    "network": "공급자에 연결하지 못했습니다. 네트워크를 확인하세요.",
+    "bad_response": "공급자 응답 형식이 올바르지 않아 검토로 남겼습니다.",
+    "budget": "AI 요청 한도에 도달했습니다. 규칙 엔진 결과는 계속 사용할 수 있습니다.",
+    "consent": "유료 외부 AI 호출은 기본 차단되어 있습니다. 비용 상한 승인을 확인하세요.",
+    "unknown": "AI 검토에 실패했습니다. 규칙 판정을 유지하고 직접 확인하세요.",
+}
+
+
+class ProviderFailure(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code if code in PROVIDER_ERROR_MESSAGES else "unknown"
+        super().__init__(PROVIDER_ERROR_MESSAGES[self.code])
 MAX_TITLE = 500
 MAX_DESCRIPTION = 1500
 AI_JSON_SCHEMA = {
@@ -110,18 +130,31 @@ class JsonHttpProvider:
                           headers={"Content-Type": "application/json", **headers}, method="POST")
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read(64_000)
+                raw = response.read(MAX_PROVIDER_RESPONSE + 1)
+            if len(raw) > MAX_PROVIDER_RESPONSE:
+                raise ProviderFailure("bad_response")
             result = json.loads(raw.decode("utf-8"))
         except HTTPError as exc:
-            if exc.code == 429:
-                raise RuntimeError("AI 공급자 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요.") from exc
-            raise RuntimeError(f"AI 공급자 HTTP 오류 ({exc.code})") from exc
-        except (URLError, TimeoutError) as exc:
-            raise RuntimeError("AI 공급자에 연결할 수 없거나 응답 시간이 초과됐습니다.") from exc
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("AI 공급자가 올바른 JSON을 반환하지 않았습니다.") from exc
+            status = exc.code
+            try:
+                exc.close()
+            except OSError:
+                pass
+            if status == 429: raise ProviderFailure("rate_limit") from None
+            if status in (401, 403): raise ProviderFailure("auth") from None
+            if 500 <= status <= 599: raise ProviderFailure("server") from None
+            raise ProviderFailure("bad_response") from None
+        except TimeoutError:
+            raise ProviderFailure("timeout") from None
+        except URLError as exc:
+            if isinstance(exc.reason, TimeoutError): raise ProviderFailure("timeout") from None
+            raise ProviderFailure("network") from None
+        except (IncompleteRead, ConnectionError, OSError):
+            raise ProviderFailure("network") from None
+        except (UnicodeError, json.JSONDecodeError):
+            raise ProviderFailure("bad_response") from None
         if not isinstance(result, dict):
-            raise RuntimeError("AI 응답 형식이 올바르지 않습니다.")
+            raise ProviderFailure("bad_response")
         return result
 
     @staticmethod
@@ -136,59 +169,77 @@ class JsonHttpProvider:
 
     def _decode(self, text: str) -> AIOpinion:
         if not isinstance(text, str) or len(text) > 20_000:
-            raise RuntimeError("AI 응답이 비어 있거나 너무 깁니다.")
+            raise ProviderFailure("bad_response")
         try:
             data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("AI 응답을 JSON으로 해석할 수 없습니다.") from exc
+        except json.JSONDecodeError:
+            raise ProviderFailure("bad_response") from None
         if not isinstance(data, dict):
-            raise RuntimeError("AI 응답 항목이 올바르지 않습니다.")
+            raise ProviderFailure("bad_response")
         required = ("verdict", "positive_signals", "conflict_signals",
                     "evidence_from_metadata", "uncertainty", "recommended_human_check")
         if any(key not in data for key in required):
-            raise RuntimeError("AI 응답에 필수 근거·불확실성 항목이 빠졌습니다.")
+            raise ProviderFailure("bad_response")
         verdict = data.get("verdict")
         if verdict not in (genres.FIT, genres.REVIEW, genres.EXCLUDE):
-            raise RuntimeError("AI 판정 값이 허용 목록과 다릅니다.")
+            raise ProviderFailure("bad_response")
         def items(key: str) -> tuple[str, ...]:
             value = data.get(key, [])
             if not isinstance(value, list) or len(value) > 8 or any(not isinstance(x, str) or len(x) > 240 for x in value):
-                raise RuntimeError("AI 근거 목록 형식이 올바르지 않습니다.")
+                raise ProviderFailure("bad_response")
             return tuple(value)
         uncertainty = data.get("uncertainty", "")
         human = data.get("recommended_human_check", "")
         if (not isinstance(uncertainty, str) or not uncertainty.strip() or len(uncertainty) > 500 or
                 not isinstance(human, str) or not human.strip() or len(human) > 500):
-            raise RuntimeError("AI 불확실성 또는 확인 권고가 올바르지 않습니다.")
+            raise ProviderFailure("bad_response")
         return AIOpinion(verdict, items("positive_signals"), items("conflict_signals"),
                          items("evidence_from_metadata"), uncertainty, human)
 
 
 class OpenAIProvider(JsonHttpProvider):
     name = "openai"
-    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini", endpoint: str = "https://api.openai.com/v1/chat/completions"):
-        self.api_key, self.model, self.endpoint = api_key or os.getenv("OPENAI_API_KEY", ""), model, endpoint
+    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini", endpoint: str = "https://api.openai.com/v1/chat/completions", credential_store=None):
+        self._explicit_key = api_key
+        self.credential_store = credential_store or CredentialStore()
+        self.model, self.endpoint = model, endpoint
+    @property
+    def api_key(self):
+        if self._explicit_key is not None: return self._explicit_key
+        try: return self.credential_store.load("openai") or ""
+        except CredentialError: return ""
     def review(self, candidate: Candidate, genre_id: str) -> AIOpinion:
-        if not self.api_key: raise RuntimeError("OpenAI API 키가 설정되지 않아 오프라인 규칙 판정만 사용합니다.")
+        if not self.api_key: raise ProviderFailure("missing_key")
         raw = self._post(self.endpoint, {"Authorization": f"Bearer {self.api_key}"},
                          {"model": self.model, "temperature": 0, "response_format": {
                               "type": "json_schema", "json_schema": {"name": "zisu_genre_review",
                                   "strict": True, "schema": AI_JSON_SCHEMA}},
                           "messages": [{"role": "user", "content": self._prompt(candidate, genre_id)}]})
-        return self._decode(raw["choices"][0]["message"]["content"])
+        try: text = raw["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError): raise ProviderFailure("bad_response") from None
+        return self._decode(text)
 
 
 class GeminiProvider(JsonHttpProvider):
     name = "gemini"
-    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash", endpoint: str = "https://generativelanguage.googleapis.com/v1beta/models"):
-        self.api_key, self.model, self.endpoint = api_key or os.getenv("GEMINI_API_KEY", ""), model, endpoint
+    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash", endpoint: str = "https://generativelanguage.googleapis.com/v1beta/models", credential_store=None):
+        self._explicit_key = api_key
+        self.credential_store = credential_store or CredentialStore()
+        self.model, self.endpoint = model, endpoint
+    @property
+    def api_key(self):
+        if self._explicit_key is not None: return self._explicit_key
+        try: return self.credential_store.load("gemini") or ""
+        except CredentialError: return ""
     def review(self, candidate: Candidate, genre_id: str) -> AIOpinion:
-        if not self.api_key: raise RuntimeError("Gemini API 키가 설정되지 않아 오프라인 규칙 판정만 사용합니다.")
+        if not self.api_key: raise ProviderFailure("missing_key")
         raw = self._post(f"{self.endpoint}/{self.model}:generateContent", {"x-goog-api-key": self.api_key},
                          {"contents": [{"parts": [{"text": self._prompt(candidate, genre_id)}]}],
                           "generationConfig": {"responseFormat": {"text": {
                               "mimeType": "application/json", "schema": AI_JSON_SCHEMA}}}})
-        return self._decode(raw["candidates"][0]["content"]["parts"][0]["text"])
+        try: text = raw["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError): raise ProviderFailure("bad_response") from None
+        return self._decode(text)
 
 
 class OllamaProvider(JsonHttpProvider):
@@ -222,7 +273,9 @@ def _validated_opinion(opinion: AIOpinion, candidate: Candidate) -> AIOpinion:
 
 
 def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProvider | None = None,
-                     path=None, *, use_cache: bool = True, persist_cache: bool = True) -> ResearchReview:
+                     path=None, *, use_cache: bool = True, persist_cache: bool = True,
+                     session_id: str = "", allow_paid_external: bool = False,
+                     cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None) -> ResearchReview:
     profile = store.get_profile(profile_id, path)
     if not profile: raise ValueError("선택한 조사 프로필을 찾을 수 없습니다.")
     if len(candidate.title) > 10_000 or len(candidate.description) > 50_000:
@@ -244,6 +297,14 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
             started = time.monotonic()
             cacheable = True
             try:
+                if provider.name in ("openai", "gemini") and not allow_paid_external:
+                    raise ProviderFailure("consent")
+                if provider.name in ("openai", "gemini", "ollama"):
+                    allowed = store.reserve_ai_usage(profile_id, provider.name, provider.model, session_id,
+                        cost_estimate=cost_estimate_usd, cost_limit=cost_limit_usd, path=path)
+                    if not allowed:
+                        code = "consent" if provider.name in ("openai", "gemini") and (cost_estimate_usd is None or cost_limit_usd is None) else "budget"
+                        raise ProviderFailure(code)
                 opinion = _validated_opinion(provider.review(candidate, profile["genre"]), candidate)
             except Exception as exc:
                 # Do not persist exception text: providers may include endpoint details.
@@ -267,10 +328,8 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
 
 
 def _friendly_provider_error(exc: Exception) -> str:
-    message = str(exc)
-    for secret in (os.getenv("OPENAI_API_KEY", ""), os.getenv("GEMINI_API_KEY", "")):
-        if secret: message = message.replace(secret, "[숨김]")
-    return message[:300] or "원인을 알 수 없는 오류"
+    code = exc.code if isinstance(exc, ProviderFailure) else "unknown"
+    return PROVIDER_ERROR_MESSAGES.get(code, PROVIDER_ERROR_MESSAGES["unknown"])
 
 
 def preview_plan(profile_id: str, count: int, path=None, max_search_calls: int = 3) -> dict:
@@ -310,11 +369,44 @@ class ResearchRun:
     cancelled: bool
     reviews: tuple[ResearchReview, ...]
     candidates: tuple[dict, ...] = ()
+    session_id: str = ""
+    paused: bool = False
+
+
+def _review_to_payload(review: ResearchReview) -> dict:
+    return {"profile_id": review.profile_id, "video_id": review.video_id,
+            "rule_verdict": review.rule_verdict, "rule_score": review.rule_score,
+            "rule_reason": review.rule_reason, "final_verdict": review.final_verdict,
+            "ai_opinion": ({"verdict": review.ai_opinion.verdict,
+                            "positive_signals": list(review.ai_opinion.positive_signals),
+                            "conflict_signals": list(review.ai_opinion.conflict_signals),
+                            "evidence_from_metadata": list(review.ai_opinion.evidence_from_metadata),
+                            "uncertainty": review.ai_opinion.uncertainty,
+                            "recommended_human_check": review.ai_opinion.recommended_human_check}
+                           if review.ai_opinion else None),
+            "provider": review.provider, "model": review.model,
+            "metadata_hash": review.metadata_hash, "provenance": review.provenance,
+            "warning": review.warning}
+
+
+def _review_from_payload(value: dict) -> ResearchReview:
+    opinion = value.get("ai_opinion")
+    if opinion:
+        opinion = AIOpinion(opinion["verdict"], tuple(opinion["positive_signals"]),
+            tuple(opinion["conflict_signals"]), tuple(opinion["evidence_from_metadata"]),
+            opinion["uncertainty"], opinion["recommended_human_check"])
+    return ResearchReview(value["profile_id"], value["video_id"], value["rule_verdict"],
+        int(value["rule_score"]), value["rule_reason"], value["final_verdict"], opinion,
+        value["provider"], value["model"], value["metadata_hash"], value["provenance"],
+        value.get("warning", "제목·설명 메타데이터 검토이며 실제 음원 판정이 아닙니다."))
 
 
 def run_bounded_research(profile_id: str, collector, *, target: int = 10, max_search_calls: int = 3,
                          provider: ReviewProvider | None = None, path=None,
-                         cancel_event: threading.Event | None = None, progress=None) -> ResearchRun:
+                         cancel_event: threading.Event | None = None, progress=None,
+                         session_id: str | None = None, pause_event: threading.Event | None = None,
+                         allow_paid_external: bool = False, cost_estimate_usd: float | None = None,
+                         cost_limit_usd: float | None = None) -> ResearchRun:
     """Run caller-supplied read-only collection under a previewed strict bound.
 
     `collector(term, market, limit)` must use an approved read-only source. This
@@ -328,10 +420,29 @@ def run_bounded_research(profile_id: str, collector, *, target: int = 10, max_se
     terms = (store.list_profile_search_terms(profile_id, profile["market"], path) or
              genres.search_terms(profile["genre"], profile["market"]))[:max_search_calls]
     cancel_event = cancel_event or threading.Event()
-    collected: dict[str, dict] = {}
+    pause_event = pause_event or threading.Event()
+    if session_id:
+        session = store.get_research_session(session_id, profile_id, path)
+        if not session or (session["market"], session["genre"], session["target"], session["max_search_calls"]) != (profile["market"], profile["genre"], target, max_search_calls):
+            raise ValueError("저장된 조사 계획과 현재 프로필이 달라 이어갈 수 없습니다.")
+        collected = {str(row.get("video_id")): row for row in json.loads(session["candidates_json"])}
+        processed = set(json.loads(session["processed_json"]))
+        reviews = [_review_from_payload(item) for item in json.loads(session["reviews_json"])]
+        query_index = int(session["query_index"])
+        if session["state"] == "interrupted":
+            store.checkpoint_research_session(session_id, profile_id, state="paused", path=path)
+        # If the process died in-flight, retry only that read-only query; results dedupe by ID.
+        if session["in_flight"]:
+            query_index = max(0, query_index)
+    else:
+        session_id = store.start_research_session(profile_id, profile["market"], profile["genre"], target, max_search_calls, path)
+        collected, processed, query_index, reviews = {}, set(), 0, []
     calls = 0
-    for term in terms:
-        if cancel_event.is_set(): break
+    for index in range(query_index, len(terms)):
+        if len(collected) >= target: break
+        term = terms[index]
+        if cancel_event.is_set() or pause_event.is_set(): break
+        store.checkpoint_research_session(session_id, profile_id, state="running", query_index=index, in_flight=True, path=path)
         rows = collector(term, profile["market"], min(20, target))
         calls += 1
         for row in rows or ():
@@ -339,17 +450,30 @@ def run_bounded_research(profile_id: str, collector, *, target: int = 10, max_se
             if len(video_id) == 11 and all(char.isalnum() or char in "-_" for char in video_id) and video_id not in collected:
                 collected[video_id] = row
                 if len(collected) >= target: break
+        store.checkpoint_research_session(session_id, profile_id, query_index=index + 1,
+                                          candidates=list(collected.values()), in_flight=False, path=path)
         if progress: progress({"stage": "collect", "calls_used": calls, "unique_count": len(collected), "profile_id": profile_id})
         if len(collected) >= target: break
-    reviews = []
     for row in list(collected.values())[:target]:
-        if cancel_event.is_set(): break
+        if cancel_event.is_set() or pause_event.is_set(): break
         candidate = Candidate(str(row.get("video_id", "")), str(row.get("video_title", "")),
                               str(row.get("description", "")), str(row.get("video_url", "")))
-        reviews.append(review_candidate(profile_id, candidate, provider, path))
+        if candidate.video_id in processed: continue
+        review = review_candidate(profile_id, candidate, provider, path, session_id=session_id,
+            allow_paid_external=allow_paid_external, cost_estimate_usd=cost_estimate_usd,
+            cost_limit_usd=cost_limit_usd)
+        reviews.append(review)
+        processed.add(candidate.video_id)
+        store.checkpoint_research_session(session_id, profile_id, processed=sorted(processed),
+             reviews=[_review_to_payload(item) for item in reviews], path=path)
         if progress: progress({"stage": "review", "calls_used": calls, "reviewed": len(reviews), "profile_id": profile_id})
+    paused = pause_event.is_set() and not cancel_event.is_set()
+    state = "cancelled" if cancel_event.is_set() else "paused" if paused else "complete"
+    store.checkpoint_research_session(session_id, profile_id, state=state, candidates=list(collected.values()),
+                                      processed=sorted(processed), reviews=[_review_to_payload(item) for item in reviews],
+                                      in_flight=False, path=path)
     return ResearchRun(profile_id, len(collected), len(collected), calls, cancel_event.is_set(), tuple(reviews),
-                       tuple(collected.values()))
+                       tuple(collected.values()), session_id, paused)
 
 
 def create_provider(provider_id: str) -> ReviewProvider:

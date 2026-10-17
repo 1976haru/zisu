@@ -1,10 +1,17 @@
 """Offline tests for the optional AI research workflow and safety gates."""
 import json
+import io
 import unittest
 import csv
+import socket
+from http.client import IncompleteRead
+import os
+from concurrent.futures import ThreadPoolExecutor
+from urllib.error import HTTPError, URLError
 from unittest import mock
 
 from mcrs import ai_research, genres, store
+from mcrs.credential_store import CredentialStore, CredentialError, WindowsDPAPI
 from tests.support import WorkspaceTemp
 
 
@@ -102,7 +109,7 @@ class AIResearchTests(unittest.TestCase):
 
     def test_provider_errors_are_friendly_and_not_secret_bearing(self):
         provider = ai_research.OpenAIProvider(api_key="secret-test-key")
-        with self.assertRaisesRegex(RuntimeError, "API 키가 설정되지"):
+        with self.assertRaisesRegex(RuntimeError, "API 키가 등록되지"):
             ai_research.OpenAIProvider(api_key="").review(self.candidate(), "MORNING_CHILL_RAP")
         self.assertNotIn("secret-test-key", ai_research._friendly_provider_error(RuntimeError("request failed")))
         self.assertTrue(provider.api_key)
@@ -141,7 +148,7 @@ class AIResearchTests(unittest.TestCase):
             gemini.review(candidate,"MORNING_CHILL_RAP")
         self.assertEqual(call.call_args.args[1]["x-goog-api-key"],"mock-gemini-key")
         self.assertNotIn("mock-gemini-key",call.call_args.args[0])
-        self.assertIn("responseFormat",call.call_args.args[2]["generationConfig"])
+        self.assertEqual(call.call_args.args[2]["generationConfig"]["responseFormat"]["text"]["mimeType"],"application/json")
         ollama=ai_research.OllamaProvider()
         with mock.patch.object(ollama,"_post",return_value={"response":response}) as call:
             ollama.review(candidate,"MORNING_CHILL_RAP")
@@ -229,6 +236,152 @@ class AIResearchTests(unittest.TestCase):
         self.assertTrue(row["warning"])
         self.assertNotIn("token", row)
         self.assertNotIn("secret", report.read_text(encoding="utf-8-sig").casefold())
+
+    def test_mock_dpapi_credential_save_recover_and_delete(self):
+        class MockProtector:
+            def protect(self, value): return b"protected:" + bytes(reversed(value))
+            def unprotect(self, value):
+                if not value.startswith(b"protected:"): raise ValueError()
+                return bytes(reversed(value[len(b"protected:"):]))
+        credentials=CredentialStore(self.temp.path/"secrets",MockProtector())
+        secret="mock-provider-secret-123"
+        credentials.save("openai",secret)
+        self.assertTrue(credentials.configured("openai"))
+        self.assertEqual(credentials.load("openai"),secret)
+        self.assertNotIn(secret.encode(),(self.temp.path/"secrets"/"openai.dpapi").read_bytes())
+        credentials.delete("openai")
+        self.assertIsNone(credentials.load("openai"))
+        with self.assertRaises(CredentialError): credentials.save("google_oauth",secret)
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI is only available on Windows")
+    def test_windows_dpapi_roundtrip_uses_ciphertext_and_can_delete(self):
+        credentials=CredentialStore(self.temp.path/"real-dpapi-test-only",WindowsDPAPI())
+        secret="zisu-test-only-not-a-real-provider-key"
+        credentials.save("openai",secret)
+        ciphertext=(self.temp.path/"real-dpapi-test-only"/"openai.dpapi").read_bytes()
+        self.assertNotIn(secret.encode(),ciphertext)
+        self.assertEqual(credentials.load("openai"),secret)
+        credentials.delete("openai")
+        self.assertIsNone(credentials.load("openai"))
+
+    def test_secure_credential_is_used_by_provider_without_environment_or_plaintext_export(self):
+        class MockProtector:
+            def protect(self, value): return b"wrapped" + value
+            def unprotect(self, value): return value[7:]
+        credentials=CredentialStore(self.temp.path/"keys",MockProtector())
+        credentials.save("gemini","mock-gemini-secret")
+        provider=ai_research.GeminiProvider(credential_store=credentials)
+        self.assertEqual(provider.api_key,"mock-gemini-secret")
+
+    def test_paid_usage_requires_user_cost_budget_and_has_job_and_daily_caps(self):
+        self.assertFalse(store.reserve_ai_usage(self.jp,"openai","model","job-1",path=self.db))
+        self.assertTrue(store.reserve_ai_usage(self.jp,"openai","model","job-1",cost_estimate=.02,cost_limit=.05,path=self.db))
+        self.assertTrue(store.reserve_ai_usage(self.jp,"openai","model","job-1",cost_estimate=.02,cost_limit=.05,path=self.db))
+        self.assertFalse(store.reserve_ai_usage(self.jp,"openai","model","job-1",cost_estimate=.02,cost_limit=.05,path=self.db))
+        with store.connect(self.db) as db:
+            db.execute("UPDATE ai_usage SET created_at=? WHERE profile_id=?",("2000-01-01 00:00:00",self.jp))
+        self.assertTrue(store.reserve_ai_usage(self.jp,"openai","model","job-2",max_daily_requests=1,
+                                               cost_estimate=.01,cost_limit=.05,path=self.db))
+        self.assertFalse(store.reserve_ai_usage(self.kr,"openai","model","job-1",max_daily_requests=0,
+                                                cost_estimate=.01,cost_limit=.05,path=self.db))
+
+    def test_concurrent_usage_reservations_cannot_exceed_provider_limit(self):
+        def reserve(_index):
+            return store.reserve_ai_usage(self.jp,"ollama","local","same-job",
+                                          max_job_requests=4,max_daily_requests=5,path=self.db)
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            results=list(pool.map(reserve,range(30)))
+        self.assertEqual(sum(results),4)
+        self.assertEqual(store.ai_usage_summary(self.jp,self.db)["ollama"]["requests"],4)
+
+    def test_paid_provider_is_blocked_by_default_then_calls_only_with_consent_and_budget(self):
+        class PaidMock:
+            name="openai"; model="mock-billing"
+            def __init__(self): self.calls=0
+            def review(self,candidate,genre_id):
+                self.calls+=1
+                return ai_research.AIOpinion(genres.REVIEW,(),(),(),"메타데이터만 확인","실제 음원을 직접 확인")
+        provider=PaidMock()
+        candidate=self.candidate("朝のプレイリスト","ジャンル詳細は不明")
+        blocked=ai_research.review_candidate(self.jp,candidate,provider,self.db)
+        self.assertEqual(provider.calls,0)
+        self.assertIn("기본 차단",blocked.ai_opinion.uncertainty)
+        allowed=ai_research.review_candidate(self.jp,candidate,provider,self.db,use_cache=False,
+            allow_paid_external=True,session_id="approved-job",cost_estimate_usd=.01,cost_limit_usd=.05)
+        self.assertEqual(provider.calls,1)
+        self.assertEqual(allowed.final_verdict,genres.REVIEW)
+        usage=store.ai_usage_summary(self.jp,self.db)
+        self.assertEqual(usage["openai"]["requests"],1)
+
+    def test_provider_errors_are_allowlisted_and_http_body_is_never_displayed(self):
+        secret="mock-credential-never-show"
+        self.assertEqual(ai_research._friendly_provider_error(RuntimeError(secret)),ai_research.PROVIDER_ERROR_MESSAGES["unknown"])
+        exc=__import__("urllib.error",fromlist=["HTTPError"]).HTTPError("https://provider.invalid",429,"limited",{},None)
+        with mock.patch("mcrs.ai_research.urlopen",side_effect=exc):
+            with self.assertRaises(ai_research.ProviderFailure) as caught:
+                ai_research.JsonHttpProvider()._post("https://provider.invalid",{}, {})
+        self.assertEqual(caught.exception.code,"rate_limit")
+        self.assertNotIn(secret,str(caught.exception))
+
+    def test_provider_http_contract_handles_status_timeout_bad_json_truncation_and_size(self):
+        base=ai_research.JsonHttpProvider()
+        for status,code in ((401,"auth"),(429,"rate_limit"),(503,"server"),(400,"bad_response")):
+            error=HTTPError("https://provider.invalid",status,"private response body",{},io.BytesIO(b"private api key"))
+            with mock.patch("mcrs.ai_research.urlopen",side_effect=error), self.subTest(status=status):
+                with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
+                self.assertEqual(caught.exception.code,code)
+                self.assertNotIn("private",str(caught.exception))
+        with mock.patch("mcrs.ai_research.urlopen",side_effect=TimeoutError()):
+            with self.assertRaisesRegex(ai_research.ProviderFailure,"공급자 응답 시간"):
+                base._post("https://provider.invalid",{}, {})
+        with mock.patch("mcrs.ai_research.urlopen",side_effect=URLError(socket.timeout("secret timeout detail"))):
+            with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
+            self.assertEqual(caught.exception.code,"timeout")
+        with mock.patch("mcrs.ai_research.urlopen",side_effect=IncompleteRead(b"partial")):
+            with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
+            self.assertEqual(caught.exception.code,"network")
+        for payload in (b"not-json", b"[]", b"{" + b" " * ai_research.MAX_PROVIDER_RESPONSE):
+            response=io.BytesIO(payload)
+            response.__enter__=lambda self:self
+            response.__exit__=lambda self,*_args:None
+            with mock.patch("mcrs.ai_research.urlopen",return_value=response), self.subTest(length=len(payload)):
+                with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
+                self.assertEqual(caught.exception.code,"bad_response")
+        provider=ai_research.OpenAIProvider(api_key="mock-openai-key")
+        with mock.patch.object(provider,"_post",return_value={"choices":[]}):
+            with self.assertRaises(ai_research.ProviderFailure) as caught: provider.review(self.candidate(),"MORNING_CHILL_RAP")
+        self.assertEqual(caught.exception.code,"bad_response")
+
+    def test_incomplete_session_can_resume_from_profile_scoped_checkpoint(self):
+        pause=__import__("threading").Event()
+        collector_calls=[]
+        rows=[{"video_id":f"r{index:010d}","video_title":"아침의 잔잔한 음악","description":"보컬과 리듬"} for index in range(10)]
+        def collector(term,market,limit):
+            collector_calls.append((term,market))
+            return rows
+        class PauseAfterFirst(ai_research.MockProvider):
+            def review(self,candidate,genre_id):
+                result=super().review(candidate,genre_id)
+                if self.calls==1: pause.set()
+                return result
+        provider=PauseAfterFirst()
+        partial=ai_research.run_bounded_research(self.jp,collector,target=10,max_search_calls=2,path=self.db,
+                                                  pause_event=pause,provider=provider)
+        self.assertTrue(partial.paused)
+        self.assertEqual(partial.calls_used,1)
+        self.assertEqual(len(partial.reviews),1)
+        self.assertEqual(store.get_research_session(partial.session_id,self.jp,self.db)["state"],"paused")
+        with self.assertRaises(ValueError):
+            ai_research.run_bounded_research(self.kr,collector,target=10,max_search_calls=2,path=self.db,session_id=partial.session_id)
+        pause.clear()
+        resumed=ai_research.run_bounded_research(self.jp,collector,target=10,max_search_calls=2,path=self.db,
+                                                  session_id=partial.session_id,pause_event=pause,provider=provider)
+        self.assertEqual(resumed.unique_count,10)
+        self.assertEqual(resumed.calls_used,0)
+        self.assertEqual(len(resumed.reviews),10)
+        self.assertEqual(provider.calls,10)
+        self.assertEqual(len(collector_calls),1)
+        self.assertEqual(store.get_research_session(partial.session_id,self.jp,self.db)["state"],"complete")
 
 
 if __name__ == "__main__":

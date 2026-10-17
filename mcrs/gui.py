@@ -19,6 +19,7 @@ from .genres import GENRES, search_terms, assess
 from .youtube_api import lookup_videos, APIError
 from . import oauth
 from . import ai_research
+from .credential_store import CredentialStore, CredentialError
 from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
@@ -828,13 +829,33 @@ class Studio(tk.Tk):
         ttk.Label(controls,text="AI 보조").pack(side="left")
         self.ai_provider_choice=tk.StringVar(value="규칙만")
         self.ai_provider_ids={"규칙만":"disabled","Ollama (로컬)":"ollama","Gemini":"gemini","OpenAI":"openai"}
-        ttk.Combobox(controls,textvariable=self.ai_provider_choice,values=tuple(self.ai_provider_ids),state="readonly",width=15).pack(side="left",padx=6)
+        provider_combo=ttk.Combobox(controls,textvariable=self.ai_provider_choice,values=tuple(self.ai_provider_ids),state="readonly",width=15)
+        provider_combo.pack(side="left",padx=6)
+        provider_combo.bind("<<ComboboxSelected>>",lambda _event:self._ai_refresh_credential_status())
         ttk.Button(controls,text="1. 조사 계획 미리보기",command=self._ai_preview_plan,style="Accent.TButton").pack(side="left",padx=6)
         ttk.Button(controls,text="2. 오프라인 Demo 시작",command=self._ai_start_demo).pack(side="left",padx=6)
         ttk.Button(controls,text="실제 읽기 전용 조사",command=self._ai_start_live).pack(side="left",padx=6)
         self.ai_cancel_button=ttk.Button(controls,text="진행 취소",command=self._ai_cancel,state="disabled")
         self.ai_cancel_button.pack(side="left",padx=6)
+        self.ai_pause_button=ttk.Button(controls,text="일시 정지",command=self._ai_pause,state="disabled")
+        self.ai_pause_button.pack(side="left",padx=3)
+        ttk.Button(controls,text="이전 작업 이어가기",command=self._ai_resume_latest).pack(side="left",padx=3)
+        ttk.Label(controls,text="1회 USD 추정 / 1일 상한").pack(side="left",padx=(8,2))
+        self.ai_cost_estimate=tk.StringVar(value="")
+        self.ai_cost_limit=tk.StringVar(value="")
+        ttk.Entry(controls,textvariable=self.ai_cost_estimate,width=7).pack(side="left",padx=2)
+        ttk.Entry(controls,textvariable=self.ai_cost_limit,width=7).pack(side="left",padx=2)
         ttk.Button(controls,text="검토 보고서 내보내기",command=self._ai_export_report).pack(side="left",padx=6)
+        credential=ttk.LabelFrame(tab,text="선택형 AI 키 보안 저장 · 현재 Windows 사용자 계정에만 복구 가능")
+        credential.grid(row=5,column=0,sticky="ew",pady=5)
+        self.ai_credential_provider=tk.StringVar(value="openai")
+        ttk.Combobox(credential,textvariable=self.ai_credential_provider,values=("openai","gemini"),state="readonly",width=10).pack(side="left",padx=5)
+        self.ai_credential_entry=ttk.Entry(credential,show="●",width=42)
+        self.ai_credential_entry.pack(side="left",padx=5)
+        ttk.Button(credential,text="키 저장/변경",command=self._ai_save_credential).pack(side="left",padx=4)
+        ttk.Button(credential,text="키 삭제",command=self._ai_delete_credential).pack(side="left",padx=4)
+        self.ai_credential_status=tk.StringVar(value="키 미등록 · 외부 모델 기본 차단")
+        ttk.Label(credential,textvariable=self.ai_credential_status).pack(side="left",padx=8)
         self.ai_status=tk.StringVar(value="먼저 작업 프로필을 선택한 뒤 조사 계획을 미리 보세요.")
         ttk.Label(tab,textvariable=self.ai_status,wraplength=1000).grid(row=3,column=0,sticky="w",pady=6)
         body=ttk.Panedwindow(tab,orient="horizontal")
@@ -860,7 +881,71 @@ class Studio(tk.Tk):
         self.ai_demo_queue=queue.Queue()
         self.ai_running=False
         self.ai_cancel_event=None
+        self.ai_pause_event=None
+        self._ai_refresh_credential_status()
         ttk.Button(results,text="선택한 영상 직접 열기",command=self._ai_open_selected).pack(anchor="e",pady=5)
+
+    def _ai_refresh_credential_status(self):
+        try:
+            credentials=CredentialStore()
+            configured=credentials.configured(self.ai_credential_provider.get())
+            if configured:
+                credentials.load(self.ai_credential_provider.get())
+                label="키 등록됨 · 암호화 저장"
+            else:
+                label="키 미등록 · 외부 모델 기본 차단"
+        except CredentialError:
+            label="저장 키 복구 실패 · 키를 다시 등록하세요"
+        except Exception:
+            label="Windows 보안 저장소 확인 불가"
+        self.ai_credential_status.set(label)
+
+    def _ai_save_credential(self):
+        provider=self.ai_credential_provider.get()
+        secret=self.ai_credential_entry.get()
+        try:
+            CredentialStore().save(provider,secret)
+            self.ai_credential_entry.delete(0,"end")
+            self._ai_refresh_credential_status()
+            messagebox.showinfo("저장 완료","API 키를 Windows 현재 사용자 DPAPI로 암호화해 저장했습니다. 키 값은 표시하거나 기록하지 않습니다.",parent=self)
+        except CredentialError as exc:
+            self.ai_credential_entry.delete(0,"end")
+            messagebox.showwarning("안전 저장 실패",str(exc),parent=self)
+
+    def _ai_delete_credential(self):
+        try:
+            CredentialStore().delete(self.ai_credential_provider.get())
+            self.ai_credential_entry.delete(0,"end")
+            self._ai_refresh_credential_status()
+        except CredentialError as exc:
+            messagebox.showwarning("삭제 실패",str(exc),parent=self)
+
+    def _ai_pause(self):
+        if self.ai_pause_event:
+            self.ai_pause_event.set()
+            self.ai_status.set("일시 정지 요청됨 · 현재 읽기 요청이 끝나면 체크포인트를 저장합니다.")
+
+    def _ai_resume_latest(self):
+        if not self.active_id:
+            messagebox.showinfo("프로필 선택","이어갈 조사 프로필을 먼저 선택하세요.",parent=self); return
+        sessions=store.list_resumable_sessions(self.active_id)
+        if not sessions:
+            messagebox.showinfo("이어갈 작업 없음","현재 프로필에 이어갈 조사 작업이 없습니다.",parent=self); return
+        session=sessions[0]
+        profile=store.get_profile(self.active_id)
+        if not profile or (profile["market"],profile["genre"]) != (session["market"],session["genre"]):
+            messagebox.showwarning("프로필 불일치","작업 당시 국가·장르와 현재 프로필이 달라 이어갈 수 없습니다.",parent=self); return
+        self.ai_target.set(str(session["target"]))
+        self.ai_max_calls.set(str(session["max_search_calls"]))
+        try:
+            plan=ai_research.preview_plan(self.active_id,session["target"],max_search_calls=session["max_search_calls"])
+        except (ValueError,KeyError):
+            messagebox.showwarning("계획 복구 실패","저장된 조사 계획을 다시 만들 수 없습니다.",parent=self); return
+        plan["provider_id"]=self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
+        plan["session_id"]=session["id"]
+        self.ai_confirmed_plan=plan
+        if messagebox.askyesno("저장된 조사 이어가기",f"{profile['name']}의 저장된 조사 작업을 이어갑니다.\n중단 중이던 읽기 검색은 재확인되어 YouTube 할당량을 한 번 더 쓸 수 있습니다. 계속할까요?",parent=self):
+            self._ai_start_live()
 
     def _ai_preview_plan(self):
         if not self.active_id:
@@ -873,8 +958,10 @@ class Studio(tk.Tk):
         terms="\n".join("  · "+term for term in plan["search_terms"][:6])
         plan["provider_id"]=self.ai_provider_ids[self.ai_provider_choice.get()]
         provider_label=self.ai_provider_choice.get()
+        usage=store.ai_usage_summary(self.active_id).get(plan["provider_id"],{"requests":0,"unknown_cost":0})
         budget="비용 없음 (규칙만)" if provider_label=="규칙만" else ("로컬 Ollama; 기기 자원 사용" if provider_label.startswith("Ollama") else "현재 모델 요금 확인이 필요해 비용을 추정하지 않음")
         self.ai_status.set(f"미리보기: {plan['profile_name']} · {plan['market']} / {GENRES[plan['genre']].title} · 목표 {plan['target_candidates']}개 · 검색어 호출 최대 {plan['max_search_calls']}회 · AI {provider_label} · {budget}\n"
+                           f"공급자 오늘 사용 {usage['requests']}/30회 · 이 작업 AI 최대 10회 · 비용 미확정 {usage['unknown_cost']}회. YouTube 검색 호출과 AI 호출/비용은 별도 집계합니다.\n"
                            f"검색어 예시:\n{terms}\n미리보기 중 API/AI 호출 0회. Demo는 오프라인이며, 실제 조사 버튼은 확인 후 YouTube 읽기 전용 검색을 수행합니다.")
 
     def _ai_start_demo(self):
@@ -905,6 +992,7 @@ class Studio(tk.Tk):
             return
         self.ai_running=False
         self.ai_cancel_button.configure(state="disabled")
+        self.ai_pause_button.configure(state="disabled")
         if kind=="live": self._ai_live_done(profile_id,result)
         else: self._ai_demo_done(profile_id,result)
 
@@ -950,6 +1038,14 @@ class Studio(tk.Tk):
             provider=ai_research.create_provider("disabled")
             provider_note=" · 해당 AI 공급자 키가 없어 규칙 전용으로 실행"
         else: provider_note=""
+        cost_estimate=cost_limit=None
+        if provider_id in ("openai","gemini") and not provider_note:
+            try:
+                cost_estimate=float(self.ai_cost_estimate.get())
+                cost_limit=float(self.ai_cost_limit.get())
+                if cost_estimate <= 0 or cost_limit <= 0 or cost_estimate > cost_limit: raise ValueError()
+            except (TypeError,ValueError):
+                messagebox.showwarning("비용 상한 필요","유료 AI는 공급자의 현재 가격을 직접 확인하고, 안전 여유를 포함한 1회 추정 비용과 1일 상한(USD)을 입력해야 합니다. 가격을 확인할 수 없으면 규칙 전용 또는 Ollama를 사용하세요.",parent=self); return
         ai_privacy=("선택한 공급자에 검토 후보 제목·설명을 보낼 수 있습니다. 이메일, OAuth 토큰, 개인 메모는 보내지 않습니다."
                     if provider_id in ("ollama","openai","gemini") and not provider_note else "AI 외부 전송은 하지 않고 기존 규칙 엔진만 사용합니다.")
         consent_text=(f"{plan['profile_name']} · {plan['market']} · {GENRES[plan['genre']].title}\n"
@@ -958,7 +1054,9 @@ class Studio(tk.Tk):
         if not messagebox.askyesno("실제 조사 실행 확인",consent_text,parent=self): return
         self.ai_running=True
         self.ai_cancel_event=threading.Event()
+        self.ai_pause_event=threading.Event()
         self.ai_cancel_button.configure(state="normal")
+        self.ai_pause_button.configure(state="normal")
         self.ai_status.set("읽기 전용 조사 중… 프로필을 전환해도 결과는 시작한 프로필에만 저장됩니다."+provider_note)
         self.ai_reviews={}
         for item in self.ai_tree.get_children(): self.ai_tree.delete(item)
@@ -968,11 +1066,14 @@ class Studio(tk.Tk):
                 def collect(term,market,limit):
                     return lookup_videos(key,term,market,limit=min(20,limit),access_token=token)
                 run=ai_research.run_bounded_research(profile_id,collect,target=plan["target_candidates"],
-                    max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event)
+                    max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event,
+                    session_id=plan.get("session_id"),pause_event=self.ai_pause_event,
+                    allow_paid_external=provider_id in ("openai","gemini") and not provider_note,
+                    cost_estimate_usd=cost_estimate,cost_limit_usd=cost_limit)
                 counts=store.save_candidates(profile_id,run.candidates) if run.candidates else {"적합":0,"검토":0,"제외":0}
                 result=(run,counts,provider_note)
-            except (APIError,oauth.OAuthError,ValueError,OSError) as exc:
-                result=RuntimeError(str(exc))
+            except (APIError,oauth.OAuthError,ValueError,OSError):
+                result=RuntimeError("조사를 완료하지 못했습니다. 연결·권한·저장 경로를 확인한 뒤 저장된 작업을 이어가세요.")
             except Exception:
                 result=RuntimeError("조사 중 예기치 않은 문제가 발생했습니다. 연결·공급자 설정을 확인하고 다시 시도하세요.")
             self.ai_demo_queue.put(("live",profile_id,result))

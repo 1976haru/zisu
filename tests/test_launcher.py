@@ -64,7 +64,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
-        self.assertIn("V4.5.0-Windows.zip",workflow)
+        self.assertIn("V4.5.1-Windows.zip",workflow)
         self.assertIn("validate_windows_release.ps1",workflow)
         self.assertIn("create_windows_sandbox_config.ps1",workflow)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):

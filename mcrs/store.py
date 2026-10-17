@@ -1,6 +1,7 @@
 """Backward-compatible, profile-isolated SQLite storage (credentials excluded)."""
 from __future__ import annotations
 import csv
+import math
 import os
 import sqlite3
 import uuid
@@ -99,6 +100,19 @@ def initialize(path=None):
           latency_ms INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS ai_usage (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+          provider TEXT NOT NULL, model TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL, cost_estimate REAL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_day ON ai_usage(profile_id,provider,created_at);
+        CREATE TABLE IF NOT EXISTS research_sessions (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, market TEXT NOT NULL, genre TEXT NOT NULL,
+          state TEXT NOT NULL, target INTEGER NOT NULL, max_search_calls INTEGER NOT NULL,
+          query_index INTEGER NOT NULL DEFAULT 0, processed_json TEXT NOT NULL DEFAULT '[]',
+          candidates_json TEXT NOT NULL DEFAULT '[]', reviews_json TEXT NOT NULL DEFAULT '[]', in_flight INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
           ON candidates(profile_id,genre_decision,status);
         """)
@@ -110,6 +124,7 @@ def initialize(path=None):
             "subgenre TEXT NOT NULL DEFAULT ''",
         ):
             _add_column(db, "profiles", definition)
+        _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
 
 def create_profile(name, market, genre, path=None, subgenre=""):
     initialize(path)
@@ -365,3 +380,84 @@ def save_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, 
            json.dumps(opinion.positive_signals,ensure_ascii=False),json.dumps(opinion.conflict_signals,ensure_ascii=False),
            json.dumps(opinion.evidence_from_metadata,ensure_ascii=False),opinion.uncertainty,
            opinion.recommended_human_check,max(0,int(latency_ms))))
+
+def reserve_ai_usage(profile_id, provider, model, session_id="", *,
+                     max_job_requests=10, max_daily_requests=30, cost_estimate=None,
+                     cost_limit=None, path=None):
+    """Atomically account an outbound attempt before dispatch; unknown cost stays unknown."""
+    if provider not in ("openai", "gemini", "ollama", "mock"):
+        raise ValueError("AI 공급자를 확인하세요.")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+            raise ValueError("조사 프로필을 확인하세요.")
+        day = datetime.now().strftime("%Y-%m-%d")
+        daily = db.execute("SELECT COUNT(*) FROM ai_usage WHERE profile_id=? AND provider=? AND created_at LIKE ?",
+                           (profile_id, provider, day + "%")).fetchone()[0]
+        job = db.execute("SELECT COUNT(*) FROM ai_usage WHERE profile_id=? AND provider=? AND session_id=?",
+                         (profile_id, provider, session_id)).fetchone()[0] if session_id else 0
+        if daily >= max_daily_requests or job >= max_job_requests:
+            return False
+        if provider in ("openai", "gemini"):
+            # Do not invent vendor prices. Require the operator's own conservative
+            # per-call estimate and ceiling; unknown historic spend fails closed.
+            if (cost_estimate is None or cost_limit is None or not math.isfinite(cost_estimate) or
+                    not math.isfinite(cost_limit) or cost_estimate <= 0 or cost_limit <= 0):
+                return False
+            spent = db.execute("SELECT SUM(cost_estimate) FROM ai_usage WHERE profile_id=? AND provider=? AND created_at LIKE ?",
+                               (profile_id, provider, day + "%")).fetchone()[0]
+            if spent is None and daily:
+                return False
+            spent = spent or 0.0
+            job_spent = db.execute("SELECT SUM(cost_estimate) FROM ai_usage WHERE profile_id=? AND provider=? AND session_id=?",
+                                   (profile_id, provider, session_id)).fetchone()[0] if session_id else 0.0
+            if spent + cost_estimate > cost_limit or (job_spent or 0.0) + cost_estimate > cost_limit:
+                return False
+        db.execute("INSERT INTO ai_usage(profile_id,provider,model,session_id,status,cost_estimate) VALUES(?,?,?,?,?,?)",
+                   (profile_id, provider, model, session_id or "", "attempted", cost_estimate))
+        return True
+
+def ai_usage_summary(profile_id, path=None):
+    with connect(path) as db:
+        rows = db.execute("SELECT provider,COUNT(*) AS requests,SUM(CASE WHEN provider IN ('openai','gemini') AND cost_estimate IS NULL THEN 1 ELSE 0 END) AS unknown_cost "
+                          "FROM ai_usage WHERE profile_id=? AND created_at LIKE ? GROUP BY provider",
+                          (profile_id, datetime.now().strftime("%Y-%m-%d") + "%")).fetchall()
+        return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
+
+def start_research_session(profile_id, market, genre, target, max_search_calls, path=None):
+    import json
+    session_id = uuid.uuid4().hex
+    with connect(path) as db:
+        row = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        if not row or row["market"] != market or row["genre"] != genre:
+            raise ValueError("조사 프로필이 변경되었습니다. 새 계획을 만드세요.")
+        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls) VALUES(?,?,?,?,?,?,?)",
+                   (session_id, profile_id, market, genre, "running", target, max_search_calls))
+    return session_id
+
+def get_research_session(session_id, profile_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT * FROM research_sessions WHERE id=? AND profile_id=?", (session_id, profile_id)).fetchone()
+        return dict(row) if row else None
+
+def list_resumable_sessions(profile_id, path=None):
+    with connect(path) as db:
+        return [dict(row) for row in db.execute("SELECT * FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') ORDER BY updated_at DESC", (profile_id,))]
+
+def checkpoint_research_session(session_id, profile_id, *, state=None, query_index=None,
+                                processed=None, candidates=None, reviews=None, in_flight=None, path=None):
+    import json
+    fields, values = [], []
+    for key, value in (("state", state), ("query_index", query_index),
+                       ("processed_json", json.dumps(processed, ensure_ascii=False) if processed is not None else None),
+                       ("candidates_json", json.dumps(candidates, ensure_ascii=False) if candidates is not None else None),
+                       ("reviews_json", json.dumps(reviews, ensure_ascii=False) if reviews is not None else None),
+                       ("in_flight", int(in_flight) if in_flight is not None else None)):
+        if value is not None:
+            fields.append(key + "=?"); values.append(value)
+    fields.append("updated_at=CURRENT_TIMESTAMP")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?", (session_id, profile_id)).fetchone():
+            raise ValueError("조사 세션과 프로필이 일치하지 않습니다.")
+        db.execute("UPDATE research_sessions SET " + ",".join(fields) + " WHERE id=? AND profile_id=?",
+                   (*values, session_id, profile_id))
