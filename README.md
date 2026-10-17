@@ -119,15 +119,16 @@ OAuth/네트워크는 사용하지 않습니다. Windows Sandbox가 활성화된
 
 ## V4.4.2 Windows 10 검증 결과 (2026-10-17)
 
-GitHub Actions run `39018125751`의 V4.4.2 아티팩트를 Windows 10 Pro 22H2
+GitHub Actions run `39018403464`의 V4.4.2 아티팩트를 Windows 10 Pro 22H2
 (19045.4780)에서 검증했습니다. 해당 ZIP SHA-256은
-`2ded8196e9800c096a75b9275080f95fa006db40cf7f3d10745cd1d54106f549`, EXE SHA-256은
-`2cf1b7b05747525d5760c49fb8ca1ddca583f088237ddd0b56c6f18ba80785ea`입니다.
+`64c19071eb10e649e08ba27961fc20e46d9cc593834e7b870f1a61ea022c0c6a`, EXE SHA-256은
+`776e1860acc26d7e336cb072ada6fa31bb55fc547ea6a9fa719c715a7345e408`입니다.
 ZIP sidecar와 내부 EXE 해시가 모두 일치했고, 전체 `_internal` 런타임 구조, 한국어 HTML 및
 빠른 시작 문서를 확인했습니다. 한글·일본어·공백이 포함된 복사/이동 경로에서 fresh-path
-GUI 준비 시간은 1024.3/974.4/963.3 ms, warm은 817.9/763.2/670.9 ms였습니다.
-여섯 번 모두 0.77~1.16초 내 정상 종료, 잔류 프로세스 0건, JP/KR 가상 프로필 전환 및
-검색어 격리 PASS, SQLite quick_check `ok`였습니다. 전체 검증은 24.26초 걸렸고 실제 사용자
+GUI 준비 시간은 fresh-path 1093.8/1009.7/1010.5 ms, warm은 678.8/778.3/703.5 ms였습니다.
+여섯 번 모두 0.79~1.23초 내 정상 종료, 잔류 프로세스 0건, JP/KR 가상 프로필 전환 및
+검색어 격리 PASS, SQLite quick_check `ok`였습니다. 원클릭 CMD에서 실행한 전체 검증은
+26.79초 걸렸고 실제 사용자
 DB의 크기·수정 시각은 전후 동일했습니다. 이 PC에는 Python 3.14.3이 설치되어 있으므로
 자식 EXE에서 Python PATH를 제거해 실행한 결과이지, Python 미설치 PC 시험은 아닙니다.
 
