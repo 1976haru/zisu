@@ -14,21 +14,29 @@ if defined LOCALAPPDATA (
 )
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul
 set "LOG=%LOGDIR%\launcher_latest.log"
+set "LOG_PROBE=%LOGDIR%\launcher_probe_%RANDOM%_%RANDOM%.tmp"
+>"%LOG_PROBE%" echo writable 2>nul
+if not exist "%LOG_PROBE%" goto fallback_log
+del "%LOG_PROBE%" >nul 2>&1
 
 >>"%LOG%" echo [%DATE% %TIME%] ZISU V4.5.3 launcher started. 2>nul
-if errorlevel 1 goto fallback_log
 goto log_ready
 
 :fallback_log
 set "LOGDIR=%TEMP%\ZisuResearchStudio\logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul
 set "LOG=%LOGDIR%\launcher_latest.log"
+set "LOG_PROBE=%LOGDIR%\launcher_probe_%RANDOM%_%RANDOM%.tmp"
+>"%LOG_PROBE%" echo writable 2>nul
+if not exist "%LOG_PROBE%" goto no_log
+del "%LOG_PROBE%" >nul 2>&1
 >>"%LOG%" echo [%DATE% %TIME%] ZISU V4.5.3 launcher started using temporary log fallback. 2>nul
-if errorlevel 1 (
-    echo [ZISU] A diagnostic log could not be created. Check folder permissions.
-    pause
-    exit /b 1
-)
+goto log_ready
+
+:no_log
+echo [ZISU] A diagnostic log could not be created. Check folder permissions.
+pause
+exit /b 1
 
 :log_ready
 >>"%LOG%" echo Application directory: "%APPDIR%"
