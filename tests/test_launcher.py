@@ -1,9 +1,12 @@
 import unittest
 import os
+import json
 from pathlib import Path
 from unittest.mock import patch
 import main
 ROOT=Path(__file__).resolve().parents[1]
+from mcrs.startup_probe import write_stage
+from support import WorkspaceTemp
 class LauncherTests(unittest.TestCase):
     def test_offline_smoke_arguments_are_explicit_and_validated(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -14,12 +17,19 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual("report.json",os.environ["ZISU_EXE_SMOKE_REPORT"])
             with self.assertRaises(SystemExit):
                 main._apply_offline_smoke_arguments(["--data-dir"])
-    def test_exe_smoke_report_marks_startup_stages_without_extra_identity(self):
-        with patch.dict(os.environ, {"ZISU_EXE_SMOKE_REPORT": str(ROOT/".test_tmp"/"launcher-report.json")}):
-            main._write_smoke_report("bootstrap_started")
-            report=Path(os.environ["ZISU_EXE_SMOKE_REPORT"])
-            self.assertEqual("bootstrap_started",__import__("json").loads(report.read_text(encoding="utf-8"))["stage"])
-            report.unlink()
+    def test_exe_smoke_report_records_timed_startup_events_without_identity(self):
+        with WorkspaceTemp() as root:
+            report=root/"日本語 startup report.json"
+            with patch.dict(os.environ, {"ZISU_EXE_SMOKE_REPORT": str(report)}):
+                main._write_smoke_report("python_entrypoint")
+                write_stage("database_initialized")
+                payload=json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual("database_initialized",payload["stage"])
+            self.assertEqual(["python_entrypoint","database_initialized"],[e["stage"] for e in payload["events"]])
+            self.assertGreaterEqual(payload["elapsed_ms"],0)
+            self.assertIn("timestamp_utc",payload["events"][-1])
+            self.assertNotIn("email",payload)
+            self.assertNotIn("token",report.read_text(encoding="utf-8").lower())
     def test_launcher_and_diagnostics_are_present(self):
         for f in ("실행하기.bat","START_ZISU.cmd","오류진단하기.bat","설치안내_문제해결.html","main.py","mcrs/gui.py"):
             self.assertTrue((ROOT/f).exists(),f)
@@ -39,6 +49,11 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v7",workflow)
         self.assertIn("windows_exe_smoke.ps1",workflow)
         self.assertIn("package_windows.ps1",workflow)
+        self.assertIn("--onedir",workflow)
+        self.assertIn("--onefile",workflow)
+        self.assertIn("fresh_path_launches",workflow)
+        self.assertIn("warm_process_launches",workflow)
+        self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):
         smoke=(ROOT/"scripts/windows_exe_smoke.ps1").read_text(encoding="utf-8")
@@ -47,7 +62,13 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("--data-dir",smoke)
         self.assertIn("ZISU_EXE_SMOKE_REPORT",smoke)
         self.assertIn("exe-smoke-failure.json",smoke)
-        self.assertIn("last_diagnostic_stage",smoke)
+        self.assertIn("last_python_stage",smoke)
+        self.assertIn("native_window_handle_present",smoke)
+        self.assertNotIn("gui_window_detected",smoke)
         self.assertIn("python_removed_from_path",smoke)
+        self.assertIn("launch_to_gui_ready_ms",smoke)
+        self.assertIn("EXE process(es) remained",smoke)
+        self.assertIn("_internal",package)
+        self.assertIn("Refusing to overwrite existing package",package)
         for marker in ("client_secret","oauth_tokens","token\\.json","\\.db$","\\.log$"):
             self.assertIn(marker,package)

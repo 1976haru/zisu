@@ -1,4 +1,4 @@
-# ZISU Research Studio V4.4 Offline RC — 최종 배포 안정화
+# ZISU Research Studio V4.4.1 — Windows 실행 안정화
 
 V4 기능 브랜치는 첫 실행 시작 마법사, 프로필별 Google 읽기 전용 OAuth,
 KR/JP 독립 검색어, 6개 장르의 `적합 / 검토 / 제외` 보수 판정과 V2 SQLite
@@ -9,7 +9,7 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 `적합 / 제외 / 불확실` 정답을 기록하면 추천 정밀도와 제외 오류율을 계산합니다.
 표본이 충분하지 않으면 95% 정밀도 달성을 주장하지 않습니다.
 
-> 검증 상태: 자동화 테스트, GUI 스모크, Windows CI에서 실제 EXE 시작·종료 및 ZIP 검증이 통과했습니다. 개발자 로컬 Windows 10 EXE 스모크는 종료 보고서 없이 시간 초과되어 미통과로 기록합니다. 실제 Google OAuth, 실제 KR/JP 영상 표본의 정밀도와 Python 미설치 독립 PC 실행은 별도 실사용 검증이 필요합니다.
+> 검증 상태: V4.4의 Windows 10 시간 초과를 재현해 GUI 창 핸들 오탐을 확인했습니다. 실행 프로세스는 Tkinter 창이 아니라 Windows `UAC_InputIndicatorOverlayWnd`만 보였고, Python 시작 보고서가 없었습니다. onefile 압축 해제 폴더가 비어 있고 자식 프로세스가 확인되지 않아 실제 Python/GUI 코드 진입 전 부트로더 단계에서 멈춘 사실까지 확인했습니다. 보안 로그에서 차단 원인은 확인되지 않았습니다. V4.4.1은 onedir 배포를 비교·검증하고 단계별 시작 시간을 기록합니다.
 
 **Windows 10/11용** · 한국/일본 · Chill Rap / Morning Chill Rap 등 장르 분리 · Google 읽기 전용 연결
 
@@ -17,7 +17,7 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 
 ## 가장 먼저 할 일
 
-1. 이미 작동하는 **V2.1은 지우지 마세요.** V4.4 배포 ZIP을 별도 폴더에 모두 압축 해제하고 EXE의 SHA-256을 확인합니다.
+1. 이미 작동하는 **V2.1은 지우지 마세요.** V4.4.1 배포 ZIP을 별도 폴더에 모두 압축 해제하고 EXE의 SHA-256을 확인합니다. `_internal` 폴더를 EXE와 분리하지 마세요.
 2. 첫 번째 탭 **① 계정 연결**에서 대상 작업 프로필을 확인합니다. **설정 없이 바로 쓰고 싶다면 'Google Cloud 없이 먼저 유튜브 열기'** 버튼으로 브라우저에 로그인한 후 수동 검색할 수 있습니다. 이 모드는 앱 OAuth 연결은 아닙니다. 기존 V2 DB가 있으면 그대로 읽고 필요한 연결 필드만 자동 추가합니다.
 3. `OAuth_모듈_설치하기.bat`을 한번 실행합니다. Google OAuth용 공개 Python 패키지 3개가 설치됩니다. 기본 기능은 패키지 없이 동작합니다.
 4. Google Cloud에서 `YouTube Data API v3`를 켜고 `Google Auth Platform`의 앱 정보를 구성한 뒤, **데스크톱 앱** OAuth 클라이언트를 만들어 JSON 파일을 받습니다. 테스트 모드라면 연결할 새 Google 계정을 테스트 사용자로 등록합니다.
@@ -38,7 +38,7 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 
 ## 주요 기능
 
-| 기능 | V4.4 상태 |
+| 기능 | V4.4.1 상태 |
 |---|---|
 | JP/KR 다채널 프로필 분리 | 구현 |
 | 프로필별 Google OAuth 계정 연결·해제 | 구현 / 실제 Google 승인 미검증 |
@@ -72,13 +72,15 @@ GUI 스모크: `xvfb-run -a python tests/smoke_gui.py` (Linux 테스트 환경)
 `오류진단하기.bat`은 OAuth 모듈 포함 여부, DB 무결성 및 테이블별 행 수만 기록합니다.
 이메일·채널 ID·토큰 값·DB 경로는 진단 보고서에 기록하지 않습니다.
 
-## V4.4 Windows 배포 ZIP 검증
+## V4.4.1 Windows 배포 ZIP 검증
 
-CI 배포 ZIP에는 `ZisuResearchStudio.exe`, `SHA256SUMS.txt`, 초보자 설명서와
-빠른 시작 안내만 포함합니다. 소스, DB, OAuth JSON, 토큰, 로그와 백업은 포함하지
-않습니다. CI는 ZIP을 한글·일본어·공백이 있는 별도 경로에 풀고 Python 경로를
-제거한 상태에서 EXE의 GUI 초기화와 정상 종료를 확인합니다. 이는 패키지의 Python
-비의존성을 검사하지만, Python이 전혀 설치되지 않은 독립 PC 검증과는 구분합니다.
+CI 배포 ZIP에는 onedir EXE와 동봉 런타임 `_internal` 폴더, `SHA256SUMS.txt`,
+초보자 설명서와 빠른 시작 안내만 포함합니다. 소스, DB, OAuth JSON, 토큰, 로그와
+백업은 포함하지 않습니다. CI는 onefile과 onedir의 시작·종료 시간을 같은 Windows
+러너에서 비교하고, 배포 ZIP을 한글·일본어·공백이 있는 경로에 풀어 Python 경로를
+제거한 상태로 GUI 초기화와 정상 종료를 검증합니다. 로컬 Windows 10에서 내려받은
+정확한 onedir 배포본 재검증 전까지 V4.4.1 RC는 보류합니다. Python이 전혀 설치되지
+않은 독립 PC 검증도 별도입니다.
 
 > 이 배포본은 로컬에서 구현한 소스 ZIP입니다. 사용자의 `D:\03 zisu`나 GitHub `1976haru/zisu`에 자동 업로드하지 않았습니다.
 

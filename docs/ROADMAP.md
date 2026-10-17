@@ -1,4 +1,15 @@
-# ZISU V4.4 Offline RC 로드맵 / 상태 보고 (2026-10-17)
+# ZISU V4.4.1 Windows 시작 안정화 / 상태 보고 (2026-10-17)
+
+## V4.4.1 시간 초과 원인 조사 (진행 중)
+
+- 재현 ZIP SHA-256: `8793e4fa5807b2c543ff5b7e503d0faf608f1ea0fa858bd23ff92bcd8f90fd77`; EXE SHA-256: `0becbea7953eacae293e75aa5d720ffc728faeedd6e5613b2a8f48700311eb4`.
+- 재현 PC: Windows 10 Pro 22H2, OS 빌드 `19045.4780`; Python 3.14.3 설치 상태.
+- 격리 데이터 경로와 한글/일본어/공백이 포함된 ZIP 해제 경로에서 40초간 실행했지만 프로세스가 종료되지 않았고, 단계 보고서 및 격리 DB 파일은 생성되지 않았습니다. 기존 사용자 DB의 파일 시각은 그대로였습니다.
+- 이전 스모크의 `MainWindowHandle != 0`은 Tkinter 창 증거가 아니었습니다. 실제 창 클래스는 `UAC_InputIndicatorOverlayWnd`로, GUI 초기화로 잘못 판정하지 않도록 수정합니다.
+- 정확한 ZIP EXE는 프로세스로 생성되었지만 PyInstaller `_MEI*` 압축 해제 경로가 비어 있었고, 같은 이미지의 자식 프로세스가 보이지 않았습니다. 따라서 확인된 실패 지점은 Python 엔트리포인트 이전의 onefile 부트스트랩 단계입니다.
+- 최근 Application Error/Windows Error Reporting에서 ZISU 프로세스 오류는, Windows Defender Operational에서 해당 EXE 차단 이벤트는 찾지 못했습니다. 관리형 실행 환경의 제한인지 OS/보안 제품 원인인지는 현재 증거만으로 확정할 수 없습니다.
+- 빌드 옵션 비교를 위해 CI에서 onefile을 대조군으로 실행하고, 배포본은 onedir ZIP으로 생성하도록 변경했습니다. 단계별 Python 진입, 모듈 import, Tk 루트, DB 초기화, 위젯 완료, GUI 준비 및 종료 시간을 기록합니다.
+- 로컬 Python 3.14에는 PyInstaller와 OAuth 패키지가 없어 동일 소스의 독립 onedir 로컬 빌드는 불가능합니다. CI onedir 산출물을 같은 Windows 10에서 실행해 해결 여부를 확인하기 전까지 RC 판정은 보류합니다.
 
 ## V4.4 최종 배포 안정화
 
@@ -13,7 +24,7 @@
 - CI에서 Python 경로를 제거한 상태로 복사된 EXE의 GUI 초기화·정상 종료, 격리 데이터 폴더 생성, ZIP 4개 파일 검사와 OAuth 패키지 포함 검사가 통과했습니다.
 - 배포 EXE SHA-256: `087497963462af0d8c209ded35c20e6b3c1fdc7809787aaeed4a882c066eb93f`.
 - 배포 ZIP SHA-256: `79384e0b9bedfbd307d21c7b7b366ac88f11e71b666597158218522585be290f`.
-- 개발자 PC는 Windows 10 Pro 22H2, 빌드 19045.4780이며 Python 3.14.3이 설치되어 있습니다. 해당 PC에서 내려받은 EXE는 GUI 창이 생겼으나 격리 종료 보고서 없이 30초를 초과하여 로컬 스모크 미통과입니다. 실제 Windows Sandbox 기능 확인은 관리자 권한을 요구해 수행하지 못했습니다.
+- 개발자 PC는 Windows 10 Pro 22H2, 빌드 19045.4780이며 Python 3.14.3이 설치되어 있습니다. (이전 문서의 “GUI 창이 생김” 표기는 오판이었습니다. 위 V4.4.1 조사 결과에서 바로잡았습니다.) 실제 Windows Sandbox 기능 확인은 관리자 권한을 요구해 수행하지 못했습니다.
 - 따라서 CI의 독립 EXE 스모크 통과와 Python 미설치 독립 PC 검증을 구분하며, 로컬 Windows 10 종료 동작은 P1 잔여 검증으로 남깁니다.
 - GUI 회귀 스모크는 검색 중 KR 프로필로 전환해도 완료된 후보가 원래 JP 프로필에만 저장되는지 확인합니다.
 

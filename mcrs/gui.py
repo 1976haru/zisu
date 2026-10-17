@@ -1,6 +1,5 @@
 """Beginners-first KR/JP multi-channel GUI with read-only account connection."""
 from __future__ import annotations
-import json
 import os
 import platform
 import re
@@ -18,6 +17,7 @@ from . import store
 from .genres import GENRES, search_terms, assess
 from .youtube_api import lookup_videos, APIError
 from . import oauth
+from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
 ACCENT = "#20635A"
@@ -80,10 +80,13 @@ class ProfileDialog(tk.Toplevel):
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
+        _write_smoke_stage("tk_root_created")
+        _write_smoke_stage("database_initializing")
         store.initialize()
+        _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.4 · KR / JP 장르 안전 조사")
+        self.title("ZISU Research Studio V4.4.1 · KR / JP 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -138,17 +141,14 @@ class Studio(tk.Tk):
         self.after(1000,self._tick)
         self.after(14000,self._scheduled_tick)
         if smoke_report:
+            _write_smoke_stage("gui_widgets_ready")
             self.after(250, lambda: self._complete_exe_smoke(smoke_report))
 
     def _complete_exe_smoke(self, report_path):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
-        target = Path(report_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema": 1,
-            "app_version": "4.4",
-            "stage": "completed",
+            "app_version": "4.4.1",
             "gui_initialized": len(self.frames) == 6 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -159,9 +159,7 @@ class Studio(tk.Tk):
             "oauth_connected": False,
             "network_used": False,
         }
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(target)
+        _write_smoke_stage("gui_ready", **payload)
         self.destroy()
 
     def _header(self):
