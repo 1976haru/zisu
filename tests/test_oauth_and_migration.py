@@ -1,5 +1,4 @@
 import io, json, os, sqlite3, unittest
-from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlparse, parse_qs
 from urllib.error import HTTPError

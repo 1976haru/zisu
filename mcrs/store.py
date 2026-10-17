@@ -1,6 +1,9 @@
 """Backward-compatible, profile-isolated SQLite storage (credentials excluded)."""
 from __future__ import annotations
-import csv, os, sqlite3, uuid
+import csv
+import os
+import sqlite3
+import uuid
 from contextlib import contextmanager, closing
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +27,9 @@ def connect(path=None):
     db = sqlite3.connect(target, timeout=15)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
+    # Keep concurrent GUI/search operations from failing immediately while a
+    # short writer transaction is in progress.  This setting is per-connection.
+    db.execute("PRAGMA busy_timeout=15000")
     try:
         yield db
         db.commit()
@@ -42,6 +48,9 @@ def _add_column(db, table, definition):
 def initialize(path=None):
     """Create or migrate in place. Existing rows are never dropped or replaced."""
     with connect(path) as db:
+        # WAL permits readers during writes and is safe to request repeatedly.
+        # SQLite keeps existing user rows intact when changing journal mode.
+        db.execute("PRAGMA journal_mode=WAL")
         db.executescript("""
         CREATE TABLE IF NOT EXISTS profiles (
           id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
@@ -152,17 +161,19 @@ def save_candidates(profile_id, rows, path=None):
         video_id = str(row.get("video_id", ""))
         if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
             continue
-        verdict = assess(profile["genre"], str(row.get("video_title", "")), str(row.get("description", "")))
+        title = str(row.get("video_title", ""))[:1000]
+        description = str(row.get("description", ""))[:10000]
+        verdict = assess(profile["genre"], title, description)
         stats[verdict.decision] += 1
-        audit_values.append((profile_id,video_id,str(row.get("video_title","")),str(row.get("description","")),
+        audit_values.append((profile_id,video_id,title,description,
           profile["market"],profile["genre"],verdict.decision,verdict.score,verdict.reason,
           " | ".join(verdict.positive_signals)," | ".join(verdict.conflict_signals),verdict.uncertainty))
         if verdict.decision == EXCLUDE:
             continue
-        values.append((profile_id,video_id,str(row.get("video_title","")),str(row.get("channel_title","")),
-          str(row.get("channel_id","")),f"https://www.youtube.com/watch?v={video_id}",str(row.get("description","")),
-          str(row.get("published_at","")),int(row.get("views",0) or 0),str(row.get("country","")),
-          str(row.get("keyword","")),verdict.decision,verdict.score,verdict.reason))
+        values.append((profile_id,video_id,title,str(row.get("channel_title",""))[:500],
+          str(row.get("channel_id",""))[:200],f"https://www.youtube.com/watch?v={video_id}",description,
+          str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),str(row.get("country",""))[:20],
+          str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason))
     with connect(path) as db:
         db.executemany("""INSERT INTO genre_audit(profile_id,video_id,video_title,description,market,
           target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty)

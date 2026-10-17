@@ -14,12 +14,23 @@ jobs:
           python-version: '3.12'
       - name: Run unit tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run isolated stress gate
+        run: python tests/stress_v43.py
       - name: Compile Python sources
         run: python -m compileall -q mcrs tests main.py
       - name: Install packager
         run: python -m pip install -r requirements-oauth.txt pyinstaller
       - name: Build executable
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-all google_auth_oauthlib --name ZisuResearchStudio main.py
+      - name: Verify packaged OAuth modules
+        shell: pwsh
+        run: |
+          pyi-archive_viewer -l -r dist\ZisuResearchStudio.exe | Out-File -Encoding utf8 archive_listing.txt
+          foreach ($module in @('google_auth_oauthlib', 'google.oauth2.credentials', 'requests')) {
+            if (-not (Select-String -LiteralPath archive_listing.txt -Pattern $module -Quiet)) {
+              throw "Required packaged module missing: $module"
+            }
+          }
       - name: Write SHA-256 manifest
         shell: pwsh
         run: |
