@@ -310,7 +310,8 @@ class GeminiProvider(JsonHttpProvider):
     def list_available_models(self, *, max_pages: int = 100) -> list[dict[str, str]]:
         """List account-visible generateContent models; this never generates content."""
         self.list_request_count = 0
-        if not self.api_key:
+        api_key = self.api_key
+        if not api_key:
             raise ProviderFailure("missing_key")
         models: dict[str, str] = {}
         page_token = ""
@@ -321,7 +322,7 @@ class GeminiProvider(JsonHttpProvider):
                 from urllib.parse import urlencode
                 url += "?" + urlencode({"pageToken": page_token})
             self.list_request_count += 1
-            payload = self._get(url, {"x-goog-api-key": self.api_key})
+            payload = self._get(url, {"x-goog-api-key": api_key})
             items = payload.get("models", [])
             if not isinstance(items, list):
                 raise ProviderFailure("bad_response")
