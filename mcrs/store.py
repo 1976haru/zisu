@@ -66,6 +66,21 @@ def initialize(path=None):
           avg_minutes REAL NOT NULL, subscribers INTEGER NOT NULL,
           PRIMARY KEY(profile_id,day),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS genre_audit (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, video_title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '', market TEXT NOT NULL, target_genre TEXT NOT NULL,
+          predicted_decision TEXT NOT NULL, predicted_score INTEGER NOT NULL,
+          reason TEXT NOT NULL, positive_signals TEXT NOT NULL DEFAULT '',
+          conflict_signals TEXT NOT NULL DEFAULT '', uncertainty TEXT NOT NULL DEFAULT '',
+          human_label TEXT NOT NULL DEFAULT '', label_notes TEXT NOT NULL DEFAULT '',
+          reviewed_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS profile_search_terms (
+          profile_id TEXT NOT NULL, market TEXT NOT NULL, term TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY(profile_id,market,term),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
           ON candidates(profile_id,genre_decision,status);
         """)
@@ -74,10 +89,11 @@ def initialize(path=None):
             "youtube_channel_title TEXT NOT NULL DEFAULT ''",
             "connected_at TEXT NOT NULL DEFAULT ''",
             "connected_email TEXT NOT NULL DEFAULT ''",
+            "subgenre TEXT NOT NULL DEFAULT ''",
         ):
             _add_column(db, "profiles", definition)
 
-def create_profile(name, market, genre, path=None):
+def create_profile(name, market, genre, path=None, subgenre=""):
     initialize(path)
     name = (name or "").strip()
     if not 2 <= len(name) <= 70:
@@ -86,7 +102,8 @@ def create_profile(name, market, genre, path=None):
         raise ValueError("국가와 장르를 확인하세요.")
     profile_id = uuid.uuid4().hex
     with connect(path) as db:
-        db.execute("INSERT INTO profiles(id,name,market,genre) VALUES(?,?,?,?)", (profile_id,name,market,genre))
+        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre) VALUES(?,?,?,?,?)",
+                   (profile_id,name,market,genre,(subgenre or "").strip()[:100]))
     return profile_id
 
 def list_profiles(path=None):
@@ -99,7 +116,7 @@ def get_profile(profile_id, path=None):
         row = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
         return dict(row) if row else None
 
-def update_profile(profile_id, *, name, market, genre, path=None):
+def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None):
     name = (name or "").strip()
     if market not in MARKETS or genre not in GENRES:
         raise ValueError("국가와 장르를 확인하세요.")
@@ -112,7 +129,11 @@ def update_profile(profile_id, *, name, market, genre, path=None):
         count = db.execute("SELECT COUNT(*) FROM candidates WHERE profile_id=?", (profile_id,)).fetchone()[0]
         if count and (old["market"] != market or old["genre"] != genre):
             raise ValueError("후보가 저장된 프로필의 국가·장르는 변경할 수 없습니다. 새 프로필을 추가하세요.")
-        db.execute("UPDATE profiles SET name=?,market=?,genre=? WHERE id=?", (name,market,genre,profile_id))
+        if subgenre is None:
+            db.execute("UPDATE profiles SET name=?,market=?,genre=? WHERE id=?", (name,market,genre,profile_id))
+        else:
+            db.execute("UPDATE profiles SET name=?,market=?,genre=?,subgenre=? WHERE id=?",
+                       (name,market,genre,(subgenre or "").strip()[:100],profile_id))
 
 def update_schedule(profile_id, schedule, path=None):
     import re
@@ -126,13 +147,16 @@ def save_candidates(profile_id, rows, path=None):
     profile = get_profile(profile_id, path)
     if not profile:
         raise ValueError("선택한 프로필을 찾을 수 없습니다.")
-    values, stats = [], {"적합":0, "검토":0, "제외":0}
+    values, audit_values, stats = [], [], {"적합":0, "검토":0, "제외":0}
     for row in rows:
         video_id = str(row.get("video_id", ""))
         if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
             continue
         verdict = assess(profile["genre"], str(row.get("video_title", "")), str(row.get("description", "")))
         stats[verdict.decision] += 1
+        audit_values.append((profile_id,video_id,str(row.get("video_title","")),str(row.get("description","")),
+          profile["market"],profile["genre"],verdict.decision,verdict.score,verdict.reason,
+          " | ".join(verdict.positive_signals)," | ".join(verdict.conflict_signals),verdict.uncertainty))
         if verdict.decision == EXCLUDE:
             continue
         values.append((profile_id,video_id,str(row.get("video_title","")),str(row.get("channel_title","")),
@@ -140,6 +164,14 @@ def save_candidates(profile_id, rows, path=None):
           str(row.get("published_at","")),int(row.get("views",0) or 0),str(row.get("country","")),
           str(row.get("keyword","")),verdict.decision,verdict.score,verdict.reason))
     with connect(path) as db:
+        db.executemany("""INSERT INTO genre_audit(profile_id,video_id,video_title,description,market,
+          target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          video_title=excluded.video_title,description=excluded.description,market=excluded.market,
+          target_genre=excluded.target_genre,predicted_decision=excluded.predicted_decision,
+          predicted_score=excluded.predicted_score,reason=excluded.reason,
+          positive_signals=excluded.positive_signals,conflict_signals=excluded.conflict_signals,
+          uncertainty=excluded.uncertainty,updated_at=CURRENT_TIMESTAMP""", audit_values)
         db.executemany("""INSERT INTO candidates(profile_id,video_id,video_title,channel_title,channel_id,
           video_url,description,published_at,views,country,keyword,genre_decision,genre_score,genre_reason)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
@@ -233,3 +265,55 @@ def bind_youtube_channel(profile_id, channel_id, channel_title, email="", path=N
 def unbind_youtube_channel(profile_id, path=None):
     with connect(path) as db:
         db.execute("UPDATE profiles SET youtube_channel_id='',youtube_channel_title='',connected_email='',connected_at='' WHERE id=?", (profile_id,))
+
+def list_genre_audit(profile_id, decision="전체", labeled=None, path=None):
+    sql, args = "SELECT * FROM genre_audit WHERE profile_id=?", [profile_id]
+    if decision != "전체":
+        sql += " AND predicted_decision=?"; args.append(decision)
+    if labeled is True:
+        sql += " AND human_label<>''"
+    elif labeled is False:
+        sql += " AND human_label=''"
+    sql += " ORDER BY updated_at DESC,video_id"
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(sql,args)]
+
+def label_genre_audit(profile_id, video_id, label, notes="", path=None):
+    if label not in ("적합", "제외", "불확실"):
+        raise ValueError("사람 판정은 적합, 제외 또는 불확실이어야 합니다.")
+    if label != "불확실" and len((notes or "").strip()) < 5:
+        raise ValueError("판정 근거를 5자 이상 기록하세요.")
+    with connect(path) as db:
+        result = db.execute("""UPDATE genre_audit SET human_label=?,label_notes=?,
+          reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+          WHERE profile_id=? AND video_id=?""", (label,(notes or "").strip(),profile_id,video_id))
+        if result.rowcount != 1:
+            raise ValueError("장르 검토 표본을 찾을 수 없습니다.")
+
+def genre_quality(profile_id, path=None):
+    rows = list_genre_audit(profile_id, labeled=True, path=path)
+    determined = [row for row in rows if row["human_label"] in ("적합","제외")]
+    accepted = [row for row in determined if row["predicted_decision"] in ("적합","수동 승인")]
+    excluded = [row for row in determined if row["predicted_decision"] == "제외"]
+    precision = (sum(row["human_label"] == "적합" for row in accepted) / len(accepted)) if accepted else None
+    exclusion_error = (sum(row["human_label"] == "적합" for row in excluded) / len(excluded)) if excluded else None
+    return {"labeled":len(rows),"determined":len(determined),"accepted":len(accepted),
+            "excluded":len(excluded),"precision":precision,"exclusion_error_rate":exclusion_error}
+
+def set_profile_search_terms(profile_id, market, terms, path=None):
+    if market not in MARKETS:
+        raise ValueError("시장 코드는 JP 또는 KR이어야 합니다.")
+    cleaned = list(dict.fromkeys(str(term).strip() for term in terms if str(term).strip()))
+    if not cleaned or len(cleaned) > 50 or any(len(term) > 100 for term in cleaned):
+        raise ValueError("검색어는 1~50개, 각 100자 이하로 입력하세요.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM profiles WHERE id=?",(profile_id,)).fetchone():
+            raise ValueError("프로필을 찾을 수 없습니다.")
+        db.execute("DELETE FROM profile_search_terms WHERE profile_id=? AND market=?",(profile_id,market))
+        db.executemany("INSERT INTO profile_search_terms(profile_id,market,term) VALUES(?,?,?)",
+                       [(profile_id,market,term) for term in cleaned])
+
+def list_profile_search_terms(profile_id, market, path=None):
+    with connect(path) as db:
+        return [row[0] for row in db.execute("""SELECT term FROM profile_search_terms
+          WHERE profile_id=? AND market=? AND enabled=1 ORDER BY rowid""",(profile_id,market))]

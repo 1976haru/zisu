@@ -14,13 +14,22 @@ jobs:
           python-version: '3.12'
       - name: Run unit tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Compile Python sources
+        run: python -m compileall -q mcrs tests main.py
       - name: Install packager
         run: python -m pip install -r requirements-oauth.txt pyinstaller
       - name: Build executable
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-all google_auth_oauthlib --name ZisuResearchStudio main.py
+      - name: Write SHA-256 manifest
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist\ZisuResearchStudio.exe).Hash.ToLowerInvariant()
+          "$hash  ZisuResearchStudio.exe" | Set-Content -Encoding ascii dist\SHA256SUMS.txt
       - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
         with:
           name: ZisuResearchStudio-Windows
-          path: dist/ZisuResearchStudio.exe
+          path: |
+            dist/ZisuResearchStudio.exe
+            dist/SHA256SUMS.txt
           if-no-files-found: error

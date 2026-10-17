@@ -1,0 +1,14 @@
+[
+  {"genre":"MORNING_CHILL_RAP","market":"KR","title":"아침 melodic rap 감성 힙합 플레이리스트","expected":"적합"},
+  {"genre":"MORNING_CHILL_RAP","market":"JP","title":"朝 チルラップ プレイリスト","expected":"적합"},
+  {"genre":"MORNING_CHILL_RAP","market":"KR","title":"아침 무보컬 카페 BGM","expected":"제외"},
+  {"genre":"MORNING_CHILL_RAP","market":"JP","title":"朝 睡眠用 Lo-Fi 作業用","expected":"제외"},
+  {"genre":"MORNING_CHILL_RAP","market":"KR","title":"아침 기분 좋은 음악","expected":"검토"},
+  {"genre":"CHILL_RAP","market":"KR","title":"감성 힙합 칠랩 플레이리스트","expected":"적합"},
+  {"genre":"CHILL_RAP","market":"JP","title":"チルラップ メロウラップ プレイリスト","expected":"적합"},
+  {"genre":"RNB_HIPHOP","market":"KR","title":"알앤비 힙합 neo soul 플레이리스트","expected":"적합"},
+  {"genre":"RNB_HIPHOP","market":"JP","title":"R&B ヒップホップ ネオソウル","expected":"적합"},
+  {"genre":"CAFE_CHILL","market":"KR","title":"카페 칠 acoustic pop 플레이리스트","expected":"적합"},
+  {"genre":"OLD_POP","market":"KR","title":"7080 팝 추억의 팝송 올드팝","expected":"적합"},
+  {"genre":"JAZZ_LOUNGE","market":"JP","title":"ジャズラウンジ スムースジャズ","expected":"적합"}
+]

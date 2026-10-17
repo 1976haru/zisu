@@ -38,6 +38,26 @@ def is_connected(profile_id):
     return token_path(profile_id).is_file()
 
 
+def connection_state(profile_id):
+    """Return non-secret connection health for GUI/diagnostics."""
+    path = token_path(profile_id)
+    profile = store.get_profile(profile_id)
+    if not profile:
+        return {"status":"missing_profile","message":"프로필을 찾을 수 없습니다."}
+    if not path.is_file():
+        return {"status":"disconnected","message":"Google 계정 연결 전"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        scopes = payload.get("scopes") or []
+        if READONLY_SCOPE not in scopes:
+            return {"status":"invalid_scope","message":"읽기 전용 권한이 없어 다시 연결해야 합니다."}
+        if not payload.get("refresh_token"):
+            return {"status":"reconnect_required","message":"갱신 정보가 없어 만료 시 다시 연결해야 합니다."}
+        return {"status":"connected","message":"Google 읽기 전용 연결됨"}
+    except (OSError,ValueError,TypeError):
+        return {"status":"corrupt","message":"연결 파일을 읽을 수 없어 다시 연결해야 합니다."}
+
+
 def get_access_token(profile_id):
     """Return a valid token, refreshing if needed (never expose it to the UI)."""
     _, Credentials, RefreshRequest = _packages()
@@ -56,7 +76,10 @@ def get_access_token(profile_id):
     except OAuthError:
         raise
     except Exception as exc:
-        raise OAuthError("계정 인증에 실패했습니다. 연결을 해제하고 다시 연결해 주세요.") from exc
+        detail = str(exc).casefold()
+        if "invalid_grant" in detail or "revoked" in detail:
+            raise OAuthError("Google 접근 권한이 취소되었거나 만료되었습니다. 다시 연결해 주세요.") from exc
+        raise OAuthError("계정 인증에 실패했습니다. 인터넷 연결을 확인한 뒤 다시 연결해 주세요.") from exc
 
 
 def _write_token(path, json_text):
@@ -76,7 +99,7 @@ def _get_my_channels(access_token):
     url = 'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true&maxResults=50'
     try:
         with urlopen(Request(url, headers={'Authorization': 'Bearer ' + access_token,
-                                           'User-Agent': 'ZisuResearchStudio/3.0'}), timeout=25) as resp:
+                                           'User-Agent': 'ZisuResearchStudio/4.2'}), timeout=25) as resp:
             data = json.load(resp)
     except HTTPError as exc:
         raise OAuthError(f"YouTube 연결 확인 실패 (HTTP {exc.code}). YouTube Data API 사용 설정을 확인하세요.") from None
@@ -91,7 +114,7 @@ def _get_email(access_token):
     url = 'https://openidconnect.googleapis.com/v1/userinfo'
     try:
         with urlopen(Request(url,headers={'Authorization':'Bearer '+access_token,
-                                         'User-Agent':'ZisuResearchStudio/3.0'}),timeout=20) as resp:
+                                         'User-Agent':'ZisuResearchStudio/4.2'}),timeout=20) as resp:
             return json.load(resp).get('email','')
     except (HTTPError,URLError,TimeoutError,ValueError):
         return ''
@@ -107,7 +130,8 @@ def begin_connect(client_file):
             config = json.load(f)
         if not config.get('installed',{}).get('client_id'):
             raise OAuthError("OAuth 클라이언트 유형이 '데스크톱 앱'이 아닙니다. Google Cloud에서 다시 생성하세요.")
-        flow = InstalledAppFlow.from_client_secrets_file(str(client_file), scopes=SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(client_file), scopes=SCOPES, autogenerate_code_verifier=True)
         credentials = flow.run_local_server(host='127.0.0.1', port=0, open_browser=True,
                                             prompt='select_account', access_type='offline')
         email=_get_email(credentials.token)
@@ -139,11 +163,16 @@ def save_connection(profile_id, channel, token_json):
             raise ValueError("read only scope missing")
     except (ValueError, TypeError) as exc:
         raise OAuthError("잘못된 읽기 전용 연결 정보입니다.") from exc
-    _write_token(token_path(profile_id), token_json)
+    path = token_path(profile_id)
+    previous_token = path.read_text(encoding="utf-8") if path.is_file() else None
+    _write_token(path, token_json)
     try:
         store.bind_youtube_channel(profile_id, channel.get('channel_id',''), channel['channel_title'], channel.get('email',''))
     except Exception:
-        token_path(profile_id).unlink(missing_ok=True)
+        if previous_token is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write_token(path, previous_token)
         raise
 
 

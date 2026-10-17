@@ -14,7 +14,7 @@ def _get(endpoint,key,access_token=None,**kwargs):
     if not access_token:
         params["key"] = key.strip()
     url="https://www.googleapis.com/youtube/v3/"+endpoint+"?"+urlencode(params)
-    headers={"User-Agent":"ZisuResearchStudio/3.0"}
+    headers={"User-Agent":"ZisuResearchStudio/4.2"}
     if access_token:
         headers["Authorization"]="Bearer " + access_token
     try:
@@ -22,10 +22,24 @@ def _get(endpoint,key,access_token=None,**kwargs):
             return json.load(res)
     except HTTPError as exc:
         try:
-            error=json.load(exc).get("error",{}).get("message","검색 실패")
+            payload=json.load(exc).get("error",{})
+            error=payload.get("message","검색 실패")
+            reasons={item.get("reason","") for item in payload.get("errors",[])}
         except (ValueError, UnicodeError):
             error=f"HTTP {exc.code}"
-        raise APIError(f"API 요청 실패: {error}") from None
+            reasons=set()
+        if exc.code == 401:
+            message="Google 연결이 만료되었거나 취소되었습니다. 계정을 다시 연결하세요."
+        elif exc.code == 403 and reasons & {"quotaExceeded","dailyLimitExceeded"}:
+            message="YouTube API 일일 할당량을 초과했습니다. 할당량이 갱신된 뒤 다시 시도하세요."
+        elif exc.code == 403:
+            message="YouTube Data API 권한 또는 사용 설정을 확인하세요."
+        elif exc.code == 429:
+            message="요청이 너무 많습니다. 잠시 후 다시 시도하세요."
+        else:
+            message=f"API 요청 실패: {error}"
+        exc.close()
+        raise APIError(message) from None
     except (URLError,TimeoutError) as exc:
         raise APIError("인터넷 연결을 확인하세요.") from None
 

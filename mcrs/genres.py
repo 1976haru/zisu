@@ -19,8 +19,8 @@ SLEEP_STUDY = ("수면", "숙면", "공부", "집중", "作業用", "睡眠用",
 
 GENRES = {
  "MORNING_CHILL_RAP": Genre("Morning Chill Rap",
-  ("morning chill rap", "chill rap", "mellow rap", "감성 힙합", "칠 랩", "チルラップ", "メロウラップ", "朝ラップ"),
-  COMMON_NON_MUSIC + SLEEP_STUDY + ("클래식", "classic bgm", "solo piano", "jazz instrumental", "카페 재즈", "ジャズ", "ハードコアラップ"),
+  ("morning chill rap", "chill rap", "mellow rap", "melodic rap", "감성 힙합", "멜로딕 랩", "칠 랩", "チルラップ", "メロウラップ", "朝ラップ", "メロディックラップ"),
+  COMMON_NON_MUSIC + SLEEP_STUDY + ("클래식", "classic bgm", "solo piano", "jazz instrumental", "카페 재즈", "ジャズ", "ハードコアラップ", "무보컬", "보컬 없음", "instrumental only", "ambient", "앰비언트", "インストゥルメンタル", "アンビエント"),
   ("朝 チルラップ", "朝 メロウラップ", "モーニング チルラップ", "朝 ドライブ チルラップ", "朝の感性ヒップホップ", "朝 R&B ヒップホップ", "Morning Chill Rap Japan", "朝 通勤 ラップ", "朝 カフェ チルラップ", "爽やか チルラップ", "朝 プレイリスト ヒップホップ", "朝 日本語ラップ"),
   ("아침 칠랩", "모닝 칠랩", "아침 감성 힙합", "출근길 칠랩", "아침 드라이브 힙합", "Morning Chill Rap Korea", "아침 멜로우 랩", "모닝 감성랩", "아침 R&B 힙합", "상쾌한 칠랩", "아침 플레이리스트 힙합", "출근 감성랩"),
   ("morning", "아침", "모닝", "출근", "朝", "モーニング", "通勤", "爽やか"),
@@ -57,6 +57,9 @@ class Verdict:
     decision: str
     score: int
     reason: str
+    positive_signals: tuple[str, ...] = ()
+    conflict_signals: tuple[str, ...] = ()
+    uncertainty: str = ""
 
 def _contains(text: str, term: str) -> bool:
     folded = term.casefold()
@@ -75,7 +78,8 @@ def assess(genre_id: str, title: str, description: str = "") -> Verdict:
     combined = title_text + "\n" + description_text
     negative = [term for term in genre.negatives if _contains(combined, term)]
     if negative:
-        return Verdict(EXCLUDE, 0, "배제 신호: " + ", ".join(negative[:3]))
+        return Verdict(EXCLUDE, 0, "배제 신호: " + ", ".join(negative[:3]),
+                       conflict_signals=tuple(negative), uncertainty="명시적 배제 조건")
     title_hits = _signals(genre, title_text)
     description_hits = [x for x in _signals(genre, description_text) if x not in title_hits]
     context_hits = [x for x in genre.required_context if _contains(combined, x)]
@@ -83,19 +87,30 @@ def assess(genre_id: str, title: str, description: str = "") -> Verdict:
     for other_id in genre.conflicts:
         conflicting.extend(_signals(GENRES[other_id], combined))
     score = min(100, 55 * bool(title_hits) + 15 * min(max(len(title_hits)-1, 0), 1) + 10 * min(len(description_hits), 2))
+    positives = tuple(dict.fromkeys(title_hits + description_hits))
+    if genre_id == "MORNING_CHILL_RAP":
+        rap_terms = ("rap", "랩", "ラップ", "힙합", "hip-hop", "hiphop", "ヒップホップ")
+        if not any(_contains(combined, term) for term in rap_terms):
+            return Verdict(REVIEW, min(score, 39), "랩/힙합 리듬 또는 보컬 근거가 부족함",
+                           positives, uncertainty="음악을 직접 들어야 함")
     if genre.required_context:
         if not context_hits:
-            return Verdict(REVIEW, min(score, 49), "아침/모닝 맥락이 없어 자동 적합 불가")
+            return Verdict(REVIEW, min(score, 49), "아침/모닝 맥락이 없어 자동 적합 불가",
+                           positives, uncertainty="시간대 맥락 부족")
         score = min(100, score + 20)
     own_hits = set(title_hits + description_hits)
     conflicting = [x for x in conflicting if x not in own_hits]
     if conflicting:
-        return Verdict(REVIEW, min(score, 69), "인접 장르 신호가 함께 있음: " + ", ".join(dict.fromkeys(conflicting[:3])))
+        conflicts = tuple(dict.fromkeys(conflicting))
+        return Verdict(REVIEW, min(score, 69), "인접 장르 신호가 함께 있음: " + ", ".join(conflicts[:3]),
+                       positives, conflicts, "교차 장르 가능성")
     if title_hits and score >= 70:
-        return Verdict(FIT, score, "제목 장르 신호: " + ", ".join(title_hits[:3]))
+        return Verdict(FIT, score, "제목 장르 신호: " + ", ".join(title_hits[:3]), positives)
     if title_hits or description_hits:
-        return Verdict(REVIEW, score, "장르 신호는 있으나 제목·설명만으로 확정 불가")
-    return Verdict(REVIEW, 0, "장르 근거 부족: 직접 감상 후 검토")
+        return Verdict(REVIEW, score, "장르 신호는 있으나 제목·설명만으로 확정 불가",
+                       positives, uncertainty="메타데이터 근거 부족")
+    return Verdict(REVIEW, 0, "장르 근거 부족: 직접 감상 후 검토",
+                   uncertainty="긍정 신호 없음")
 
 def search_terms(genre_id: str, market: str) -> tuple[str, ...]:
     if market not in ("JP", "KR"):

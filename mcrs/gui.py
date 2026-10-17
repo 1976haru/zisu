@@ -73,7 +73,7 @@ class Studio(tk.Tk):
         super().__init__()
         store.initialize()
         first_run = not store.list_profiles()
-        self.title("ZISU Research Studio V4 · KR / JP 장르 안전 조사")
+        self.title("ZISU Research Studio V4.2 · KR / JP 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -92,6 +92,7 @@ class Studio(tk.Tk):
         self.profile_choice=tk.StringVar()
         self.api_key=tk.StringVar(value=os.environ.get("YOUTUBE_API_KEY",""))
         self.search_status=tk.StringVar(value="장르를 선택한 후 검색을 시작하세요.")
+        self.active_account_banner=tk.StringVar(value="현재 작업 계정을 확인하세요.")
         self.filter=tk.StringVar()
         self.decision_filter=tk.StringVar(value="전체")
         self.selected_video=None
@@ -169,6 +170,10 @@ class Studio(tk.Tk):
         self.comment_label.set("영상 선택 없음")
         state = "Google 연결됨" if oauth.is_connected(self.active_id) else "연결 전"
         self.profile_description.set(f'{profile["market"]} · {GENRES[profile["genre"]].title} · {state}')
+        account = profile.get("connected_email") or "Google 미연결"
+        channel = profile.get("youtube_channel_title") or "채널 정보 없음"
+        self.active_account_banner.set(
+            f"현재 작업: {profile['name']} | {profile['market']} | {GENRES[profile['genre']].title} | {account} | {channel}")
         self.refresh_account_status()
         self._reload_terms()
         self.reload_candidates()
@@ -330,15 +335,17 @@ class Studio(tk.Tk):
 
     def _search_ui(self,tab):
         tab.columnconfigure(0,weight=1)
-        tab.rowconfigure(2,weight=1)
+        tab.rowconfigure(3,weight=1)
         panel=ttk.Frame(tab)
         panel.grid(row=0,column=0,sticky="ew",pady=8)
         ttk.Label(panel,text="추가 API 키 (선택 · 연결 계정만으로도 검색 가능)").pack(side="left")
         ttk.Entry(panel,textvariable=self.api_key,width=40,show="●").pack(side="left",padx=10)
         ttk.Label(panel,text="연결 계정은 읽기 전용 · 계정이 없으면 웹 검색 가능").pack(side="left")
-        ttk.Label(tab,text="선택한 채널의 국가/장르만 검색합니다. 일본어 검색 = 일본인 운영 채널 인증은 아닙니다.").grid(row=1,column=0,sticky="w",pady=6)
+        ttk.Label(tab,textvariable=self.active_account_banner,font=("Malgun Gothic",11,"bold"),
+                  foreground="#9A3412",wraplength=1100).grid(row=1,column=0,sticky="w",pady=(4,1))
+        ttk.Label(tab,text="선택한 채널의 국가/장르만 검색합니다. 일본어 검색 = 일본인 운영 채널 인증은 아닙니다.").grid(row=2,column=0,sticky="w",pady=6)
         pane=ttk.Panedwindow(tab,orient="horizontal")
-        pane.grid(row=2,column=0,sticky="nsew")
+        pane.grid(row=3,column=0,sticky="nsew")
         left=ttk.Frame(pane)
         right=ttk.Frame(pane)
         pane.add(left,weight=2)
@@ -362,7 +369,9 @@ class Studio(tk.Tk):
     def _reload_terms(self):
         if not hasattr(self,"keyword_list") or not self.active_id:return
         profile=self.current_profile()
-        terms=search_terms(profile["genre"],profile["market"])
+        terms=store.list_profile_search_terms(profile["id"],profile["market"])
+        if not terms:
+            terms=search_terms(profile["genre"],profile["market"])
         self.keyword_list.delete(0,tk.END)
         for item in terms:self.keyword_list.insert(tk.END,item)
         self.keyword_list.select_set(0)
@@ -431,6 +440,7 @@ class Studio(tk.Tk):
         ttk.Label(head,text="장르 판정").pack(side="left",padx=(12,5))
         ttk.Combobox(head,textvariable=self.decision_filter,values=["전체","적합","검토","수동 승인"],width=12,state="readonly").pack(side="left")
         ttk.Button(head,text="조회",command=self.reload_candidates).pack(side="left",padx=7)
+        ttk.Button(head,text="장르 정확도 검증",command=self.open_genre_audit).pack(side="left",padx=7)
         ttk.Button(head,text="+ 영상 수동 등록",command=self.manual_add).pack(side="right")
         self.candidates=ttk.Treeview(tab,columns=("channel","title","verdict","score","status"),show="headings")
         for col,title,w in (("channel","채널",190),("title","영상 제목",410),("verdict","장르",100),("score","점수",75),("status","메모상태",90)):
@@ -461,7 +471,45 @@ class Studio(tk.Tk):
         self.candidates.delete(*self.candidates.get_children())
         for item in rows:
             self.candidates.insert("","end",iid=item["video_id"],values=(item["channel_title"],item["video_title"],item["genre_decision"],item["genre_score"],item["status"]))
-        self.genre_reason.set(f"현재 채널 후보 {len(rows)}개 (제외된 장르는 저장되지 않음)")
+        self.genre_reason.set(f"현재 채널 후보 {len(rows)}개 · 제외 판정은 정확도 검증 화면에 보존")
+
+    def open_genre_audit(self):
+        if not self.active_id:return
+        window=tk.Toplevel(self)
+        window.title("장르 정확도 검증 · 사람 정답 라벨")
+        window.geometry("1120x680")
+        window.transient(self)
+        top=ttk.Frame(window,padding=12); top.pack(fill="x")
+        quality_var=tk.StringVar()
+        ttk.Label(top,textvariable=quality_var,font=("Malgun Gothic",11,"bold")).pack(side="left")
+        tree=ttk.Treeview(window,columns=("title","predicted","score","human","reason"),show="headings")
+        for col,title,width in (("title","영상 제목",360),("predicted","자동 판정",90),("score","점수",60),
+                                ("human","사람 정답",90),("reason","판정 이유",400)):
+            tree.heading(col,text=title); tree.column(col,width=width,stretch=col in ("title","reason"))
+        tree.pack(fill="both",expand=True,padx=12,pady=8)
+        notes=tk.Text(window,height=4,wrap="word",font=("Malgun Gothic",10)); notes.pack(fill="x",padx=12,pady=6)
+        def reload_audit():
+            tree.delete(*tree.get_children())
+            for row in store.list_genre_audit(self.active_id):
+                tree.insert("","end",iid=row["video_id"],values=(row["video_title"],row["predicted_decision"],
+                    row["predicted_score"],row["human_label"] or "미라벨",row["reason"]))
+            q=store.genre_quality(self.active_id)
+            precision="측정 전" if q["precision"] is None else f"{q['precision']*100:.1f}%"
+            exclusion="측정 전" if q["exclusion_error_rate"] is None else f"{q['exclusion_error_rate']*100:.1f}%"
+            quality_var.set(f"사람 라벨 {q['labeled']}개 · 추천 정밀도 {precision} · 제외 오류율 {exclusion}")
+        def label(value):
+            selected=tree.selection()
+            if not selected:
+                messagebox.showinfo("표본 선택","먼저 영상을 선택하세요.",parent=window); return
+            try:
+                store.label_genre_audit(self.active_id,selected[0],value,notes.get("1.0",tk.END).strip())
+                notes.delete("1.0",tk.END); reload_audit()
+            except ValueError as exc: messagebox.showwarning("라벨 확인",str(exc),parent=window)
+        buttons=ttk.Frame(window,padding=12); buttons.pack(fill="x")
+        for label_text,value in (("사람 판정: 적합","적합"),("사람 판정: 제외","제외"),("아직 불확실","불확실")):
+            ttk.Button(buttons,text=label_text,command=lambda v=value:label(v)).pack(side="left",padx=5)
+        ttk.Label(buttons,text="실제 감상 후 근거를 입력하세요. 불확실 표본은 정밀도 계산에서 제외됩니다.").pack(side="left",padx=15)
+        reload_audit()
 
     def selected_candidate(self):
         ids=self.candidates.selection()
