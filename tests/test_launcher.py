@@ -95,6 +95,7 @@ class LauncherTests(unittest.TestCase):
         command=(ROOT/"검증하기.cmd").read_text(encoding="utf-8")
         for marker in ("Get-FileHash", "RELEASE_SHA256SUMS.txt", "SHA256SUMS.txt", "_internal", "fresh-path", "profile_create_switch_isolation", "network_oauth", "ZISU Validation 한글_日本語"):
             self.assertIn(marker,validator)
+        self.assertIn("ZISU-Research-Studio-V4\\.5\\.1-Windows\\.zip$",validator)
         self.assertIn("WindowsSandbox.exe",sandbox)
         self.assertIn("<Networking>Disable</Networking>",sandbox)
         self.assertIn("validate_windows_release.ps1",command)
