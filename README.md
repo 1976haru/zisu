@@ -106,7 +106,7 @@ warm 899.8/599.9/624.9 ms였습니다. 6회 전부 GUI 준비, 정상 종료, �
 실제 음원 장르 정밀도는 미검증입니다. 기존 onefile 시간 초과는 Python 진입 전 부트로더 단계에서
 발생한 사실까지 확인했으며, 해당 환경에서의 더 근본적인 트리거는 로그 증거가 없어 미확정입니다.
 
-## V4.4.2 독립 배포 검증
+## V4.4.2 독립 배포 검증 방법
 
 GitHub Actions 아티팩트에는 `검증하기.cmd`, PowerShell 검증 스크립트 및
 `RELEASE_SHA256SUMS.txt`가 포함됩니다. ZIP 해시를 외부 sidecar와 대조하고,
@@ -116,3 +116,25 @@ ZIP 내부 `SHA256SUMS.txt`로 EXE를 다시 대조합니다. 빌드마다 해�
 OAuth/네트워크는 사용하지 않습니다. Windows Sandbox가 활성화된 PC에서는 원클릭 CMD가
 네트워크·클립보드를 끈 Sandbox를 실행하고, 그렇지 않으면 현재 PC의 Python PATH를 제외한
 오프라인 검증을 수행합니다. 이 PATH 검사는 Python 미설치 PC의 증명은 아닙니다.
+
+## V4.4.2 Windows 10 검증 결과 (2026-10-17)
+
+GitHub Actions run `39018125751`의 V4.4.2 아티팩트를 Windows 10 Pro 22H2
+(19045.4780)에서 검증했습니다. 해당 ZIP SHA-256은
+`2ded8196e9800c096a75b9275080f95fa006db40cf7f3d10745cd1d54106f549`, EXE SHA-256은
+`2cf1b7b05747525d5760c49fb8ca1ddca583f088237ddd0b56c6f18ba80785ea`입니다.
+ZIP sidecar와 내부 EXE 해시가 모두 일치했고, 전체 `_internal` 런타임 구조, 한국어 HTML 및
+빠른 시작 문서를 확인했습니다. 한글·일본어·공백이 포함된 복사/이동 경로에서 fresh-path
+GUI 준비 시간은 1024.3/974.4/963.3 ms, warm은 817.9/763.2/670.9 ms였습니다.
+여섯 번 모두 0.77~1.16초 내 정상 종료, 잔류 프로세스 0건, JP/KR 가상 프로필 전환 및
+검색어 격리 PASS, SQLite quick_check `ok`였습니다. 전체 검증은 24.26초 걸렸고 실제 사용자
+DB의 크기·수정 시각은 전후 동일했습니다. 이 PC에는 Python 3.14.3이 설치되어 있으므로
+자식 EXE에서 Python PATH를 제거해 실행한 결과이지, Python 미설치 PC 시험은 아닙니다.
+
+현재 PC에서는 `WindowsSandbox.exe`가 확인되지 않았고 기능 상태 조회는 관리자 권한을
+요구해 Sandbox를 실행하지 않았습니다. 기능 설정·재시작·보안 옵션은 변경하지 않았습니다.
+V4.4.2용 `.wsb` 구성은 네트워크/클립보드 비활성화와 입력 read-only 매핑을 포함해 생성 및
+XML 검사까지 했으나, Sandbox VM 자체 실행은 미검증입니다. 따라서 오프라인 Windows 10
+RC 게이트는 통과했지만 Python 미설치 독립 PC, Windows 11, 실계정 OAuth/API 및 실제 음악
+정밀도는 남아 있습니다. Actions 재빌드의 해시는 달라질 수 있으니 항상 같은 run의 sidecar를
+사용하세요.

@@ -1,6 +1,6 @@
 # ZISU V4.4.1 Windows 시작 안정화 / 상태 보고 (2026-10-17)
 
-## 최신 상태: V4.4.2 오프라인 배포 검증 도구 (작업 중)
+## 최신 상태: V4.4.2 오프라인 배포 검증 (2026-10-17)
 
 아래 V4.4.1 및 이전 절의 상태는 과거 시점 기록이며 현재 작업의 게이트는 아닙니다.
 V4.4.2는 ZIP/EXE 해시와 `_internal` 구조 확인, 격리 데이터 경로에서 GUI 정상 실행,
@@ -13,6 +13,11 @@ Windows Sandbox 실행 파일이 있고 활성화된 시스템에서는 `검증�
 생성해 실행하며, 네트워크와 클립보드를 끄고 package 입력을 read-only로 매핑합니다.
 Sandbox가 없는 PC에서는 Python이 설치되어 있더라도 PATH를 자식 프로세스에서 제거한
 오프라인 검증이 가능하지만, 이를 Python 미설치 독립 PC 검증이라고 부르지 않습니다.
+
+- Actions run `39018125751`의 ZIP/EXE SHA-256: `2ded8196e9800c096a75b9275080f95fa006db40cf7f3d10745cd1d54106f549` / `2cf1b7b05747525d5760c49fb8ca1ddca583f088237ddd0b56c6f18ba80785ea`.
+- Windows 10 Pro 22H2 build `19045.4780`: fresh-path GUI-ready 1024.3/974.4/963.3 ms, warm 817.9/763.2/670.9 ms; six exits 1163/1075.1/1060.4/931.6/889.8/769.4 ms, residual processes 0. Six profile create/switch/isolation checks and DB quick_check passed; validation took 24.26 seconds.
+- Host Python 3.14.3 is installed (child EXE PATH was removed); this is not an independent Python-free PC test. User DB metadata stayed unchanged. Windows Sandbox was not installed/resolvable; DISM status query required elevation, so feature state was not changed. `.wsb` generation/XML validation passed but Sandbox VM execution remains unverified.
+- Gate: 55/55 unit/integration, 216 genre boundaries, 100 profiles/10,000 candidate stress, GUI smoke, compile/ruff, ZIP and EXE hashes passed. V4.4.2 Windows 10 Offline RC candidate only; no Windows 11, real OAuth/API, or real-audio accuracy claim.
 
 ## V4.4.1 최종 오프라인 검증 기록 (역사 기록, 2026-10-17)
 
