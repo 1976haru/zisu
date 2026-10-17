@@ -78,9 +78,13 @@ CI 배포 ZIP에는 onedir EXE와 동봉 런타임 `_internal` 폴더, `SHA256SU
 초보자 설명서와 빠른 시작 안내만 포함합니다. 소스, DB, OAuth JSON, 토큰, 로그와
 백업은 포함하지 않습니다. CI는 onefile과 onedir의 시작·종료 시간을 같은 Windows
 러너에서 비교하고, 배포 ZIP을 한글·일본어·공백이 있는 경로에 풀어 Python 경로를
-제거한 상태로 GUI 초기화와 정상 종료를 검증합니다. 로컬 Windows 10에서 내려받은
-정확한 onedir 배포본 재검증 전까지 V4.4.1 RC는 보류합니다. Python이 전혀 설치되지
-않은 독립 PC 검증도 별도입니다.
+제거한 상태로 GUI 초기화와 정상 종료를 검증합니다. Windows 10 Pro 22H2
+(19045.4780)에서도 최종 CI 산출물의 해시를 확인하고 3회 fresh-path 및 3회 warm
+실행을 완료했습니다. onedir GUI 준비 시간은 각각 972.2/931.3/919.3 ms 및
+599.1/599.0/599.6 ms였고 6회 모두 정상 종료되어 EXE 잔류 프로세스가 없었습니다.
+V4.4.1 Offline RC 코드 검증 게이트는 통과했습니다. 이는 Python 미설치 독립 PC,
+Windows 11, 실제 OAuth/API 및 실제 음악 분류 검증을 의미하지 않습니다. fresh-path는
+새 복사 경로 실행이며 OS 디스크 캐시를 비운 cold-disk 실행은 아닙니다.
 
 > 이 배포본은 로컬에서 구현한 소스 ZIP입니다. 사용자의 `D:\03 zisu`나 GitHub `1976haru/zisu`에 자동 업로드하지 않았습니다.
 
@@ -89,3 +93,15 @@ CI 배포 ZIP에는 onedir EXE와 동봉 런타임 `_internal` 폴더, `SHA256SU
 - https://developers.google.com/youtube/data/guides/auth/installed-apps
 - https://developers.google.com/youtube/v3/docs/search/list
 - https://support.google.com/youtube/answer/3399767
+
+## V4.4.1 오프라인 RC 검증 결과 (2026-10-17)
+
+정확한 GitHub Actions onedir ZIP을 Windows 10 Pro 22H2 (OS 빌드 19045.4780)에서
+검증했습니다. ZIP SHA-256은 `675a621c714ad238580c64a36dbc47b9e155cf98e3dffc4b2c2f1678214ac9f5`,
+EXE SHA-256은 `78e1f2ee13f7da6da0f461e9f61e2d6449d5ede3ffa578b0e13defc5e3fda095`입니다.
+Python PATH를 제거하고 한글·일본어·공백 경로에서 GUI 준비는 fresh-path 972.2/931.3/919.3 ms,
+warm 599.1/599.0/599.6 ms였습니다. 6회 전부 GUI 준비, 정상 종료, 잔류 프로세스 0건을
+확인했습니다. 여기서 fresh-path는 새 복사 경로 실행이며 디스크 캐시를 비운 cold boot가 아닙니다.
+오프라인 코드 검증 게이트는 통과했으나, Python 미설치 독립 PC, Windows 11, 실제 OAuth/API,
+실제 음원 장르 정밀도는 미검증입니다. 기존 onefile 시간 초과는 Python 진입 전 부트로더 단계에서
+발생한 사실까지 확인했으며, 해당 환경에서의 더 근본적인 트리거는 로그 증거가 없어 미확정입니다.

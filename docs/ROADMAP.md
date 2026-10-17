@@ -1,6 +1,14 @@
 # ZISU V4.4.1 Windows 시작 안정화 / 상태 보고 (2026-10-17)
 
-## V4.4.1 시간 초과 원인 조사 (진행 중)
+## V4.4.1 최종 오프라인 검증 정정 (2026-10-17)
+
+- 원본 V4.4 onefile ZIP은 Windows 10에서 40초 대기 후에도 Python 시작 보고서/격리 DB를 만들지 못했습니다. 관찰된 창은 Tk 창이 아니었고 `_MEI*` 추출 경로가 비어 있어 실패 구간을 Python 진입 전 onefile 부트로더로 좁혔습니다. Application Error/WER 및 Defender Operational에서 대응 차단 증거는 발견하지 못했습니다. 따라서 한 단계 더 구체적인 근본 트리거는 미확정이며, 보안 설정을 변경하지 않았습니다.
+- 최종 onedir ZIP/EXE SHA-256: `675a621c714ad238580c64a36dbc47b9e155cf98e3dffc4b2c2f1678214ac9f5` / `78e1f2ee13f7da6da0f461e9f61e2d6449d5ede3ffa578b0e13defc5e3fda095`.
+- Windows 10 Pro 22H2 빌드 `19045.4780`, Python PATH 제거, 격리 DB 및 한글/일본어/공백 경로: fresh-path 3회 GUI-ready 972.2/931.3/919.3 ms, warm 3회 599.1/599.0/599.6 ms. 종료 1033/987.5/969.3/667.2/649.6/651.4 ms; 잔류 EXE 프로세스 0회. 사용자 DB mtime 전후 동일.
+- Actions Windows Server 2025 빌드 `26100.33438`에서도 onedir GUI-ready는 fresh-path 907.1/687.0/708.0 ms, warm 569.6/579.3/585.7 ms였습니다. CI onefile 대조군은 fresh-path 3319.1/1991.1/2127.8 ms 및 warm 2116.1/2161.8/1938.5 ms였습니다. 경로 새 복사는 디스크 캐시 cold-start를 뜻하지 않습니다.
+- 상태: V4.4.1 Offline RC 코드 게이트 통과. 실제 Python 미설치 PC, Windows 11, Google OAuth/YouTube, 실음원 장르 정밀도는 여전히 미검증이며 별도 최종 검증 항목입니다.
+
+## V4.4.1 시간 초과 원인 조사 (완료; 2026-10-17)
 
 - 재현 ZIP SHA-256: `8793e4fa5807b2c543ff5b7e503d0faf608f1ea0fa858bd23ff92bcd8f90fd77`; EXE SHA-256: `0becbea7953eacae293e75aa5d720ffc728faeedd6e5613b2a8f48700311eb4`.
 - 재현 PC: Windows 10 Pro 22H2, OS 빌드 `19045.4780`; Python 3.14.3 설치 상태.
@@ -9,7 +17,7 @@
 - 정확한 ZIP EXE는 프로세스로 생성되었지만 PyInstaller `_MEI*` 압축 해제 경로가 비어 있었고, 같은 이미지의 자식 프로세스가 보이지 않았습니다. 따라서 확인된 실패 지점은 Python 엔트리포인트 이전의 onefile 부트스트랩 단계입니다.
 - 최근 Application Error/Windows Error Reporting에서 ZISU 프로세스 오류는, Windows Defender Operational에서 해당 EXE 차단 이벤트는 찾지 못했습니다. 관리형 실행 환경의 제한인지 OS/보안 제품 원인인지는 현재 증거만으로 확정할 수 없습니다.
 - 빌드 옵션 비교를 위해 CI에서 onefile을 대조군으로 실행하고, 배포본은 onedir ZIP으로 생성하도록 변경했습니다. 단계별 Python 진입, 모듈 import, Tk 루트, DB 초기화, 위젯 완료, GUI 준비 및 종료 시간을 기록합니다.
-- 로컬 Python 3.14에는 PyInstaller와 OAuth 패키지가 없어 동일 소스의 독립 onedir 로컬 빌드는 불가능합니다. CI onedir 산출물을 같은 Windows 10에서 실행해 해결 여부를 확인하기 전까지 RC 판정은 보류합니다.
+- 로컬 Python 3.14에는 PyInstaller와 OAuth 패키지가 없어 독립 로컬 빌드는 불가능했습니다. 대신 최종 CI 산출물을 Windows 10에서 직접 검증했습니다(상세 결과는 위 최종 오프라인 검증 정정 참조). Python 미설치 독립 PC와 Windows 11은 별도 미검증입니다.
 
 ## V4.4 최종 배포 안정화
 
@@ -25,7 +33,7 @@
 - 배포 EXE SHA-256: `087497963462af0d8c209ded35c20e6b3c1fdc7809787aaeed4a882c066eb93f`.
 - 배포 ZIP SHA-256: `79384e0b9bedfbd307d21c7b7b366ac88f11e71b666597158218522585be290f`.
 - 개발자 PC는 Windows 10 Pro 22H2, 빌드 19045.4780이며 Python 3.14.3이 설치되어 있습니다. (이전 문서의 “GUI 창이 생김” 표기는 오판이었습니다. 위 V4.4.1 조사 결과에서 바로잡았습니다.) 실제 Windows Sandbox 기능 확인은 관리자 권한을 요구해 수행하지 못했습니다.
-- 따라서 CI의 독립 EXE 스모크 통과와 Python 미설치 독립 PC 검증을 구분하며, 로컬 Windows 10 종료 동작은 P1 잔여 검증으로 남깁니다.
+- CI의 Python PATH 제거 EXE 스모크, 실제 Windows 10 onedir 실행, Python 미설치 독립 PC 검증은 별도 항목입니다. 전자는 통과했고, 후자는 미검증입니다.
 - GUI 회귀 스모크는 검색 중 KR 프로필로 전환해도 완료된 후보가 원래 JP 프로필에만 저장되는지 확인합니다.
 
 ## V4.3 오프라인 최종 강화
