@@ -38,6 +38,7 @@ PROVIDER_ERROR_MESSAGES = {
     "consent": "유료 외부 AI 호출은 기본 차단되어 있습니다. 비용 상한 승인을 확인하세요.",
     "invalid_request": "AI 모델이 이 요청 형식이나 출력 구조를 지원하지 않습니다. 선택한 모델과 출력 형식을 확인하고 규칙 전용 모드로 계속할 수 있습니다.",
     "model_unavailable": "이 Gemini 모델을 사용할 수 없거나 현재 프로젝트에서 지원하지 않습니다. 모델 ID와 사용 가능 여부를 확인하세요.",
+    "not_found": "Gemini 모델 목록을 찾지 못했습니다(404). API 주소와 Gemini API 사용 설정을 확인하세요.",
     "json_invalid": "Gemini 응답이 올바른 JSON이 아니어서 결과를 폐기했습니다.",
     "schema_invalid": "Gemini 응답이 ZISU 결과 스키마와 맞지 않아 결과를 폐기했습니다.",
     "unsupported_model": "선택한 Gemini 모델의 구조화 응답 계약이 확인되지 않았습니다. 지원 목록의 모델을 선택하세요.",
@@ -66,14 +67,15 @@ AI_JSON_SCHEMA = {
                  "evidence_from_metadata", "uncertainty", "recommended_human_check"],
 }
 
-# Raw REST request formats are model-family-specific. Gemini 2.5 models use
-# the GenerateContent JSON MIME/schema fields; Gemini 3.x uses the newer
-# responseFormat enum, whose JSON enum spelling is APPLICATION_JSON.
+# Raw REST request formats are model-family-specific. Gemini 2.5 retains the
+# GenerateContent MIME/schema fields; Gemini 3.x uses responseFormat.text with
+# the API enum APPLICATION_JSON and a JSON Schema.
 GEMINI_REQUEST_CONTRACTS = {
     "gemini-2.5-flash": "generate_content_response_json_schema",
     "gemini-2.5-flash-lite": "generate_content_response_json_schema",
     "gemini-2.5-pro": "generate_content_response_json_schema",
     "gemini-3.1-flash-lite": "response_format_enum",
+    "gemini-3.5-flash-lite": "response_format_enum",
     "gemini-3.6-flash": "response_format_enum",
     "gemini-3.8-flash": "response_format_enum",
 }
@@ -158,6 +160,43 @@ class MockProvider:
 class JsonHttpProvider:
     """Small stdlib HTTP adapter base with strict response validation."""
     timeout = 15
+
+    def _get(self, url: str, headers: dict[str, str]) -> dict:
+        """GET JSON without exposing URL/header/provider error bodies."""
+        self.last_http_success = False
+        self.last_request_attempted = False
+        request = Request(url, headers=headers, method="GET")
+        try:
+            self.last_request_attempted = True
+            with urlopen(request, timeout=self.timeout) as response:
+                self.last_http_success = 200 <= getattr(response, "status", 200) < 300
+                raw = response.read(MAX_PROVIDER_RESPONSE + 1)
+            if len(raw) > MAX_PROVIDER_RESPONSE:
+                raise ProviderFailure("bad_response")
+            result = json.loads(raw.decode("utf-8"))
+        except HTTPError as exc:
+            status = exc.code
+            try:
+                exc.close()
+            except OSError:
+                pass
+            if status == 429: raise ProviderFailure("rate_limit") from None
+            if status in (401, 403): raise ProviderFailure("auth") from None
+            if 500 <= status <= 599: raise ProviderFailure("server") from None
+            if status == 404: raise ProviderFailure("not_found") from None
+            raise ProviderFailure("bad_response") from None
+        except TimeoutError:
+            raise ProviderFailure("timeout") from None
+        except URLError as exc:
+            if isinstance(exc.reason, TimeoutError): raise ProviderFailure("timeout") from None
+            raise ProviderFailure("network") from None
+        except (IncompleteRead, ConnectionError, OSError):
+            raise ProviderFailure("network") from None
+        except (UnicodeError, json.JSONDecodeError):
+            raise ProviderFailure("bad_response") from None
+        if not isinstance(result, dict):
+            raise ProviderFailure("bad_response")
+        return result
 
     def _post(self, url: str, headers: dict[str, str], payload: dict) -> dict:
         self.last_http_success = False
@@ -263,10 +302,47 @@ class OpenAIProvider(JsonHttpProvider):
 
 class GeminiProvider(JsonHttpProvider):
     name = "gemini"
-    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash", endpoint: str = "https://generativelanguage.googleapis.com/v1beta/models", credential_store=None):
+    def __init__(self, api_key: str | None = None, model: str = "gemini-3.5-flash-lite", endpoint: str = "https://generativelanguage.googleapis.com/v1beta/models", credential_store=None):
         self._explicit_key = api_key
         self.credential_store = credential_store or CredentialStore()
         self.model, self.endpoint = model, endpoint
+
+    def list_available_models(self, *, max_pages: int = 100) -> list[dict[str, str]]:
+        """List account-visible generateContent models; this never generates content."""
+        self.list_request_count = 0
+        if not self.api_key:
+            raise ProviderFailure("missing_key")
+        models: dict[str, str] = {}
+        page_token = ""
+        seen_tokens: set[str] = set()
+        for _ in range(max_pages):
+            url = self.endpoint
+            if page_token:
+                from urllib.parse import urlencode
+                url += "?" + urlencode({"pageToken": page_token})
+            self.list_request_count += 1
+            payload = self._get(url, {"x-goog-api-key": self.api_key})
+            items = payload.get("models", [])
+            if not isinstance(items, list):
+                raise ProviderFailure("bad_response")
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("baseModelId") or item.get("name")
+                if isinstance(name, str) and name.startswith("models/"):
+                    name = name.removeprefix("models/")
+                methods = item.get("supportedGenerationMethods", [])
+                display = item.get("displayName")
+                if (isinstance(name, str) and name in GEMINI_REQUEST_CONTRACTS and
+                        isinstance(methods, list) and "generateContent" in methods):
+                    models[name] = display[:128] if isinstance(display, str) else name
+            page_token = payload.get("nextPageToken", "")
+            if not page_token:
+                return [{"id": key, "display_name": models[key]} for key in sorted(models)]
+            if not isinstance(page_token, str) or page_token in seen_tokens:
+                raise ProviderFailure("bad_response")
+            seen_tokens.add(page_token)
+        raise ProviderFailure("bad_response")
     @property
     def api_key(self):
         if self._explicit_key is not None: return self._explicit_key
@@ -311,13 +387,14 @@ class GeminiConnectionResult:
 
 def run_gemini_connection_test(*, cost_estimate_usd, cost_limit_usd,
                                provider: ReviewProvider | None = None,
-                               temp_root: str | Path | None = None) -> GeminiConnectionResult:
+                               temp_root: str | Path | None = None,
+                               model: str | None = None) -> GeminiConnectionResult:
     """Make exactly one Gemini call with fixed fictitious JP metadata and a temp DB."""
-    model = "gemini-2.5-flash"
     candidate = Candidate(
         "zisu-test-only", "朝のプレイリスト",
         "朝に聴きたい落ち着いた音楽。ボーカルとラップの有無は不明です。",
     )
+    model = model or getattr(provider, "model", "gemini-3.5-flash-lite")
     started = time.monotonic()
 
     def outcome(request_count=0, *, http=False, schema=False, japanese=False,
@@ -331,7 +408,8 @@ def run_gemini_connection_test(*, cost_estimate_usd, cost_limit_usd,
     except ValueError:
         return outcome(error="budget")
     provider = provider or GeminiProvider(model=model)
-    if getattr(provider, "name", None) != "gemini" or getattr(provider, "model", None) != model:
+    if (model not in GEMINI_REQUEST_CONTRACTS or getattr(provider, "name", None) != "gemini" or
+            getattr(provider, "model", None) != model):
         return outcome(error="unsupported_model")
     try:
         if not getattr(provider, "api_key", ""):

@@ -1,4 +1,4 @@
-# ZISU Research Studio V4.5.3 — AI Research Manager 호환성 강화
+# ZISU Research Studio V4.5.4 — Gemini 모델 계정 호환성
 
 V4 기능 브랜치는 첫 실행 시작 마법사, 프로필별 Google 읽기 전용 OAuth,
 KR/JP 독립 검색어, 6개 장르의 `적합 / 검토 / 제외` 보수 판정과 V2 SQLite
@@ -17,7 +17,7 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 
 ## 가장 먼저 할 일
 
-1. 이미 작동하는 **V2.1은 지우지 마세요.** V4.4.2 배포 ZIP을 별도 폴더에 **전체 압축 해제**합니다. EXE와 `_internal` 런타임 폴더를 분리하거나 EXE만 복사하지 마세요. EXE 배포판은 Python 설치가 필요 없습니다.
+1. 이미 작동하는 **V2.1은 지우지 마세요.** 최신 V4.5.4 배포 ZIP을 별도 폴더에 **전체 압축 해제**합니다. EXE와 `_internal` 런타임 폴더를 분리하거나 EXE만 복사하지 마세요. EXE 배포판은 Python 설치가 필요 없습니다.
 2. 첫 번째 탭 **① 계정 연결**에서 대상 작업 프로필을 확인합니다. **설정 없이 바로 쓰고 싶다면 'Google Cloud 없이 먼저 유튜브 열기'** 버튼으로 브라우저에 로그인한 후 수동 검색할 수 있습니다. 이 모드는 앱 OAuth 연결은 아닙니다. 기존 V2 DB가 있으면 그대로 읽고 필요한 연결 필드만 자동 추가합니다.
 3. 배포 EXE에는 Google OAuth 모듈이 함께 포함되어 있어 별도 모듈 설치가 필요 없습니다. `OAuth_모듈_설치하기.bat`은 Python으로 소스를 실행하는 개발/소스 설치용이며, EXE에서는 실행하지 마세요.
 4. 실제 Google Cloud 설정은 이번 오프라인 패키지 검증과 별개이며, 마지막 실전 검증 단계에서 진행합니다. 그때 `YouTube Data API v3` 및 데스크톱 OAuth를 구성하고 테스트 모드라면 Morning Chill 계정을 테스트 사용자로 등록합니다.
@@ -152,12 +152,13 @@ V4.5는 기존 장르 규칙을 먼저 적용하고 `검토` 후보만 선택형
 OpenAI, Gemini, Ollama 공급자 어댑터는 선택형이며 기본 동작은 모델 없이 유지됩니다.
 공급자 설정과 실제 JP/KR 검색은 마지막 실전 승인 단계에서 별도 검증해야 합니다.
 
-V4.5.2 API 호환성: Gemini 2.5 계열은 `generationConfig.responseMimeType`과
-`responseJsonSchema`를 사용하고, 지정된 Gemini 3 계열은 `responseFormat.text.mimeType`
-에 `APPLICATION_JSON` enum을 사용합니다. 알 수 없는 모델은 네트워크 요청 전에 차단합니다.
-이 포맷은 Mock HTTP 계약으로 검증했으며 실제 API 키 연결은 하지 않았습니다.
+Gemini 계정별 모델 조회는 사용자가 직접 눌렀을 때만 `GET /v1beta/models`를 호출하고
+`generateContent`와 확인된 구조화 JSON 출력 계약이 있는 모델만 선택지로 제시합니다.
+`gemini-3.5-flash-lite`를 우선 추천하되 실제 계정 목록에 없을 수 있습니다. 3.x 생성 요청은
+공식 REST `generationConfig.responseFormat.text`의 `APPLICATION_JSON` 및 schema 계약을
+사용합니다. 모델 목록 조회와 콘텐츠 생성은 별도이며, 목록 조회는 콘텐츠를 생성하지 않습니다.
 
-V4.5.3에는 YouTube/OAuth 없이 가상 일본어 자료 한 건만 보내는 명시 승인형
+V4.5.4에는 계정 사용 가능 Gemini 모델을 명시적으로 조회·선택하고, YouTube/OAuth 없이 가상 일본어 자료 한 건만 보내는 명시 승인형
 Gemini 실전 연결 테스트가 추가되었습니다. DPAPI 저장 키만 내부에서 읽고, 별도 임시 DB,
 요청 1회 상한, 자동 재시도 없음, 비밀정보/응답 원문 비노출을 적용합니다.
 

@@ -17,6 +17,8 @@ with WorkspaceTemp() as temp:
     assert len(app.ai_tree.get_children())==0
     assert hasattr(app,"ai_credential_entry") and hasattr(app,"ai_pause_button")
     assert hasattr(app,"ai_gemini_test_button")
+    assert hasattr(app,"ai_gemini_models_button")
+    assert hasattr(app,"ai_gemini_model_combo")
     assert app.ai_provider_choice.get()=="규칙만"
     app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
     app.select_profile()

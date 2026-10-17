@@ -145,7 +145,7 @@ class AIResearchTests(unittest.TestCase):
         self.assertEqual(args.args[1]["Authorization"],"Bearer mock-openai-key")
         self.assertNotIn("mock-openai-key",json.dumps(args.args[2]))
         self.assertEqual(args.args[2]["response_format"]["type"],"json_schema")
-        gemini=ai_research.GeminiProvider(api_key="mock-gemini-key")
+        gemini=ai_research.GeminiProvider(api_key="mock-gemini-key",model="gemini-2.5-flash")
         with mock.patch.object(gemini,"_post",return_value={"candidates":[{"content":{"parts":[{"text":response}]}}]}) as call:
             gemini.review(candidate,"MORNING_CHILL_RAP")
         self.assertEqual(call.call_args.args[1]["x-goog-api-key"],"mock-gemini-key")
@@ -170,6 +170,56 @@ class AIResearchTests(unittest.TestCase):
             ollama.review(candidate,"MORNING_CHILL_RAP")
         self.assertEqual(call.call_args.args[2]["format"],"json")
         self.assertNotIn("tools",call.call_args.args[2])
+
+    def test_gemini_model_listing_paginates_and_filters_to_verified_generation_contracts(self):
+        provider=ai_research.GeminiProvider(api_key="mock-gemini-key")
+        pages=[
+            {"models":[
+                {"name":"models/gemini-3.5-flash-lite","baseModelId":"gemini-3.5-flash-lite",
+                 "displayName":"Gemini 3.5 Flash-Lite","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/embedding-001","baseModelId":"embedding-001",
+                 "supportedGenerationMethods":["embedContent"]}],"nextPageToken":"page / 2"},
+            {"models":[
+                {"name":"models/gemini-3.8-flash","baseModelId":"gemini-3.8-flash",
+                 "displayName":"Gemini 3.8 Flash","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/future-unknown","baseModelId":"future-unknown",
+                 "supportedGenerationMethods":["generateContent"]}]}
+        ]
+        with mock.patch.object(provider,"_get",side_effect=pages) as get:
+            found=provider.list_available_models()
+        self.assertEqual({item["id"] for item in found},{"gemini-3.5-flash-lite","gemini-3.8-flash"})
+        self.assertEqual(get.call_count,2)
+        self.assertEqual(get.call_args_list[0].args[0],provider.endpoint)
+        self.assertIn("pageToken=page+%2F+2",get.call_args_list[1].args[0])
+        self.assertEqual(get.call_args_list[0].args[1],{"x-goog-api-key":"mock-gemini-key"})
+
+    def test_gemini_model_listing_rejects_bad_pagination_and_normalizes_http_failures(self):
+        provider=ai_research.GeminiProvider(api_key="mock-gemini-key")
+        with mock.patch.object(provider,"_get",side_effect=[{"models":[],"nextPageToken":"repeat"},
+                                                              {"models":[],"nextPageToken":"repeat"}]):
+            with self.assertRaises(ai_research.ProviderFailure) as bad:
+                provider.list_available_models()
+        self.assertEqual(bad.exception.code,"bad_response")
+        for status,expected in ((401,"auth"),(403,"auth"),(404,"not_found"),(429,"rate_limit"),(503,"server")):
+            with self.subTest(status=status), mock.patch("mcrs.ai_research.urlopen",side_effect=ai_research.HTTPError(
+                    provider.endpoint,status,"opaque secret body",{},None)):
+                with self.assertRaises(ai_research.ProviderFailure) as caught:
+                    provider._get(provider.endpoint,{"x-goog-api-key":"mock-secret"})
+            self.assertEqual(caught.exception.code,expected)
+            self.assertNotIn("opaque",str(caught.exception))
+
+    def test_gemini_new_models_use_current_structured_response_format(self):
+        response=json.dumps({"verdict":"검토","positive_signals":[],"conflict_signals":[],
+            "evidence_from_metadata":[],"uncertainty":"불확실","recommended_human_check":"직접 확인"},ensure_ascii=False)
+        for model in ("gemini-3.5-flash-lite","gemini-3.8-flash"):
+            provider=ai_research.GeminiProvider(api_key="mock-key",model=model)
+            with self.subTest(model=model),mock.patch.object(provider,"_post",return_value={
+                    "candidates":[{"content":{"parts":[{"text":response}]}}]}) as post:
+                provider.review(self.candidate("朝のプレイリスト","説明"),"MORNING_CHILL_RAP")
+            config=post.call_args.args[2]["generationConfig"]
+            self.assertEqual(config["responseFormat"]["text"]["mimeType"],"APPLICATION_JSON")
+            self.assertEqual(config["responseFormat"]["text"]["schema"],ai_research.AI_JSON_SCHEMA)
+            self.assertNotIn("responseMimeType",config)
 
     def test_two_hundred_malformed_model_edge_cases_are_rejected(self):
         decoder = ai_research.JsonHttpProvider()
@@ -500,6 +550,8 @@ class AIResearchTests(unittest.TestCase):
         app.ai_cost_estimate=Value("0.01")
         app.ai_cost_limit=Value("0.05")
         app.ai_status=Value()
+        app.ai_gemini_model=Value("gemini-3.5-flash-lite")
+        app.ai_gemini_available_models={"gemini-3.5-flash-lite"}
         class CredentialMock:
             def load(self,_provider): return "mock-only-secret"
         with mock.patch("mcrs.gui.CredentialStore",return_value=CredentialMock()), \
