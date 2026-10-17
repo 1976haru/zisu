@@ -1,0 +1,17 @@
+ZISU Research Studio V4.4.2 — Windows first-run guide
+====================================================
+1. Keep your existing V2.1 installation and data. Do not delete the old database.
+2. Extract the entire V4.4.2 ZIP to a new folder. Keep ZisuResearchStudio.exe beside the complete _internal folder; do not separate or move only the EXE.
+3. The packaged EXE does not require Python or a separate Google OAuth module installation.
+4. Optional offline verification: run 검증하기.cmd from the validation tools. If Windows Sandbox is available, it launches an offline isolated check; otherwise it checks on this PC with Python removed from the child process PATH. That is not proof of a Python-uninstalled PC.
+5. Compare the ZIP hash to RELEASE_SHA256SUMS.txt from the same GitHub Actions artifact. After extraction, compare the EXE hash to SHA256SUMS.txt in the package. Do not run files when hashes differ.
+6. Actual Google Cloud configuration and OAuth account approval are reserved for the final real-world test. They are not needed to start the offline validator.
+7. For source execution only: install Python 3.10+ and run OAuth_모듈_설치하기.bat to install optional Google libraries. This batch file is not needed for the packaged EXE.
+8. In the final real-world stage, prepare desktop OAuth and YouTube Data API v3, connect the Morning Chill account read-only, then test JP/KR searches and multi-profile isolation.
+9. Listen to at least 100-200 real videos and label them by a human; then measure recommendation precision and exclusion error. Do not claim 95% before measuring adequate samples.
+
+Never send OAuth JSON, account passwords, tokens, databases or personal logs in chat or GitHub. Keep the EXE and _internal folder together. Repeated playback, automated comments, likes and subscriptions are not provided.
+
+Historical Windows 10 baseline (V4.4.1, Actions run 39015700620): ZIP SHA-256 e4eed1d31f84b4c7971759c1fdb9f250f65e0166e80ade9d9ad1b159a211b062; EXE SHA-256 53a13d722945ca53ca6abc8500fa58e7a38ce909453f0505deaf3057e4739724. For V4.4.2 always use the sidecar manifest from its own Actions artifact because hashes are build-specific.
+
+GitHub: https://github.com/1976haru/zisu/pull/2

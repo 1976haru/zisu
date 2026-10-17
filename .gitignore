@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.spec
+*.db
+*.db-journal
+settings.json
+.env
+*.log
+.DS_Store
+_backup_before_v2_*/
+_backup_before_v3_*/
+_local_backups/
+.test_tmp/
+ZISU_V3/
+# OAuth desktop client secrets & local access tokens - never commit
+client_secret*.json
+client_secrets*.json
+credentials.json
+oauth_tokens/
+*token*.json
