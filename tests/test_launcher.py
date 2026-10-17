@@ -51,6 +51,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("package_windows.ps1",workflow)
         self.assertIn("--onedir",workflow)
         self.assertIn("--onefile",workflow)
+        self.assertIn("--collect-submodules google_auth_oauthlib",workflow)
+        self.assertIn("--collect-data google_auth_oauthlib",workflow)
         self.assertIn("fresh_path_launches",workflow)
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
