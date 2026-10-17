@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $stage = 'input'
 $summary = [ordered]@{
     schema = 1
-    product = 'ZISU Research Studio V4.5.6 offline package validation'
+    product = 'ZISU Research Studio V4.5.7 offline package validation'
     result = 'FAIL'
     zip_hash_verified = $false
     exe_hash_verified = $false
@@ -25,7 +25,7 @@ $testRoot = $null
 $timer = [Diagnostics.Stopwatch]::StartNew()
 
 try {
-    if (-not $PackageZip) { $PackageZip = Read-Host 'Enter the full path to the V4.5.6 release ZIP' }
+    if (-not $PackageZip) { $PackageZip = Read-Host 'Enter the full path to the V4.5.7 release ZIP' }
     if (-not (Test-Path -LiteralPath $PackageZip -PathType Leaf)) { throw 'Release ZIP not found.' }
     $PackageZip = (Resolve-Path -LiteralPath $PackageZip).Path
     $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ZISU Validation 한글_日本語 ' + [guid]::NewGuid().ToString('N'))

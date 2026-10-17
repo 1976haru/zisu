@@ -61,7 +61,7 @@ def _get(endpoint, key, access_token=None, retries=2, retry_delay=0.25, **kwargs
     raise APIError("API 요청을 완료하지 못했습니다.")
 
 
-def lookup_videos(key, keyword, market, limit=12, access_token=None):
+def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False):
     if market not in ("KR", "JP"):
         raise ValueError("시장 코드는 KR 또는 JP입니다.")
     lang = "ko" if market == "KR" else "ja"
@@ -69,11 +69,12 @@ def lookup_videos(key, keyword, market, limit=12, access_token=None):
     results = _get(
         "search", key, part="snippet", type="video", q=keyword,
         regionCode=market, relevanceLanguage=lang, order="relevance",
-        maxResults=max(1, min(20, limit)), **credentials,
+        maxResults=max(1, min(50, limit)), retries=0,
+        **({"pageToken": page_token} if page_token else {}), **credentials,
     )
     items = [item for item in results.get("items", []) if item.get("id", {}).get("videoId")]
     if not items:
-        return []
+        return {"items": [], "nextPageToken": results.get("nextPageToken", "")} if return_page else []
     video_ids = [item["id"]["videoId"] for item in items]
     channel_ids = list(dict.fromkeys(item.get("snippet", {}).get("channelId", "") for item in items))
     videos = _get("videos", key, part="statistics", id=",".join(video_ids), **credentials)
@@ -88,7 +89,7 @@ def lookup_videos(key, keyword, market, limit=12, access_token=None):
         item["id"]: item.get("snippet", {}).get("country", "")
         for item in channels.get("items", [])
     }
-    return [
+    rows = [
         {
             "video_id": item["id"]["videoId"],
             "video_title": item.get("snippet", {}).get("title", ""),
@@ -102,3 +103,4 @@ def lookup_videos(key, keyword, market, limit=12, access_token=None):
         }
         for item in items
     ]
+    return {"items": rows, "nextPageToken": results.get("nextPageToken", "")} if return_page else rows

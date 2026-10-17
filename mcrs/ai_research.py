@@ -27,6 +27,13 @@ from .credential_store import CredentialStore, CredentialError
 
 PROMPT_VERSION = "genre-review-v2"
 MAX_PROVIDER_RESPONSE = 64_000
+PROPOSED_VERDICT_LABELS = {
+    "auto_fit": "자동 추천 적합(사람 승인 아님)",
+    "cross_genre_review": "교차 장르 검토",
+    "related_reference": "유사 장르 참고",
+    "exclude": "제외",
+    "insufficient_evidence": "근거 부족",
+}
 PROVIDER_ERROR_MESSAGES = {
     "missing_key": "API 키가 등록되지 않았습니다. 키 설정을 확인하거나 규칙 전용 모드를 사용하세요.",
     "auth": "공급자 인증에 실패했습니다. 키 권한과 공급자 설정을 확인하세요.",
@@ -562,15 +569,17 @@ def _friendly_provider_error(exc: Exception) -> str:
     return PROVIDER_ERROR_MESSAGES.get(code, PROVIDER_ERROR_MESSAGES["unknown"])
 
 
-def preview_plan(profile_id: str, count: int, path=None, max_search_calls: int = 3) -> dict:
-    if count not in (10, 30, 50): raise ValueError("후보 목표는 10, 30 또는 50개입니다.")
+def preview_plan(profile_id: str, count: int, path=None, max_search_calls: int = 3,
+                 target_mode: str = "candidate_count") -> dict:
+    allowed_targets = (5, 10, 20) if target_mode == "fit_target" else (10, 30, 50)
+    if count not in allowed_targets: raise ValueError("Choose a supported candidate or recommended-fit target.")
     if not 1 <= max_search_calls <= 12: raise ValueError("검색 호출 상한은 1~12회입니다.")
     profile = store.get_profile(profile_id, path)
     if not profile: raise ValueError("선택한 프로필이 없습니다.")
     terms, core_count, related_count = _profile_query_plan(profile, max_search_calls, path)
     return {"profile_id": profile_id, "profile_name": profile["name"], "market": profile["market"],
             "genre": profile["genre"], "related_genres": store.normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]")),
-            "target_candidates": count, "search_terms": list(terms),
+            "target_candidates": count, "search_terms": list(terms), "target_mode": target_mode,
             "core_search_calls": core_count, "related_search_calls": related_count,
             "core_search_terms": list(terms[:core_count]),
             "related_search_terms": list(terms[core_count:]),
@@ -600,7 +609,7 @@ def _profile_query_plan(profile, max_calls, path=None):
                 term = items[index]
                 if term not in core and term not in related:
                     related.append(term)
-    if not related or max_calls <= 3:
+    if not related:
         return core[:max_calls], min(len(core), max_calls), 0
     core_budget = max(1, min(max_calls, int(max_calls * .7 + .5)))
     core_selected = core[:core_budget]
@@ -643,6 +652,159 @@ class ResearchRun:
     paused: bool = False
 
 
+@dataclass(frozen=True)
+class AutoResearchRun:
+    profile_id: str
+    target_fits: int
+    recommended_fits: int
+    shortfall: int
+    calls_used: int
+    duplicate_count: int
+    ai_review_count: int
+    human_reviewed_count: int
+    candidates: tuple[dict, ...]
+    reviews: tuple[ResearchReview, ...]
+    session_id: str
+    state: str
+    warning: str = ""
+
+
+def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
+        max_search_calls: int = 8, provider: ReviewProvider | None = None, path=None,
+        cancel_event: threading.Event | None = None, pause_event: threading.Event | None = None,
+        progress=None, session_id: str | None = None, allow_paid_external: bool = False,
+        cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None) -> AutoResearchRun:
+    """Search pages until the requested number of rule-supported fits or budget.
+
+    A search attempt counts once before dispatch and is never automatically retried
+    by this coordinator. AI may narrow uncertain cases but cannot create a fit.
+    ``collector`` may return a list (legacy) or ``{items,nextPageToken}``.
+    """
+    if target not in (5, 10, 20) or not 1 <= max_search_calls <= 12:
+        raise ValueError("Automatic recommendation targets are 5, 10, or 20 with a 1–12 search-call ceiling.")
+    profile = store.get_profile(profile_id, path)
+    if not profile:
+        raise ValueError("Research profile not found.")
+    terms, _core, _related = _profile_query_plan(profile, max_search_calls, path)
+    settings_hash = _profile_settings_hash(profile, path, max_search_calls) + ":fit-target-v1"
+    cancel_event = cancel_event or threading.Event()
+    pause_event = pause_event or threading.Event()
+    if session_id:
+        session = store.get_research_session(session_id, profile_id, path)
+        if (not session or session.get("target_mode") != "fit_target" or
+            (session["market"], session["genre"], session["target"], session["max_search_calls"], session.get("settings_hash", "")) !=
+            (profile["market"], profile["genre"], target, max_search_calls, settings_hash)):
+            raise ValueError("Saved research settings changed; start a new search to avoid mixing results.")
+        candidates = {str(row.get("video_id")): row for row in json.loads(session["candidates_json"])}
+        reviews = [_review_from_payload(row) for row in json.loads(session["reviews_json"])]
+        processed = set(json.loads(session["processed_json"]))
+        query_index = int(session["query_index"])
+        page_token = session.get("page_token", "")
+        calls_used = int(session.get("calls_used", 0))
+        duplicate_count = int(session.get("duplicate_count", 0))
+        if session.get("in_flight"):
+            # Search is read-only. Repeating an uncertain in-flight page is safe;
+            # candidate IDs are deduplicated before persistence.
+            pass
+    else:
+        session_id = store.start_research_session(profile_id, profile["market"], profile["genre"],
+            target, max_search_calls, path, settings_hash, target_mode="fit_target")
+        candidates, reviews, processed = {}, [], set()
+        query_index, page_token, calls_used, duplicate_count = 0, "", 0, 0
+
+    related_scope=store.normalize_related_genres(profile["genre"],profile.get("related_genres_json","[]"))
+    def fit_count():
+        return sum(1 for item in reviews if proposed_verdict(profile,item,
+            candidates.get(item.video_id,{}),related_scope)=="auto_fit")
+
+    warning = ""
+    while (query_index < len(terms) and calls_used < max_search_calls and fit_count() < target
+           and not cancel_event.is_set() and not pause_event.is_set()):
+        current = store.get_profile(profile_id, path)
+        if not current or _profile_settings_hash(current, path, max_search_calls) + ":fit-target-v1" != settings_hash:
+            raise ValueError("Profile search settings changed. Start a new search to keep results separate.")
+        term = terms[query_index]
+        next_call = calls_used + 1
+        store.checkpoint_research_session(session_id, profile_id, state="running", query_index=query_index,
+            page_token=page_token, calls_used=next_call, duplicate_count=duplicate_count,
+            candidates=list(candidates.values()), processed=sorted(processed),
+            reviews=[_review_to_payload(item) for item in reviews], in_flight=True, path=path)
+        try:
+            parameters = inspect.signature(collector).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        try:
+            if "page_token" in parameters or len(parameters) >= 4:
+                payload = collector(term, profile["market"], 50, page_token or None)
+            else:
+                payload = collector(term, profile["market"], 50)
+        except Exception:
+            calls_used = next_call
+            warning = "검색 요청이 실패했습니다. 예산에서 호출 1회를 사용한 것으로 기록했으며 자동 재시도하지 않았습니다. 필요하면 저장된 조사에서 이어가세요."
+            store.checkpoint_research_session(session_id, profile_id, state="paused", query_index=query_index,
+                page_token=page_token, calls_used=calls_used, duplicate_count=duplicate_count,
+                candidates=list(candidates.values()), processed=sorted(processed),
+                reviews=[_review_to_payload(item) for item in reviews], in_flight=False, path=path)
+            break
+        calls_used = next_call
+        rows = payload.get("items", []) if isinstance(payload, dict) else (payload or [])
+        following = payload.get("nextPageToken", "") if isinstance(payload, dict) else ""
+        fresh = []
+        for row in rows:
+            video_id = str(row.get("video_id", ""))
+            if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
+                continue
+            if video_id in candidates:
+                duplicate_count += 1
+                continue
+            candidates[video_id] = row
+            fresh.append(row)
+        if fresh:
+            store.save_candidates(profile_id, fresh, path)
+            for row in fresh:
+                candidate = Candidate(str(row["video_id"]), str(row.get("video_title", "")),
+                                      str(row.get("description", "")), str(row.get("video_url", "")))
+                review = review_candidate(profile_id, candidate, provider, path, session_id=session_id,
+                    allow_paid_external=allow_paid_external, cost_estimate_usd=cost_estimate_usd,
+                    cost_limit_usd=cost_limit_usd)
+                reviews.append(review)
+                processed.add(review.video_id)
+                ai = review.ai_opinion
+                proposed=proposed_verdict(profile,review,row,related_scope)
+                store.record_ai_decision(profile_id, review.video_id,
+                    rule_verdict=review.rule_verdict, ai_verdict=ai.verdict if ai else "",
+                    proposed_verdict=proposed,
+                    evidence=" | ".join(ai.evidence_from_metadata) if ai else review.rule_reason,
+                    uncertainty=ai.uncertainty if ai else review.warning,
+                    model_version=f"{review.provider}/{review.model}", path=path)
+        if following and fit_count() < target:
+            page_token = following
+        else:
+            query_index += 1
+            page_token = ""
+        store.checkpoint_research_session(session_id, profile_id, state="running", query_index=query_index,
+            page_token=page_token, calls_used=calls_used, duplicate_count=duplicate_count,
+            candidates=list(candidates.values()), processed=sorted(processed),
+            reviews=[_review_to_payload(item) for item in reviews], in_flight=False, path=path)
+        if progress:
+            progress({"stage": "search", "calls_used": calls_used, "budget_remaining": max_search_calls-calls_used,
+                "candidate_count": len(candidates), "duplicate_count": duplicate_count,
+                "recommended_fit_count": fit_count(), "ai_review_count": sum(1 for item in reviews if item.ai_opinion),
+                "human_reviewed_count": sum(1 for item in store.list_genre_audit(profile_id, labeled=True, path=path)),
+                "uncertain_count": sum(1 for item in reviews if item.final_verdict == genres.REVIEW),
+                "profile_id": profile_id})
+    state = "cancelled" if cancel_event.is_set() else "paused" if pause_event.is_set() or warning else "complete"
+    store.checkpoint_research_session(session_id, profile_id, state=state, query_index=query_index,
+        page_token=page_token, calls_used=calls_used, duplicate_count=duplicate_count,
+        candidates=list(candidates.values()), processed=sorted(processed),
+        reviews=[_review_to_payload(item) for item in reviews], in_flight=False, path=path)
+    fit_total = fit_count()
+    return AutoResearchRun(profile_id, target, fit_total, max(0,target-fit_total), calls_used,
+        duplicate_count, sum(1 for item in reviews if item.ai_opinion),
+        len(store.list_genre_audit(profile_id, labeled=True, path=path)),
+        tuple(candidates.values()), tuple(reviews), session_id, state, warning)
+
+
 def _review_to_payload(review: ResearchReview) -> dict:
     return {"profile_id": review.profile_id, "video_id": review.video_id,
             "rule_verdict": review.rule_verdict, "rule_score": review.rule_score,
@@ -669,6 +831,44 @@ def _review_from_payload(value: dict) -> ResearchReview:
         int(value["rule_score"]), value["rule_reason"], value["final_verdict"], opinion,
         value["provider"], value["model"], value["metadata_hash"], value["provenance"],
         value.get("warning", "제목·설명 메타데이터 검토이며 실제 음원 판정이 아닙니다."))
+
+
+def persist_review_decisions(profile_id, reviews, candidates, path=None):
+    """Persist AI proposals separately from rule decisions and human truth labels."""
+    profile=store.get_profile(profile_id,path)
+    rows={str(row.get("video_id")):row for row in candidates}
+    related=store.normalize_related_genres(profile["genre"],profile.get("related_genres_json","[]"))
+    for review in reviews:
+        ai=review.ai_opinion
+        candidate=rows.get(review.video_id,{})
+        proposed=proposed_verdict(profile,review,candidate,related)
+        store.record_ai_decision(profile_id,review.video_id,rule_verdict=review.rule_verdict,
+            ai_verdict=ai.verdict if ai else "",proposed_verdict=proposed,
+            evidence=" | ".join(ai.evidence_from_metadata) if ai else review.rule_reason,
+            uncertainty=ai.uncertainty if ai else review.warning,
+            model_version=f"{review.provider}/{review.model}",path=path)
+
+
+def proposed_verdict(profile, review, candidate, related_genres=None):
+    """Return a machine proposal, never a human label or final approval."""
+    rule=genres.assess(profile["genre"],candidate.get("video_title", ""),candidate.get("description", ""))
+    ai=review.ai_opinion
+    if rule.decision == genres.EXCLUDE or (ai and ai.verdict == genres.EXCLUDE):
+        return "exclude"
+    if rule.decision == genres.FIT:
+        return "auto_fit"
+    related=related_genres if related_genres is not None else store.normalize_related_genres(
+        profile["genre"],profile.get("related_genres_json","[]"))
+    related_kind=genres.related_classification(profile["genre"],related,
+        candidate.get("video_title", ""),candidate.get("description", ""))["category"]
+    if related_kind == "related_reference":
+        return "related_reference"
+    # AI may recommend, but cannot bypass explicit core-genre conflict signals.
+    if ai and ai.verdict == genres.FIT and ai.evidence_from_metadata and not rule.conflict_signals:
+        return "auto_fit"
+    if not ai or not ai.evidence_from_metadata:
+        return "insufficient_evidence"
+    return "cross_genre_review"
 
 
 def run_bounded_research(profile_id: str, collector, *, target: int = 10, max_search_calls: int = 3,

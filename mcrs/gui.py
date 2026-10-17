@@ -19,6 +19,8 @@ from .genres import GENRES, search_terms, assess, related_classification
 from .youtube_api import lookup_videos, APIError
 from . import oauth
 from . import ai_research
+from . import comments
+from . import timers
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .startup_probe import write_stage as _write_smoke_stage
@@ -119,7 +121,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.5.6 · AI 보조 장르 안전 조사")
+        self.title("ZISU Research Studio V4.5.7 · AI 보조 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -191,7 +193,7 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.5.6",
+            "app_version": "4.5.7",
             "gui_initialized": len(self.frames) == 7 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -664,6 +666,7 @@ class Studio(tk.Tk):
             ttk.Button(actions,text=text,command=method).pack(side="left",padx=4)
         ttk.Label(actions,text="분석 알림").pack(side="left",padx=(12,4))
         for m in (10,15,20):ttk.Button(actions,text=f"{m}분",command=lambda mins=m:self.start_timer(mins)).pack(side="left",padx=2)
+        ttk.Button(actions,text="랜덤 분석 알림: 10~20분",command=self.start_random_timer).pack(side="left",padx=4)
         ttk.Label(actions,textvariable=self.timer_text).pack(side="right")
 
     def reload_candidates(self):
@@ -683,10 +686,12 @@ class Studio(tk.Tk):
         top=ttk.Frame(window,padding=12); top.pack(fill="x")
         quality_var=tk.StringVar()
         ttk.Label(top,textvariable=quality_var,font=("Malgun Gothic",11,"bold")).pack(side="left")
-        tree=ttk.Treeview(window,columns=("title","predicted","score","human","reason"),show="headings")
+        tree=ttk.Treeview(window,columns=("title","predicted","score","ai","proposal","human","reason"),show="headings")
         for col,title,width in (("title","영상 제목",360),("predicted","자동 판정",90),("score","점수",60),
                                 ("human","사람 정답",90),("reason","판정 이유",400)):
             tree.heading(col,text=title); tree.column(col,width=width,stretch=col in ("title","reason"))
+        for col,title,width in (("ai","AI 의견",80),("proposal","추천 구분",120)):
+            tree.heading(col,text=title); tree.column(col,width=width,stretch=False)
         tree.pack(fill="both",expand=True,padx=12,pady=8)
         notes=tk.Text(window,height=4,wrap="word",font=("Malgun Gothic",10)); notes.pack(fill="x",padx=12,pady=6)
         def reload_audit():
@@ -694,6 +699,11 @@ class Studio(tk.Tk):
             for row in store.list_genre_audit(self.active_id):
                 tree.insert("","end",iid=row["video_id"],values=(row["video_title"],row["predicted_decision"],
                     row["predicted_score"],row["human_label"] or "미라벨",row["reason"]))
+            for row in store.list_genre_audit(self.active_id):
+                tree.item(row["video_id"],values=(row["video_title"],row["rule_verdict"] or row["predicted_decision"],
+                    row["predicted_score"],row["ai_verdict"],ai_research.PROPOSED_VERDICT_LABELS.get(row["proposed_verdict"],row["proposed_verdict"]),
+                    row["human_label"] or ("확인 필요" if row["review_status"]=="needs_review" else row["review_status"]),
+                    (row["evidence"] or row["reason"])+" · "+(row["uncertainty"] or "")))
             q=store.genre_quality(self.active_id)
             precision="측정 전" if q["precision"] is None else f"{q['precision']*100:.1f}%"
             exclusion="측정 전" if q["exclusion_error_rate"] is None else f"{q['exclusion_error_rate']*100:.1f}%"
@@ -783,6 +793,12 @@ class Studio(tk.Tk):
         self.timer_end=time.monotonic()+minutes*60
         self.timer_text.set(f"{minutes}분 분석 알림")
 
+    def start_random_timer(self):
+        if not self.selected_video:
+            messagebox.showinfo("영상 선택","먼저 직접 감상할 영상을 선택하세요.",parent=self); return
+        minutes=timers.random_analysis_minutes()
+        self.start_timer(minutes)
+
     def _tick(self):
         if self.timer_end:
             remain=max(0,int(self.timer_end-time.monotonic()))
@@ -809,16 +825,78 @@ class Studio(tk.Tk):
         ttk.Label(tab,text="수정 가능한 댓글 초안").grid(row=5,column=0,sticky="w",pady=(15,5))
         self.draft=tk.Text(tab,height=7,font=("Malgun Gothic",11),wrap="word")
         self.draft.grid(row=6,column=0,sticky="ew")
+        persona_frame=ttk.Frame(tab); persona_frame.grid(row=7,column=0,sticky="w",pady=5)
+        ttk.Label(persona_frame,text="채널별 댓글 페르소나").pack(side="left")
+        self.comment_persona_choice=tk.StringVar(value=comments.PERSONAS["jp_morning_chill"]["name"])
+        self.comment_persona_combo=ttk.Combobox(persona_frame,textvariable=self.comment_persona_choice,
+            values=tuple(item["name"] for item in comments.PERSONAS.values()),state="readonly",width=24)
+        self.comment_persona_combo.pack(side="left",padx=6)
+        self.comment_language=tk.StringVar(value="ja")
+        self.comment_tone=tk.StringVar(value="친근하고 차분한")
+        self.comment_emoji_level=tk.StringVar(value="light")
+        self.comment_length=tk.StringVar(value="short")
+        ttk.Combobox(persona_frame,textvariable=self.comment_language,values=("ja","ko","en"),state="readonly",width=5).pack(side="left",padx=2)
+        ttk.Combobox(persona_frame,textvariable=self.comment_tone,values=("친근하고 차분한","차분하고 정중한","밝고 간결한"),width=13).pack(side="left",padx=2)
+        ttk.Combobox(persona_frame,textvariable=self.comment_emoji_level,values=("none","light","moderate"),state="readonly",width=9).pack(side="left",padx=2)
+        ttk.Combobox(persona_frame,textvariable=self.comment_length,values=("short","medium","long"),state="readonly",width=8).pack(side="left",padx=2)
+        ttk.Button(persona_frame,text="프로필에 저장",command=self._save_comment_persona).pack(side="left",padx=4)
+        ttk.Button(persona_frame,text="감상 기반 초안 3개 추천",command=self._suggest_comment_drafts).pack(side="left",padx=4)
+        self.comment_suggestion=tk.StringVar(value="")
+        self.comment_suggestion_combo=ttk.Combobox(tab,textvariable=self.comment_suggestion,
+            values=(),state="readonly",width=100)
+        self.comment_suggestion_combo.grid(row=8,column=0,sticky="ew",pady=4)
+        self.comment_suggestion_combo.bind("<<ComboboxSelected>>",self._use_comment_suggestion)
 
     def go_comment(self):
         if not self.selected_video:return
         self.comment_video=(self.active_id,self.selected_video)
         item=store.get_candidate(*self.comment_video)
+        if hasattr(self,"comment_persona_combo"):
+            persona=comments.persona_for_profile(store.get_profile(self.comment_video[0]))
+            known={value["name"] for value in comments.PERSONAS.values()}
+            chosen=persona["name"] if persona["name"] in known else (
+                comments.PERSONAS["jp_morning_chill"]["name"] if persona["language"]=="ja"
+                else comments.PERSONAS["senior_old_pop"]["name"])
+            self.comment_persona_choice.set(chosen)
+            self.comment_language.set(persona["language"])
+            self.comment_tone.set(persona["tone"])
+            self.comment_emoji_level.set(persona["emoji_level"])
+            self.comment_length.set(persona["length"])
         self.comment_label.set(item["channel_title"]+" · "+item["video_title"][:70])
         self.observation.delete("1.0",tk.END)
         self.draft.delete("1.0",tk.END)
         self.draft.insert("1.0",item["draft"])
         self.tabs.select(self.frames[3])
+
+    def _save_comment_persona(self):
+        if not self.comment_video:
+            messagebox.showinfo("프로필 선택","먼저 댓글을 작성할 채널 후보를 선택하세요.",parent=self); return
+        try:
+            store.set_comment_persona(self.comment_video[0],name=self.comment_persona_choice.get(),
+                language=self.comment_language.get(),tone=self.comment_tone.get(),
+                emoji_level=self.comment_emoji_level.get(),length=self.comment_length.get())
+            self.footer.set("댓글 페르소나를 현재 프로필에 저장했습니다.")
+        except ValueError as exc:
+            messagebox.showwarning("저장 실패",str(exc),parent=self)
+
+    def _suggest_comment_drafts(self):
+        if not self.comment_video:
+            messagebox.showinfo("후보 선택","먼저 후보 영상을 선택하세요.",parent=self); return
+        item=store.get_candidate(*self.comment_video)
+        profile=store.get_profile(self.comment_video[0])
+        try:
+            suggestions=comments.suggest_drafts(profile,item["video_title"],profile["genre"],
+                self.observation.get("1.0",tk.END).strip(),3)
+        except ValueError as exc:
+            messagebox.showinfo("실제 감상 메모 필요",str(exc),parent=self); return
+        self.comment_suggestion_combo.configure(values=suggestions)
+        self.comment_suggestion.set(suggestions[0])
+        self._use_comment_suggestion()
+
+    def _use_comment_suggestion(self,_event=None):
+        value=self.comment_suggestion.get()
+        if value:
+            self.draft.delete("1.0",tk.END); self.draft.insert("1.0",value)
 
     def make_draft(self):
         if not self.comment_video:
@@ -959,9 +1037,17 @@ class Studio(tk.Tk):
         ttk.Label(tab,text="오프라인 Demo는 가상 메타데이터와 Mock AI를 사용합니다. Google/OAuth·네트워크·AI 키·사용자 DB를 사용하지 않습니다.",wraplength=1000).grid(row=1,column=0,sticky="w",pady=(0,12))
         controls=ttk.Frame(tab)
         controls.grid(row=2,column=0,sticky="ew",pady=5)
+        ttk.Label(controls,text="목표 방식").pack(side="left")
+        self.ai_target_mode=tk.StringVar(value="추천 적합 수")
+        self.ai_target_mode_combo=ttk.Combobox(controls,textvariable=self.ai_target_mode,values=("추천 적합 수","전체 후보 수"),
+            state="readonly",width=12)
+        self.ai_target_mode_combo.pack(side="left",padx=4)
         ttk.Label(controls,text="후보 목표").pack(side="left")
         self.ai_target=tk.StringVar(value="10")
-        ttk.Combobox(controls,textvariable=self.ai_target,values=("10","30","50"),state="readonly",width=7).pack(side="left",padx=6)
+        self.ai_target_combo=ttk.Combobox(controls,textvariable=self.ai_target,values=("5","10","20"),state="readonly",width=7)
+        self.ai_target_combo.pack(side="left",padx=6)
+        self.ai_target_mode_combo.bind("<<ComboboxSelected>>",lambda _event:self.ai_target_combo.configure(
+            values=("5","10","20") if self.ai_target_mode.get()=="추천 적합 수" else ("10","30","50")))
         ttk.Label(controls,text="검색 호출 상한").pack(side="left")
         self.ai_max_calls=tk.StringVar(value="3")
         ttk.Combobox(controls,textvariable=self.ai_max_calls,values=tuple(str(x) for x in range(1,13)),state="readonly",width=5).pack(side="left",padx=6)
@@ -1012,6 +1098,8 @@ class Studio(tk.Tk):
         ttk.Label(gemini_test_frame,text="모델 확인은 목록 조회만 수행합니다. 생성은 승인 후 가상 자료 1건.").pack(side="left",padx=10)
         ttk.Label(tab,text="사용자 입력 예상 예산은 호출 차단용 추정치이며 실제 청구액을 보장하지 않습니다.",
                   foreground="#8a4b08",wraplength=1000).grid(row=7,column=0,sticky="w",pady=(2,4))
+        ttk.Label(tab,text="YouTube Search Queries 기본 제공량은 문서 기준 하루 100회이며 프로젝트별 설정이 다를 수 있습니다. 추가 페이지 요청도 각각 1회로 계산됩니다.",
+                  foreground="#52636b",wraplength=1000).grid(row=8,column=0,sticky="w",pady=(0,4))
         self.ai_status=tk.StringVar(value="먼저 작업 프로필을 선택한 뒤 조사 계획을 미리 보세요.")
         ttk.Label(tab,textvariable=self.ai_status,wraplength=1000).grid(row=3,column=0,sticky="w",pady=6)
         body=ttk.Panedwindow(tab,orient="horizontal")
@@ -1035,6 +1123,7 @@ class Studio(tk.Tk):
         self.ai_expected_profile=None
         self.ai_confirmed_plan=None
         self.ai_demo_queue=queue.Queue()
+        self.ai_progress_queue=queue.Queue()
         self.ai_gemini_test_queue=queue.Queue()
         self.ai_gemini_models_queue=queue.Queue()
         self.ai_running=False
@@ -1250,13 +1339,17 @@ class Studio(tk.Tk):
         if not sessions:
             messagebox.showinfo("이어갈 작업 없음","현재 프로필에 이어갈 조사 작업이 없습니다.",parent=self); return
         session=sessions[0]
+        fit_mode=session.get("target_mode") == "fit_target"
+        self.ai_target_mode.set("추천 적합 수" if fit_mode else "전체 후보 수")
+        self.ai_target_combo.configure(values=("5","10","20") if fit_mode else ("10","30","50"))
         profile=store.get_profile(self.active_id)
         if not profile or (profile["market"],profile["genre"]) != (session["market"],session["genre"]):
             messagebox.showwarning("프로필 불일치","작업 당시 국가·장르와 현재 프로필이 달라 이어갈 수 없습니다.",parent=self); return
         self.ai_target.set(str(session["target"]))
         self.ai_max_calls.set(str(session["max_search_calls"]))
         try:
-            plan=ai_research.preview_plan(self.active_id,session["target"],max_search_calls=session["max_search_calls"])
+            plan=ai_research.preview_plan(self.active_id,session["target"],max_search_calls=session["max_search_calls"],
+                target_mode="fit_target" if fit_mode else "candidate_count")
         except (ValueError,KeyError):
             messagebox.showwarning("계획 복구 실패","저장된 조사 계획을 다시 만들 수 없습니다.",parent=self); return
         plan["provider_id"]=self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
@@ -1269,7 +1362,8 @@ class Studio(tk.Tk):
         if not self.active_id:
             messagebox.showinfo("프로필 선택","먼저 작업 프로필을 추가하거나 선택하세요.",parent=self); return
         try:
-            plan=ai_research.preview_plan(self.active_id,int(self.ai_target.get()),max_search_calls=int(self.ai_max_calls.get()))
+            target_mode="fit_target" if self.ai_target_mode.get()=="추천 적합 수" else "candidate_count"
+            plan=ai_research.preview_plan(self.active_id,int(self.ai_target.get()),max_search_calls=int(self.ai_max_calls.get()),target_mode=target_mode)
         except (ValueError,KeyError) as exc:
             messagebox.showwarning("계획 확인",str(exc),parent=self); return
         self.ai_confirmed_plan=plan
@@ -1342,6 +1436,7 @@ class Studio(tk.Tk):
             messagebox.showinfo("계획 먼저 보기","프로필과 검색 범위를 미리보기한 뒤 실제 조사를 시작하세요.",parent=self); return
         if (int(self.ai_target.get()) != plan["target_candidates"] or
                 int(self.ai_max_calls.get()) != plan["requested_search_calls"] or
+                plan.get("target_mode") != ("fit_target" if self.ai_target_mode.get()=="추천 적합 수" else "candidate_count") or
                 self.ai_provider_ids.get(self.ai_provider_choice.get()) != plan.get("provider_id")):
             self.ai_confirmed_plan=None
             messagebox.showinfo("계획 변경됨","목표·검색 상한·AI 모드가 바뀌었습니다. 계획을 다시 미리보기 하세요.",parent=self); return
@@ -1369,6 +1464,9 @@ class Studio(tk.Tk):
                       f"목표 {plan['target_candidates']}개 / 검색어 호출 최대 {plan['max_search_calls']}회\n\n"
                       f"YouTube 읽기 전용 검색을 실행하고 후보를 이 프로필에 저장합니다. {ai_privacy} 취소해도 수집된 결과는 이 프로필에만 남습니다.\n\n계속할까요?")
         if not messagebox.askyesno("실제 조사 실행 확인",consent_text,parent=self): return
+        while not self.ai_progress_queue.empty():
+            try: self.ai_progress_queue.get_nowait()
+            except queue.Empty: break
         self.ai_running=True
         self.ai_cancel_event=threading.Event()
         self.ai_pause_event=threading.Event()
@@ -1381,13 +1479,25 @@ class Studio(tk.Tk):
             try:
                 token=oauth.get_access_token(profile_id) if not key else None
                 def collect(term,market,limit):
-                    return lookup_videos(key,term,market,limit=min(20,limit),access_token=token)
-                run=ai_research.run_bounded_research(profile_id,collect,target=plan["target_candidates"],
-                    max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event,
-                    session_id=plan.get("session_id"),pause_event=self.ai_pause_event,
-                    allow_paid_external=provider_id in ("openai","gemini") and not provider_note,
-                    cost_estimate_usd=cost_estimate,cost_limit_usd=cost_limit)
+                    return lookup_videos(key,term,market,limit=min(50,limit),access_token=token)
+                if plan.get("target_mode") == "fit_target":
+                    def collect_page(term,market,limit,page_token=None):
+                        return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
+                                             page_token=page_token,return_page=True)
+                    run=ai_research.run_auto_recommendations(profile_id,collect_page,target=plan["target_candidates"],
+                        max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event,
+                        session_id=plan.get("session_id"),pause_event=self.ai_pause_event,
+                        progress=self.ai_progress_queue.put,
+                        allow_paid_external=provider_id in ("openai","gemini") and not provider_note,
+                        cost_estimate_usd=cost_estimate,cost_limit_usd=cost_limit)
+                else:
+                    run=ai_research.run_bounded_research(profile_id,collect,target=plan["target_candidates"],
+                        max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event,
+                        session_id=plan.get("session_id"),pause_event=self.ai_pause_event,
+                        allow_paid_external=provider_id in ("openai","gemini") and not provider_note,
+                        cost_estimate_usd=cost_estimate,cost_limit_usd=cost_limit)
                 counts=store.save_candidates(profile_id,run.candidates) if run.candidates else {"적합":0,"검토":0,"제외":0}
+                ai_research.persist_review_decisions(profile_id,run.reviews,run.candidates)
                 result=(run,counts,provider_note)
             except (APIError,oauth.OAuthError,ValueError,OSError):
                 result=RuntimeError("조사를 완료하지 못했습니다. 연결·권한·저장 경로를 확인한 뒤 저장된 작업을 이어가세요.")
@@ -1395,12 +1505,31 @@ class Studio(tk.Tk):
                 result=RuntimeError("조사 중 예기치 않은 문제가 발생했습니다. 연결·공급자 설정을 확인하고 다시 시도하세요.")
             self.ai_demo_queue.put(("live",profile_id,result))
         threading.Thread(target=worker,name="zisu-ai-research",daemon=True).start()
+        self.after(100,self._poll_ai_progress)
         self.after(50,self._poll_ai_demo_result)
+
+    def _poll_ai_progress(self):
+        if not self.winfo_exists(): return
+        try:
+            progress=self.ai_progress_queue.get_nowait()
+        except queue.Empty:
+            if self.ai_running: self.after(250,self._poll_ai_progress)
+            return
+        if progress.get("profile_id")==self.active_id:
+            self.ai_status.set(f"자동 조사 진행 중 · 검색 {progress['calls_used']}회 / 잔여 {progress['budget_remaining']}회"
+                f" · 후보 {progress['candidate_count']} · 중복 제거 {progress['duplicate_count']}"
+                f" · 추천 적합 {progress['recommended_fit_count']}"
+                f" · AI 검토 {progress['ai_review_count']} · 사람 확인 {progress['human_reviewed_count']}"
+                f" · 불확실 {progress['uncertain_count']}")
+        if self.ai_running: self.after(100,self._poll_ai_progress)
 
     def _ai_live_done(self,profile_id,result):
         if not self.winfo_exists(): return
         if self.active_id != profile_id:
             self.ai_status.set("작업 중 프로필이 전환되어 현재 화면에는 결과를 표시하지 않습니다. 후보와 AI 검토 캐시는 시작한 원래 프로필에만 저장됐습니다."); return
+        while not self.ai_progress_queue.empty():
+            try: self.ai_progress_queue.get_nowait()
+            except queue.Empty: break
         if isinstance(result,Exception):
             self.ai_status.set("읽기 전용 조사에 실패했습니다: "+str(result)[:300]); return
         run,counts,provider_note=result
@@ -1409,9 +1538,16 @@ class Studio(tk.Tk):
         for review in run.reviews:
             candidate=self.ai_candidate_rows.get(review.video_id,{})
             ai_label=review.ai_opinion.verdict if review.ai_opinion else "미호출"
-            self.ai_tree.insert("","end",iid=review.video_id,values=(review.final_verdict,review.rule_verdict,ai_label,candidate.get("video_title",review.video_id)))
-        state="취소되어 일부 결과" if run.cancelled else "완료"
-        self.ai_status.set(f"실제 읽기 전용 조사 {state}: 후보 {run.unique_count}개 · 검색어 호출 {run.calls_used}회 · 저장 통계 적합 {counts['적합']} / 검토 {counts['검토']} / 제외 {counts['제외']}{provider_note}. AI 의견은 승인 아님.")
+            proposal=ai_research.PROPOSED_VERDICT_LABELS[ai_research.proposed_verdict(store.get_profile(profile_id),review,candidate)]
+            self.ai_tree.insert("","end",iid=review.video_id,values=(proposal,review.rule_verdict,ai_label,candidate.get("video_title",review.video_id)))
+        if isinstance(run,ai_research.AutoResearchRun):
+            self.ai_status.set(f"자동 조사 {run.state}: 추천 적합 {run.recommended_fits}/{run.target_fits} (부족 {run.shortfall})"
+                f" · 검색 호출 {run.calls_used}회 · 중복 제거 {run.duplicate_count} · 후보 {len(run.candidates)}"
+                f" · AI 검토 {run.ai_review_count} · 사람 확인 {run.human_reviewed_count} · 부족 후보는 승격하지 않습니다.{provider_note}"
+                +(f" · {run.warning}" if run.warning else ""))
+        else:
+            state="취소되어 일부 결과" if run.cancelled else "완료"
+            self.ai_status.set(f"실제 읽기 전용 조사 {state}: 후보 {run.unique_count}개 · 검색 호출 {run.calls_used}회 · 저장 통계 적합 {counts['적합']} / 검토 {counts['검토']} / 제외 {counts['제외']}{provider_note}. AI 의견은 승인 아님.")
         children=self.ai_tree.get_children()
         if children: self.ai_tree.selection_set(children[0]); self._ai_show_detail()
 
@@ -1420,9 +1556,12 @@ class Studio(tk.Tk):
         review=self.ai_reviews.get(selected[0]) if selected else None
         if not review: return
         opinion=review.ai_opinion
+        candidate=getattr(self,"ai_candidate_rows",{}).get(review.video_id,{})
+        proposal=ai_research.PROPOSED_VERDICT_LABELS[ai_research.proposed_verdict(store.get_profile(review.profile_id),review,candidate)]
         text=(f"규칙 분류: {review.rule_verdict} ({review.rule_score}/100)\n"
               f"규칙 근거: {review.rule_reason}\n\n최종 제안: {review.final_verdict}\n"
               f"출처: {review.provenance}\n경고: {review.warning}\n")
+        text+=f"AI/규칙 추천: {proposal} (사람 승인 아님; 사람 라벨은 실제 청취 후 별도 기록)\n"
         if opinion:
             text+=(f"\nAI 의견(자동 승인 아님): {opinion.verdict}\n"
                    f"긍정 신호: {', '.join(opinion.positive_signals) or '없음'}\n"
@@ -1430,7 +1569,6 @@ class Studio(tk.Tk):
                    f"메타데이터 인용: {', '.join(opinion.evidence_from_metadata) or '검증된 인용 없음'}\n"
                    f"불확실성: {opinion.uncertainty or '남아 있을 수 있음'}\n"
                    f"사람이 확인할 점: {opinion.recommended_human_check}\n")
-        candidate=getattr(self,"ai_candidate_rows",{}).get(review.video_id,{})
         url=candidate.get("video_url") or candidate.get("url","")
         text+=f"\n영상 URL: {url or 'Demo 가상 표본'}\n직접 영상을 듣고 최종 분류·승인을 판단하세요. 감상 체크는 자동 저장되지 않습니다."
         self.ai_detail.configure(state="normal"); self.ai_detail.delete("1.0","end"); self.ai_detail.insert("1.0",text); self.ai_detail.configure(state="disabled")

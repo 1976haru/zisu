@@ -108,6 +108,10 @@ def initialize(path=None):
           reason TEXT NOT NULL, positive_signals TEXT NOT NULL DEFAULT '',
           conflict_signals TEXT NOT NULL DEFAULT '', uncertainty TEXT NOT NULL DEFAULT '',
           human_label TEXT NOT NULL DEFAULT '', label_notes TEXT NOT NULL DEFAULT '',
+          rule_verdict TEXT NOT NULL DEFAULT '', ai_verdict TEXT NOT NULL DEFAULT '',
+          proposed_verdict TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '',
+          model_version TEXT NOT NULL DEFAULT '', decision_at TEXT NOT NULL DEFAULT '',
+          review_status TEXT NOT NULL DEFAULT 'needs_review',
           reviewed_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
@@ -136,6 +140,8 @@ def initialize(path=None):
           state TEXT NOT NULL, target INTEGER NOT NULL, max_search_calls INTEGER NOT NULL,
           query_index INTEGER NOT NULL DEFAULT 0, processed_json TEXT NOT NULL DEFAULT '[]',
           candidates_json TEXT NOT NULL DEFAULT '[]', reviews_json TEXT NOT NULL DEFAULT '[]', in_flight INTEGER NOT NULL DEFAULT 0,
+          target_mode TEXT NOT NULL DEFAULT 'candidate_count', page_token TEXT NOT NULL DEFAULT '',
+          calls_used INTEGER NOT NULL DEFAULT 0, duplicate_count INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
@@ -148,12 +154,31 @@ def initialize(path=None):
             "connected_email TEXT NOT NULL DEFAULT ''",
             "subgenre TEXT NOT NULL DEFAULT ''",
             "related_genres_json TEXT NOT NULL DEFAULT '[]'",
+            "comment_persona_name TEXT NOT NULL DEFAULT ''",
+            "comment_language TEXT NOT NULL DEFAULT ''",
+            "comment_tone TEXT NOT NULL DEFAULT ''",
+            "comment_emoji_level TEXT NOT NULL DEFAULT 'light'",
+            "comment_length TEXT NOT NULL DEFAULT 'short'",
         ):
             _add_column(db, "profiles", definition)
         _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
         _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
         _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
+        for definition in (
+            "rule_verdict TEXT NOT NULL DEFAULT ''", "ai_verdict TEXT NOT NULL DEFAULT ''",
+            "proposed_verdict TEXT NOT NULL DEFAULT ''", "evidence TEXT NOT NULL DEFAULT ''",
+            "model_version TEXT NOT NULL DEFAULT ''", "decision_at TEXT NOT NULL DEFAULT ''",
+            "review_status TEXT NOT NULL DEFAULT 'needs_review'",
+        ):
+            _add_column(db, "genre_audit", definition)
+        for definition in (
+            "target_mode TEXT NOT NULL DEFAULT 'candidate_count'", "page_token TEXT NOT NULL DEFAULT ''",
+            "calls_used INTEGER NOT NULL DEFAULT 0", "duplicate_count INTEGER NOT NULL DEFAULT 0",
+        ):
+            _add_column(db, "research_sessions", definition)
+        db.execute("UPDATE genre_audit SET rule_verdict=predicted_decision WHERE rule_verdict=''")
+        db.execute("UPDATE genre_audit SET review_status='human_reviewed' WHERE human_label<>'' AND review_status='needs_review'")
 
 def create_profile(name, market, genre, path=None, subgenre="", related_genres=None):
     initialize(path)
@@ -173,6 +198,18 @@ def list_profiles(path=None):
     initialize(path)
     with connect(path) as db:
         return [dict(row) for row in db.execute("SELECT * FROM profiles ORDER BY created_at,id")]
+
+def set_comment_persona(profile_id, *, name, language, tone, emoji_level="light", length="short", path=None):
+    if language not in {"ja", "ko", "en"} or emoji_level not in {"none", "light", "moderate"} or length not in {"short", "medium", "long"}:
+        raise ValueError("Invalid comment persona settings.")
+    if len(name) > 80 or len(tone) > 80:
+        raise ValueError("Comment persona settings are too long.")
+    with connect(path) as db:
+        result = db.execute("""UPDATE profiles SET comment_persona_name=?,comment_language=?,
+          comment_tone=?,comment_emoji_level=?,comment_length=? WHERE id=?""",
+          (name.strip(), language, tone.strip(), emoji_level, length, profile_id))
+        if result.rowcount != 1:
+            raise ValueError("Profile not found.")
 
 def get_profile(profile_id, path=None):
     with connect(path) as db:
@@ -358,11 +395,27 @@ def label_genre_audit(profile_id, video_id, label, notes="", path=None):
     if label != "불확실" and len((notes or "").strip()) < 5:
         raise ValueError("판정 근거를 5자 이상 기록하세요.")
     with connect(path) as db:
-        result = db.execute("""UPDATE genre_audit SET human_label=?,label_notes=?,
+        result = db.execute("""UPDATE genre_audit SET human_label=?,label_notes=?,review_status='human_reviewed',
           reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
           WHERE profile_id=? AND video_id=?""", (label,(notes or "").strip(),profile_id,video_id))
         if result.rowcount != 1:
             raise ValueError("장르 검토 표본을 찾을 수 없습니다.")
+
+def record_ai_decision(profile_id, video_id, *, rule_verdict, ai_verdict="", proposed_verdict="",
+                       evidence="", uncertainty="", model_version="", path=None):
+    """Persist machine opinion separately; never changes a human label or rule verdict."""
+    allowed = {"auto_fit", "cross_genre_review", "related_reference", "exclude", "insufficient_evidence"}
+    if proposed_verdict not in allowed:
+        raise ValueError("Invalid proposed verdict.")
+    with connect(path) as db:
+        result = db.execute("""UPDATE genre_audit SET rule_verdict=?,ai_verdict=?,proposed_verdict=?,
+          evidence=?,uncertainty=?,model_version=?,decision_at=CURRENT_TIMESTAMP,
+          review_status=CASE WHEN human_label='' THEN 'needs_review' ELSE review_status END,
+          updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND video_id=?""",
+          (rule_verdict, ai_verdict, proposed_verdict, evidence, uncertainty, model_version,
+           profile_id, video_id))
+        if result.rowcount != 1:
+            raise ValueError("Audit row does not exist.")
 
 def genre_quality(profile_id, path=None):
     rows = list_genre_audit(profile_id, labeled=True, path=path)
@@ -470,15 +523,15 @@ def ai_usage_summary(profile_id, path=None):
                           (profile_id, datetime.now(timezone.utc).strftime("%Y-%m-%d") + "%")).fetchall()
         return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
 
-def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash=""):
+def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash="", target_mode="candidate_count"):
     session_id = uuid.uuid4().hex
     with connect(path) as db:
         row = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not row or row["market"] != market or row["genre"] != genre:
             raise ValueError("조사 프로필이 변경되었습니다. 새 계획을 만드세요.")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
-        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls,settings_hash) VALUES(?,?,?,?,?,?,?,?)",
-                   (session_id, profile_id, market, genre, "running", target, max_search_calls, settings_hash))
+        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls,settings_hash,target_mode) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (session_id, profile_id, market, genre, "running", target, max_search_calls, settings_hash,target_mode))
     return session_id
 
 def get_research_session(session_id, profile_id, path=None):
@@ -491,14 +544,17 @@ def list_resumable_sessions(profile_id, path=None):
         return [dict(row) for row in db.execute("SELECT * FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') ORDER BY updated_at DESC", (profile_id,))]
 
 def checkpoint_research_session(session_id, profile_id, *, state=None, query_index=None,
-                                processed=None, candidates=None, reviews=None, in_flight=None, path=None):
+                                processed=None, candidates=None, reviews=None, in_flight=None,
+                                page_token=None, calls_used=None, duplicate_count=None, path=None):
     import json
     fields, values = [], []
     for key, value in (("state", state), ("query_index", query_index),
                        ("processed_json", json.dumps(processed, ensure_ascii=False) if processed is not None else None),
                        ("candidates_json", json.dumps(candidates, ensure_ascii=False) if candidates is not None else None),
                        ("reviews_json", json.dumps(reviews, ensure_ascii=False) if reviews is not None else None),
-                       ("in_flight", int(in_flight) if in_flight is not None else None)):
+                       ("in_flight", int(in_flight) if in_flight is not None else None),
+                       ("page_token", page_token), ("calls_used", calls_used),
+                       ("duplicate_count", duplicate_count)):
         if value is not None:
             fields.append(key + "=?"); values.append(value)
     fields.append("updated_at=CURRENT_TIMESTAMP")
