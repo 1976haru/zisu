@@ -98,4 +98,40 @@ class StoreTests(unittest.TestCase):
         store.update_profile(self.jp,name="일본 모닝 조사",market="JP",genre="MORNING_CHILL_RAP",subgenre="여성 보컬",path=self.db)
         self.assertEqual("여성 보컬",store.get_profile(self.jp,self.db)["subgenre"])
 
+    def test_related_genres_persist_validate_and_preserve_subgenre(self):
+        import json
+        store.update_profile(self.jp,name="일본 모닝 조사",market="JP",genre="MORNING_CHILL_RAP",
+            subgenre="legacy value",related_genres=["CHILL_RAP","CHILL_RAP","MORNING_CHILL_RAP"],path=self.db)
+        profile=store.get_profile(self.jp,self.db)
+        self.assertEqual(["CHILL_RAP"],json.loads(profile["related_genres_json"]))
+        self.assertEqual("legacy value",profile["subgenre"])
+        with self.assertRaises(ValueError): store.update_profile(self.jp,name="JP test",market="JP",genre="MORNING_CHILL_RAP",
+            related_genres=["BAD_GENRE"],path=self.db)
+        self.assertEqual(5, len(store.normalize_related_genres("MORNING_CHILL_RAP", list(GENRES))))
+
+    def test_legacy_profile_migration_adds_empty_related_without_data_loss(self):
+        import sqlite3
+        legacy=self.root/"legacy-v3.db"
+        with sqlite3.connect(legacy) as db:
+            db.execute("CREATE TABLE profiles(id TEXT PRIMARY KEY,name TEXT UNIQUE,market TEXT,genre TEXT,subgenre TEXT)")
+            db.execute("INSERT INTO profiles VALUES('legacy','Legacy JP','JP','MORNING_CHILL_RAP','kept')")
+        store.initialize(legacy)
+        profile=store.get_profile("legacy",legacy)
+        self.assertEqual("kept",profile["subgenre"])
+        self.assertEqual("[]",profile["related_genres_json"])
+
+    def test_candidate_keeps_decision_genre_snapshot_after_profile_related_edit(self):
+        import json
+        store.update_profile(self.jp,name="일본 모닝 조사",market="JP",genre="MORNING_CHILL_RAP",
+            related_genres=["CHILL_RAP"],path=self.db)
+        row=self.video(); store.save_candidates(self.jp,[row],self.db)
+        original=store.get_candidate(self.jp,"aBcDeF12345",self.db)
+        self.assertEqual("MORNING_CHILL_RAP",original["classified_genre"])
+        self.assertEqual(["CHILL_RAP"],json.loads(original["related_genres_json"]))
+        store.update_profile(self.jp,name="일본 모닝 조사",market="JP",genre="MORNING_CHILL_RAP",
+            related_genres=["RNB_HIPHOP"],path=self.db)
+        unchanged=store.get_candidate(self.jp,"aBcDeF12345",self.db)
+        self.assertEqual(original["genre_decision"],unchanged["genre_decision"])
+        self.assertEqual(original["related_genres_json"],unchanged["related_genres_json"])
+
 if __name__ == "__main__": unittest.main()

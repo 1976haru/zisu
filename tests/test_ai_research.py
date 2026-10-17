@@ -593,5 +593,56 @@ class AIResearchTests(unittest.TestCase):
         self.assertEqual(store.get_research_session(partial.session_id,self.jp,self.db)["state"],"complete")
 
 
+    def test_related_genre_context_and_cache_are_scoped(self):
+        import json
+        store.update_profile(self.jp,name="日本モーニング調査",market="JP",genre="MORNING_CHILL_RAP",
+            related_genres=["CHILL_RAP"],path=self.db)
+        candidate=self.candidate("朝のプレイリスト","朝に聴きたい落ち着いた音楽")
+        class ContextProvider(ai_research.MockProvider):
+            def __init__(self): super().__init__(); self.related_seen=[]
+            def review(self,candidate,genre_id,related_genres=()):
+                self.related_seen.append((genre_id,tuple(related_genres)))
+                return super().review(candidate,genre_id,related_genres)
+        provider=ContextProvider()
+        ai_research.review_candidate(self.jp,candidate,provider,self.db)
+        ai_research.review_candidate(self.jp,candidate,provider,self.db)
+        self.assertEqual(1,provider.calls)
+        self.assertEqual(("MORNING_CHILL_RAP",("CHILL_RAP",)),provider.related_seen[0])
+        store.update_profile(self.jp,name="日本モーニング調査",market="JP",genre="MORNING_CHILL_RAP",
+            related_genres=["RNB_HIPHOP"],path=self.db)
+        ai_research.review_candidate(self.jp,candidate,provider,self.db)
+        self.assertEqual(2,provider.calls)
+        self.assertEqual(("MORNING_CHILL_RAP",("RNB_HIPHOP",)),provider.related_seen[-1])
+
+    def test_related_queries_are_localized_bounded_and_core_first(self):
+        store.update_profile(self.jp,name="日本モーニング調査",market="JP",genre="MORNING_CHILL_RAP",
+            related_genres=["CHILL_RAP","RNB_HIPHOP","CAFE_CHILL"],path=self.db)
+        store.set_profile_search_terms(self.jp,"JP",["manual core jp one","manual core jp two"],self.db)
+        plan=ai_research.preview_plan(self.jp,10,self.db,max_search_calls=5)
+        self.assertEqual(5,plan["max_search_calls"])
+        self.assertEqual(4,plan["core_search_calls"])
+        self.assertEqual(1,plan["related_search_calls"])
+        self.assertEqual("manual core jp one",plan["search_terms"][0])
+        self.assertNotIn("manual core jp one",plan["related_search_terms"])
+        self.assertEqual(["manual core jp one","manual core jp two"],plan["user_search_terms"])
+        self.assertLessEqual(len(plan["search_terms"]),5)
+        calls=[]
+        result=ai_research.run_bounded_research(self.jp,lambda term,market,limit:calls.append((term,market)) or [],
+            target=10,max_search_calls=5,path=self.db)
+        self.assertEqual(5,result.calls_used)
+        self.assertTrue(all(market=="JP" for _,market in calls))
+
+    def test_related_signals_never_promote_core_to_fit(self):
+        from mcrs.genres import related_classification
+        result=related_classification("MORNING_CHILL_RAP",["JAZZ_LOUNGE"],"jazz lounge playlist","")
+        self.assertNotEqual("core_fit",result["category"])
+        self.assertEqual(genres.REVIEW,result["core"].decision)
+
+    def test_related_settings_cannot_change_while_session_active(self):
+        store.start_research_session(self.jp,"JP","MORNING_CHILL_RAP",10,2,self.db)
+        with self.assertRaises(ValueError):
+            store.update_profile(self.jp,name="日本モーニング調査",market="JP",genre="MORNING_CHILL_RAP",
+                related_genres=["CHILL_RAP"],path=self.db)
+
 if __name__ == "__main__":
     unittest.main()

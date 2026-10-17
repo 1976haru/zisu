@@ -15,7 +15,7 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 from datetime import datetime, date
 from urllib.parse import urlencode, urlparse, parse_qs
 from . import store
-from .genres import GENRES, search_terms, assess
+from .genres import GENRES, search_terms, assess, related_classification
 from .youtube_api import lookup_videos, APIError
 from . import oauth
 from . import ai_research
@@ -52,7 +52,7 @@ class ProfileDialog(tk.Toplevel):
         self.transient(root)
         self.grab_set()
         self.resizable(False,False)
-        self.geometry("510x310")
+        self.geometry("600x590")
         self.configure(padx=22,pady=14)
         initial=initial or {}
         self.name=tk.StringVar(value=initial.get("name",""))
@@ -66,17 +66,46 @@ class ProfileDialog(tk.Toplevel):
         self.genre_keys=list(GENRES)
         self.genre_names=[GENRES[k].title for k in self.genre_keys]
         self.genre_display=tk.StringVar(value=GENRES[self.genre.get()].title)
-        ttk.Combobox(self,textvariable=self.genre_display,values=self.genre_names,state="readonly",width=45).pack(anchor="w")
+        self.genre_combo=ttk.Combobox(self,textvariable=self.genre_display,values=self.genre_names,state="readonly",width=45)
+        self.genre_combo.pack(anchor="w")
+        ttk.Label(self,text="4단계 · 유사 장르 (선택 사항, 최대 5개)").pack(anchor="w",pady=(12,3))
+        current_related=store.normalize_related_genres(self.genre.get(),initial.get("related_genres_json","[]"))
+        if not initial and self.market.get()=="JP" and self.genre.get()=="MORNING_CHILL_RAP":
+            current_related=[key for key in ("CHILL_RAP","RNB_HIPHOP","CAFE_CHILL") if key!=self.genre.get()]
+        self.related_vars={key:tk.BooleanVar(value=key in current_related) for key in self.genre_keys}
+        related_frame=ttk.Frame(self); related_frame.pack(anchor="w",fill="x")
+        for index,key in enumerate(self.genre_keys):
+            ttk.Checkbutton(related_frame,text=GENRES[key].title,variable=self.related_vars[key],
+                command=self._update_related_summary).grid(row=index//2,column=index%2,sticky="w",padx=(0,18),pady=2)
+        self.related_summary=tk.StringVar()
+        ttk.Label(self,textvariable=self.related_summary,wraplength=550).pack(anchor="w",pady=5)
+        self.genre_combo.bind("<<ComboboxSelected>>",self._core_genre_changed)
+        self._update_related_summary()
         ttk.Button(self,text="저장하고 Google 연결로 이동",command=self._save).pack(anchor="e",pady=16)
         self.bind("<Escape>",lambda _e:self.destroy())
         self.wait_window()
+
+    def _core_genre_changed(self, _event=None):
+        key=self.genre_keys[self.genre_names.index(self.genre_display.get())]
+        self.related_vars[key].set(False)
+        self._update_related_summary()
+
+    def _update_related_summary(self):
+        key=self.genre_keys[self.genre_names.index(self.genre_display.get())]
+        selected=[item for item in self.genre_keys if item!=key and self.related_vars[item].get()]
+        if len(selected)>5:
+            self.related_vars[selected[-1]].set(False)
+            selected=selected[:-1]
+        self.related_summary.set("선택한 유사 장르: "+(", ".join(GENRES[item].title for item in selected) if selected else "없음"))
 
     def _save(self):
         name=self.name.get().strip()
         if not 2<=len(name)<=70:
             messagebox.showwarning("이름 확인","채널 이름을 2~70자로 입력해 주세요.",parent=self)
             return
-        self.result=(name,self.market.get(),self.genre_keys[self.genre_names.index(self.genre_display.get())])
+        genre=self.genre_keys[self.genre_names.index(self.genre_display.get())]
+        related=[key for key in self.genre_keys if self.related_vars[key].get() and key!=genre]
+        self.result=(name,self.market.get(),genre,related)
         self.destroy()
 
 
@@ -241,11 +270,13 @@ class Studio(tk.Tk):
         self.comment_video=None
         self.comment_label.set("영상 선택 없음")
         state = "Google 연결됨" if oauth.is_connected(self.active_id) else "연결 전"
-        self.profile_description.set(f'{profile["market"]} · {GENRES[profile["genre"]].title} · {state}')
+        related=store.normalize_related_genres(profile["genre"],profile.get("related_genres_json","[]"))
+        related_text=", ".join(GENRES[key].title for key in related) if related else "없음"
+        self.profile_description.set(f'{profile["market"]} · 핵심 {GENRES[profile["genre"]].title} · 유사 {related_text} · {state}')
         account = profile.get("connected_email") or "Google 미연결"
         channel = profile.get("youtube_channel_title") or "채널 정보 없음"
         self.active_account_banner.set(
-            f"현재 작업: {profile['name']} | {profile['market']} | {GENRES[profile['genre']].title} | {account} | {channel}")
+            f"현재 작업: {profile['name']} | {profile['market']} | 핵심 {GENRES[profile['genre']].title} | 유사 {related_text} | {account} | {channel}")
         self.refresh_account_status()
         self._reload_terms()
         self.reload_candidates()
@@ -257,8 +288,8 @@ class Studio(tk.Tk):
         dialog=ProfileDialog(self)
         if dialog.result:
             try:
-                name,market,genre=dialog.result
-                ident=store.create_profile(name,market,genre)
+                name,market,genre,related=dialog.result
+                ident=store.create_profile(name,market,genre,related_genres=related)
                 self.reload_profiles(ident)
             except Exception as exc: messagebox.showerror("채널 추가 실패",str(exc))
 
@@ -282,8 +313,8 @@ class Studio(tk.Tk):
         dialog=ProfileDialog(self,old)
         if dialog.result:
             try:
-                name,market,genre=dialog.result
-                store.update_profile(old["id"],name=name,market=market,genre=genre)
+                name,market,genre,related=dialog.result
+                store.update_profile(old["id"],name=name,market=market,genre=genre,related_genres=related)
                 self.reload_profiles(old["id"])
             except Exception as exc: messagebox.showerror("채널 수정 실패",str(exc))
 
@@ -441,14 +472,12 @@ class Studio(tk.Tk):
     def _reload_terms(self):
         if not hasattr(self,"keyword_list") or not self.active_id:return
         profile=self.current_profile()
-        terms=store.list_profile_search_terms(profile["id"],profile["market"])
-        if not terms:
-            terms=search_terms(profile["genre"],profile["market"])
+        terms,core_count,related_count=ai_research._profile_query_plan(profile,12)
         self.keyword_list.delete(0,tk.END)
         for item in terms:self.keyword_list.insert(tk.END,item)
         self.keyword_list.select_set(0)
         self.search_tree.delete(*self.search_tree.get_children())
-        self.search_status.set(f"{profile['market']} / {GENRES[profile['genre']].title} 전용 검색어 {len(terms)}개 준비됨")
+        self.search_status.set(f"{profile['market']} / 핵심 {GENRES[profile['genre']].title} 검색어 {core_count}개 + 유사 장르 검색어 {related_count}개 준비됨")
 
     def selected_terms(self):
         ids=self.keyword_list.curselection()
@@ -589,10 +618,20 @@ class Studio(tk.Tk):
         self.selected_video=ids[0]
         item=store.get_candidate(self.active_id,self.selected_video)
         if not item:return
+        profile=self.current_profile()
+        related_info=related_classification(
+            item.get("classified_genre") or profile["genre"],
+            store.normalize_related_genres(item.get("classified_genre") or profile["genre"],item.get("related_genres_json","[]")),
+            item["video_title"],item.get("description",""))
+        labels={"core_fit":"핵심 적합","cross_genre_review":"교차 장르 검토",
+                "related_reference":"유사 장르 참고 후보","review":"검토","exclude":"제외"}
+        related_signals=[GENRES[key].title for key in related_info["related_evidence"]]
         self.item_status.set(item["status"])
         self.notes.delete("1.0",tk.END)
         self.notes.insert("1.0",item["notes"])
-        self.genre_reason.set(f"{item['genre_decision']} · {item['genre_score']}점 · {item['genre_reason']}")
+        self.genre_reason.set(f"{labels[related_info['category']]} · 핵심 판정 {item['genre_decision']} · {item['genre_score']}점 · {item['genre_reason']}"
+            +(f" · 유사 신호: {', '.join(related_signals)}" if related_signals else "")
+            +( " · 제목/설명만으로 불명확: 직접 청취 확인 필요" if related_info["human_listening_required"] else ""))
 
     def manual_add(self):
         url=simpledialog.askstring("영상 URL","YouTube 영상 주소를 붙여넣으세요.",parent=self)

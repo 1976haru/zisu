@@ -5,12 +5,36 @@ import math
 import os
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager, closing
 from datetime import datetime
 from pathlib import Path
 from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess
 
 MARKETS = ("JP", "KR")
+
+def normalize_related_genres(primary, related=()):
+    """Validate and canonicalize related genre IDs; legacy subgenre stays untouched."""
+    if primary not in GENRES:
+        raise ValueError("Choose a registered core genre.")
+    if related is None:
+        related = ()
+    if isinstance(related, str):
+        try:
+            related = json.loads(related)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("Related genre settings are invalid.") from None
+    if not isinstance(related, (list, tuple)):
+        raise ValueError("Related genres must be a list.")
+    result = []
+    for genre in related:
+        if genre not in GENRES:
+            raise ValueError("Only registered genres can be selected.")
+        if genre != primary and genre not in result:
+            result.append(genre)
+    if len(result) > 5:
+        raise ValueError("Choose at most five related genres.")
+    return result
 
 def data_dir() -> Path:
     override = os.environ.get("ZISU_DATA_DIR")
@@ -66,6 +90,7 @@ def initialize(path=None):
           country TEXT NOT NULL DEFAULT '', keyword TEXT NOT NULL DEFAULT '',
           genre_decision TEXT NOT NULL, genre_score INTEGER NOT NULL,
           genre_reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT '미확인',
+          classified_genre TEXT NOT NULL DEFAULT '', related_genres_json TEXT NOT NULL DEFAULT '[]',
           notes TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id),
@@ -122,21 +147,26 @@ def initialize(path=None):
             "connected_at TEXT NOT NULL DEFAULT ''",
             "connected_email TEXT NOT NULL DEFAULT ''",
             "subgenre TEXT NOT NULL DEFAULT ''",
+            "related_genres_json TEXT NOT NULL DEFAULT '[]'",
         ):
             _add_column(db, "profiles", definition)
         _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
+        _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
 
-def create_profile(name, market, genre, path=None, subgenre=""):
+def create_profile(name, market, genre, path=None, subgenre="", related_genres=None):
     initialize(path)
     name = (name or "").strip()
     if not 2 <= len(name) <= 70:
         raise ValueError("프로필 이름은 2~70자로 입력하세요.")
     if market not in MARKETS or genre not in GENRES:
         raise ValueError("국가와 장르를 확인하세요.")
+    related = normalize_related_genres(genre, related_genres)
     profile_id = uuid.uuid4().hex
     with connect(path) as db:
-        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre) VALUES(?,?,?,?,?)",
-                   (profile_id,name,market,genre,(subgenre or "").strip()[:100]))
+        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre,related_genres_json) VALUES(?,?,?,?,?,?)",
+                   (profile_id,name,market,genre,(subgenre or "").strip()[:100],json.dumps(related)))
     return profile_id
 
 def list_profiles(path=None):
@@ -149,24 +179,30 @@ def get_profile(profile_id, path=None):
         row = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
         return dict(row) if row else None
 
-def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None):
+def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None, related_genres=None):
     name = (name or "").strip()
     if market not in MARKETS or genre not in GENRES:
         raise ValueError("국가와 장르를 확인하세요.")
     if not 2 <= len(name) <= 70:
         raise ValueError("프로필 이름은 2~70자여야 합니다.")
     with connect(path) as db:
-        old = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        old = db.execute("SELECT market,genre,related_genres_json FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not old:
             raise ValueError("프로필을 찾을 수 없습니다.")
+        related = normalize_related_genres(genre, old["related_genres_json"] if related_genres is None else related_genres)
         count = db.execute("SELECT COUNT(*) FROM candidates WHERE profile_id=?", (profile_id,)).fetchone()[0]
         if count and (old["market"] != market or old["genre"] != genre):
             raise ValueError("후보가 저장된 프로필의 국가·장르는 변경할 수 없습니다. 새 프로필을 추가하세요.")
-        if subgenre is None:
-            db.execute("UPDATE profiles SET name=?,market=?,genre=? WHERE id=?", (name,market,genre,profile_id))
-        else:
-            db.execute("UPDATE profiles SET name=?,market=?,genre=?,subgenre=? WHERE id=?",
-                       (name,market,genre,(subgenre or "").strip()[:100],profile_id))
+        old_related = json.loads(old["related_genres_json"] or "[]")
+        if (old["genre"] != genre or old_related != related) and db.execute(
+                "SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') LIMIT 1",
+                (profile_id,)).fetchone():
+            raise ValueError("An active research session uses the current genre settings. Finish or cancel it before changing genres.")
+        assignments = "name=?,market=?,genre=?,related_genres_json=?"
+        values = [name, market, genre, json.dumps(related, ensure_ascii=False)]
+        if subgenre is not None:
+            assignments += ",subgenre=?"; values.append((subgenre or "").strip()[:100])
+        db.execute("UPDATE profiles SET " + assignments + " WHERE id=?", (*values, profile_id))
 
 def update_schedule(profile_id, schedule, path=None):
     import re
@@ -181,6 +217,7 @@ def save_candidates(profile_id, rows, path=None):
     if not profile:
         raise ValueError("선택한 프로필을 찾을 수 없습니다.")
     values, audit_values, stats = [], [], {"적합":0, "검토":0, "제외":0}
+    related_snapshot = json.dumps(normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]")), ensure_ascii=False)
     for row in rows:
         video_id = str(row.get("video_id", ""))
         if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
@@ -197,7 +234,8 @@ def save_candidates(profile_id, rows, path=None):
         values.append((profile_id,video_id,title,str(row.get("channel_title",""))[:500],
           str(row.get("channel_id",""))[:200],f"https://www.youtube.com/watch?v={video_id}",description,
           str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),str(row.get("country",""))[:20],
-          str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason))
+          str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason,
+          profile["genre"],related_snapshot))
     with connect(path) as db:
         db.executemany("""INSERT INTO genre_audit(profile_id,video_id,video_title,description,market,
           target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty)
@@ -208,8 +246,9 @@ def save_candidates(profile_id, rows, path=None):
           positive_signals=excluded.positive_signals,conflict_signals=excluded.conflict_signals,
           uncertainty=excluded.uncertainty,updated_at=CURRENT_TIMESTAMP""", audit_values)
         db.executemany("""INSERT INTO candidates(profile_id,video_id,video_title,channel_title,channel_id,
-          video_url,description,published_at,views,country,keyword,genre_decision,genre_score,genre_reason)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          video_url,description,published_at,views,country,keyword,genre_decision,genre_score,genre_reason,
+          classified_genre,related_genres_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
           video_title=excluded.video_title,channel_title=excluded.channel_title,channel_id=excluded.channel_id,
           views=excluded.views,description=excluded.description,country=excluded.country,
           keyword=excluded.keyword,published_at=excluded.published_at,
@@ -353,15 +392,15 @@ def list_profile_search_terms(profile_id, market, path=None):
         return [row[0] for row in db.execute("""SELECT term FROM profile_search_terms
           WHERE profile_id=? AND market=? AND enabled=1 ORDER BY rowid""",(profile_id,market))]
 
-def get_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, path=None):
+def get_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, path=None, cache_scope=""):
     """Read a cached AI opinion only inside the exact profile and provenance scope."""
     with connect(path) as db:
         row = db.execute("""SELECT * FROM ai_reviews WHERE profile_id=? AND video_id=? AND metadata_hash=?
-          AND genre=? AND provider=? AND model=? AND prompt_version='genre-review-v1'""",
-          (profile_id,video_id,metadata_hash,genre,provider,model)).fetchone()
+          AND genre=? AND provider=? AND model=? AND prompt_version=?""",
+          (profile_id,video_id,metadata_hash,genre,provider,model,"genre-review-v1" + cache_scope)).fetchone()
         return dict(row) if row else None
 
-def save_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, opinion, latency_ms=0, path=None):
+def save_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, opinion, latency_ms=0, path=None, cache_scope=""):
     """Add/update an AI cache row; never touches human labels or candidate decisions."""
     import json
     if opinion.verdict not in ("적합", "검토", "제외"):
@@ -371,12 +410,12 @@ def save_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, 
             raise ValueError("선택한 프로필을 찾을 수 없습니다.")
         db.execute("""INSERT INTO ai_reviews(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version,
           ai_verdict,positive_signals,conflict_signals,evidence,uncertainty,human_check,latency_ms)
-          VALUES(?,?,?,?,?,?, 'genre-review-v1',?,?,?,?,?,?,?)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version) DO UPDATE SET
           ai_verdict=excluded.ai_verdict,positive_signals=excluded.positive_signals,
           conflict_signals=excluded.conflict_signals,evidence=excluded.evidence,
           uncertainty=excluded.uncertainty,human_check=excluded.human_check,latency_ms=excluded.latency_ms""",
-          (profile_id,video_id,metadata_hash,genre,provider,model,opinion.verdict,
+          (profile_id,video_id,metadata_hash,genre,provider,model,"genre-review-v1" + cache_scope,opinion.verdict,
            json.dumps(opinion.positive_signals,ensure_ascii=False),json.dumps(opinion.conflict_signals,ensure_ascii=False),
            json.dumps(opinion.evidence_from_metadata,ensure_ascii=False),opinion.uncertainty,
            opinion.recommended_human_check,max(0,int(latency_ms))))
@@ -429,14 +468,15 @@ def ai_usage_summary(profile_id, path=None):
                           (profile_id, datetime.now().strftime("%Y-%m-%d") + "%")).fetchall()
         return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
 
-def start_research_session(profile_id, market, genre, target, max_search_calls, path=None):
+def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash=""):
     session_id = uuid.uuid4().hex
     with connect(path) as db:
         row = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not row or row["market"] != market or row["genre"] != genre:
             raise ValueError("조사 프로필이 변경되었습니다. 새 계획을 만드세요.")
-        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls) VALUES(?,?,?,?,?,?,?)",
-                   (session_id, profile_id, market, genre, "running", target, max_search_calls))
+        _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
+        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls,settings_hash) VALUES(?,?,?,?,?,?,?,?)",
+                   (session_id, profile_id, market, genre, "running", target, max_search_calls, settings_hash))
     return session_id
 
 def get_research_session(session_id, profile_id, path=None):

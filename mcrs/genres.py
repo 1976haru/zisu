@@ -117,3 +117,24 @@ def search_terms(genre_id: str, market: str) -> tuple[str, ...]:
         raise ValueError("시장 코드는 JP 또는 KR이어야 합니다.")
     genre = GENRES[genre_id]
     return genre.jp_queries if market == "JP" else genre.kr_queries
+
+def related_classification(core_id: str, related_ids, title: str, description: str = "") -> dict:
+    """Keep core verdict independent; related signals are evidence, never promotion."""
+    core = assess(core_id, title, description)
+    signals = {}
+    for genre_id in related_ids or ():
+        if genre_id not in GENRES or genre_id == core_id:
+            continue
+        result = assess(genre_id, title, description)
+        if result.positive_signals:
+            signals[genre_id] = {"decision": result.decision, "signals": result.positive_signals}
+    if core.decision == EXCLUDE:
+        category = "exclude"
+    elif core.decision == FIT:
+        category = "core_fit"
+    elif signals:
+        category = "cross_genre_review" if any(v["decision"] == FIT for v in signals.values()) else "related_reference"
+    else:
+        category = "exclude" if core.decision == EXCLUDE else "review"
+    return {"category": category, "core": core, "related_evidence": signals,
+            "human_listening_required": core.decision == REVIEW}

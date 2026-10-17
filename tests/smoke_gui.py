@@ -4,7 +4,7 @@ from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
 from mcrs import store
-from mcrs.gui import Studio
+from mcrs.gui import Studio, ProfileDialog
 with WorkspaceTemp() as temp:
     os.environ['ZISU_DATA_DIR']=str(temp)
     first = store.create_profile("GUI 스모크 조사", "JP", "MORNING_CHILL_RAP")
@@ -19,6 +19,14 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"ai_gemini_test_button")
     assert hasattr(app,"ai_gemini_models_button")
     assert hasattr(app,"ai_gemini_model_combo")
+    with patch.object(ProfileDialog,"wait_window",lambda self: None):
+        dialog=ProfileDialog(app)
+        assert {key for key,var in dialog.related_vars.items() if var.get()} == {"CHILL_RAP","RNB_HIPHOP","CAFE_CHILL"}
+        dialog.genre_display.set("Chill Rap")
+        dialog._core_genre_changed()
+        assert not dialog.related_vars["CHILL_RAP"].get()
+        assert "Chill Rap" not in dialog.related_summary.get()
+        dialog.destroy()
     assert app.ai_provider_choice.get()=="규칙만"
     app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
     app.select_profile()
