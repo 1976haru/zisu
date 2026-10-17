@@ -1,5 +1,6 @@
 """Run with xvfb-run -a python tests/smoke_gui.py on Linux CI."""
-import os, sys
+import os, sys, threading, time
+from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
 from mcrs import store
@@ -23,5 +24,38 @@ with WorkspaceTemp() as temp:
     app.update()
     app.tabs.select(app.frames[5])
     app.update()
-    app.destroy()
+    entered = threading.Event()
+    release = threading.Event()
+    def mock_search(*_args, **_kwargs):
+        entered.set()
+        if not release.wait(3):
+            raise TimeoutError("GUI smoke search release timed out")
+        return [{"video_id":"aBcDeF12345","video_title":"朝 morning chill rap"}]
+    app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
+    app.select_profile()
+    app.api_key.set("offline-mock-key")
+    result = []
+    deadline = time.monotonic() + 5
+    def switch_while_searching():
+        if not entered.is_set():
+            app.after(20, switch_while_searching)
+            return
+        app.profile_combo.current(second_index)
+        app.select_profile()
+        release.set()
+        app.after(20, check_search_completion)
+    def check_search_completion():
+        if app.search_inflight and time.monotonic() < deadline:
+            app.after(20, check_search_completion)
+            return
+        result.append(not app.search_inflight)
+        result.append(store.get_candidate(first, "aBcDeF12345") is not None)
+        result.append(store.get_candidate(second, "aBcDeF12345") is None)
+        result.append(app.active_id == second)
+        app.destroy()
+    with patch("mcrs.gui.lookup_videos", side_effect=mock_search):
+        app.api_search()
+        app.after(20, switch_while_searching)
+        app.mainloop()
+    assert result == [True, True, True, True], f"profile switch search isolation failed: {result}"
     print('GUI_SMOKE_PASS')
