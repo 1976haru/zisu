@@ -64,9 +64,21 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
-        self.assertIn("V4.5.4-Windows.zip",workflow)
+        self.assertIn("V4.5.5-Windows.zip",workflow)
         self.assertIn("validate_windows_release.ps1",workflow)
         self.assertIn("create_windows_sandbox_config.ps1",workflow)
+    def test_v455_version_is_consistent_across_runtime_and_release_paths(self):
+        gui=(ROOT/"mcrs/gui.py").read_text(encoding="utf-8")
+        package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
+        workflow=(ROOT/".github/workflows/windows-build.yml").read_text(encoding="utf-8")
+        launcher=(ROOT/"ZISU_바로실행.cmd").read_text(encoding="utf-8")
+        self.assertIn("V4.5.5",gui)
+        self.assertIn('"app_version": "4.5.5"',gui)
+        self.assertIn("V4.5.5-Windows.zip",package)
+        self.assertIn("V4.5.5-Windows.zip",workflow)
+        self.assertIn("V4.5.5",launcher)
+        for contents in (gui,package,workflow,launcher):
+            self.assertNotIn("V4.5.4",contents)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):
         smoke=(ROOT/"scripts/windows_exe_smoke.ps1").read_text(encoding="utf-8")
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")

@@ -19,7 +19,7 @@ set "LOG_PROBE=%LOGDIR%\launcher_probe_%RANDOM%_%RANDOM%.tmp"
 if not exist "%LOG_PROBE%" goto fallback_log
 del "%LOG_PROBE%" >nul 2>&1
 
->>"%LOG%" echo [%DATE% %TIME%] ZISU V4.5.4 launcher started. 2>nul
+>>"%LOG%" echo [%DATE% %TIME%] ZISU V4.5.5 launcher started. 2>nul
 goto log_ready
 
 :fallback_log
@@ -30,7 +30,7 @@ set "LOG_PROBE=%LOGDIR%\launcher_probe_%RANDOM%_%RANDOM%.tmp"
 >"%LOG_PROBE%" echo writable 2>nul
 if not exist "%LOG_PROBE%" goto no_log
 del "%LOG_PROBE%" >nul 2>&1
->>"%LOG%" echo [%DATE% %TIME%] ZISU V4.5.4 launcher started using temporary log fallback. 2>nul
+>>"%LOG%" echo [%DATE% %TIME%] ZISU V4.5.5 launcher started using temporary log fallback. 2>nul
 goto log_ready
 
 :no_log
@@ -58,7 +58,7 @@ exit /b 0
 
 :missing_exe
 >>"%LOG%" echo ERROR: Packaged executable is missing.
-echo [ZISU] The V4.5.4 application file was not found.
+echo [ZISU] The V4.5.5 application file was not found.
 echo Expected: "%EXE%"
 goto show_help
 
