@@ -53,6 +53,7 @@ try {
     $start.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
     $start.EnvironmentVariables['ZISU_DATA_DIR'] = $data
     $start.EnvironmentVariables['ZISU_EXE_SMOKE_REPORT'] = $report
+    $start.EnvironmentVariables['ZISU_EXE_SMOKE_PROFILE_TEST'] = '1'
     $start.EnvironmentVariables['ZISU_EXE_SMOKE_START_COUNTER'] = [string][Diagnostics.Stopwatch]::GetTimestamp()
     $start.EnvironmentVariables['ZISU_EXE_SMOKE_COUNTER_FREQUENCY'] = [string][Diagnostics.Stopwatch]::Frequency
     $process = [System.Diagnostics.Process]::Start($start)
@@ -146,11 +147,13 @@ try {
 
 if (-not (Test-Path -LiteralPath $report)) { throw 'EXE smoke report was not created; Python entrypoint was not verified.' }
 $result = Get-Content -LiteralPath $report -Raw -Encoding utf8 | ConvertFrom-Json
-if ($result.stage -ne 'gui_ready' -or -not $result.gui_initialized) { throw "Tkinter GUI ready stage not reached (last stage: $($result.stage))." }
+if ($result.stage -ne 'offline_smoke_complete' -or -not $result.gui_initialized) { throw "Tkinter GUI and offline profile smoke did not complete (last stage: $($result.stage))." }
 if (-not $result.frozen_executable) { throw 'Process was not a frozen standalone executable.' }
 if (-not $result.data_directory_created) { throw 'Isolated data directory was not initialized.' }
 if ($result.network_used -or $result.oauth_connected) { throw 'Offline smoke unexpectedly used an external account.' }
 if ($result.python_executable -ne 'ZisuResearchStudio.exe') { throw 'Frozen process executable identity is invalid.' }
+if (-not $result.profile_test -or -not $result.profile_test.passed) { throw 'Offline profile creation/switch/isolation smoke failed.' }
+if ($result.database_integrity -ne 'ok') { throw 'Isolated smoke database integrity check failed.' }
 
 $residual = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
 if ($residual.Count -gt 0) { throw "EXE process(es) remained after normal exit: $($residual.Id -join ', ')" }
@@ -171,5 +174,7 @@ $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant
     isolated_data_directory_created = $result.data_directory_created
     network_used = $result.network_used
     oauth_connected = $result.oauth_connected
+    profile_test = $result.profile_test
+    database_integrity = $result.database_integrity
     residual_executable_processes = $residual.Count
 } | ConvertTo-Json -Depth 6 | Tee-Object -FilePath (Join-Path $root 'exe-smoke-success.json')

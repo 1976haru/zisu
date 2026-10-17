@@ -1,10 +1,24 @@
 # ZISU V4.4.1 Windows 시작 안정화 / 상태 보고 (2026-10-17)
 
-## V4.4.1 최종 오프라인 검증 정정 (2026-10-17)
+## 최신 상태: V4.4.2 오프라인 배포 검증 도구 (작업 중)
+
+아래 V4.4.1 및 이전 절의 상태는 과거 시점 기록이며 현재 작업의 게이트는 아닙니다.
+V4.4.2는 ZIP/EXE 해시와 `_internal` 구조 확인, 격리 데이터 경로에서 GUI 정상 실행,
+테스트 프로필 생성·전환·검색어 분리, 복사 및 이동 후 실행을 수행하는 PowerShell 도구를
+추가합니다. GitHub Actions 아티팩트의 sidecar `RELEASE_SHA256SUMS.txt`가 ZIP 기준이고,
+배포 ZIP 내부 `SHA256SUMS.txt`가 EXE 기준입니다. EXE에는 Python/OAuth 모듈이 포함되므로
+별도 설치가 필요 없습니다. `OAuth_모듈_설치하기.bat`은 소스 실행에만 해당합니다.
+
+Windows Sandbox 실행 파일이 있고 활성화된 시스템에서는 `검증하기.cmd`가 Sandbox 구성을
+생성해 실행하며, 네트워크와 클립보드를 끄고 package 입력을 read-only로 매핑합니다.
+Sandbox가 없는 PC에서는 Python이 설치되어 있더라도 PATH를 자식 프로세스에서 제거한
+오프라인 검증이 가능하지만, 이를 Python 미설치 독립 PC 검증이라고 부르지 않습니다.
+
+## V4.4.1 최종 오프라인 검증 기록 (역사 기록, 2026-10-17)
 
 - 원본 V4.4 onefile ZIP은 Windows 10에서 40초 대기 후에도 Python 시작 보고서/격리 DB를 만들지 못했습니다. 관찰된 창은 Tk 창이 아니었고 `_MEI*` 추출 경로가 비어 있어 실패 구간을 Python 진입 전 onefile 부트로더로 좁혔습니다. Application Error/WER 및 Defender Operational에서 대응 차단 증거는 발견하지 못했습니다. 따라서 한 단계 더 구체적인 근본 트리거는 미확정이며, 보안 설정을 변경하지 않았습니다.
-- 최종 onedir ZIP/EXE SHA-256: `675a621c714ad238580c64a36dbc47b9e155cf98e3dffc4b2c2f1678214ac9f5` / `78e1f2ee13f7da6da0f461e9f61e2d6449d5ede3ffa578b0e13defc5e3fda095`.
-- Windows 10 Pro 22H2 빌드 `19045.4780`, Python PATH 제거, 격리 DB 및 한글/일본어/공백 경로: fresh-path 3회 GUI-ready 972.2/931.3/919.3 ms, warm 3회 599.1/599.0/599.6 ms. 종료 1033/987.5/969.3/667.2/649.6/651.4 ms; 잔류 EXE 프로세스 0회. 사용자 DB mtime 전후 동일.
+- Actions run `39015700620`에서 다운로드해 검증한 V4.4.1 onedir ZIP/EXE SHA-256: `e4eed1d31f84b4c7971759c1fdb9f250f65e0166e80ade9d9ad1b159a211b062` / `53a13d722945ca53ca6abc8500fa58e7a38ce909453f0505deaf3057e4739724`.
+- Windows 10 Pro 22H2 빌드 `19045.4780`, Python PATH 제거, 격리 DB 및 한글/일본어/공백 경로: fresh-path 3회 GUI-ready 918/899.5/881.1 ms, warm 3회 899.8/599.9/624.9 ms. 종료 985.3/954.7/963.2/951.7/654.6/696.2 ms; 잔류 EXE 프로세스 0회. 사용자 DB mtime 전후 동일.
 - Actions Windows Server 2025 빌드 `26100.33438`에서도 onedir GUI-ready는 fresh-path 907.1/687.0/708.0 ms, warm 569.6/579.3/585.7 ms였습니다. CI onefile 대조군은 fresh-path 3319.1/1991.1/2127.8 ms 및 warm 2116.1/2161.8/1938.5 ms였습니다. 경로 새 복사는 디스크 캐시 cold-start를 뜻하지 않습니다.
 - 상태: V4.4.1 Offline RC 코드 게이트 통과. 실제 Python 미설치 PC, Windows 11, Google OAuth/YouTube, 실음원 장르 정밀도는 여전히 미검증이며 별도 최종 검증 항목입니다.
 

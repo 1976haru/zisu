@@ -86,7 +86,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.4.1 · KR / JP 장르 안전 조사")
+        self.title("ZISU Research Studio V4.4.2 · KR / JP 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -148,7 +148,7 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.4.1",
+            "app_version": "4.4.2",
             "gui_initialized": len(self.frames) == 6 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -160,6 +160,34 @@ class Studio(tk.Tk):
             "network_used": False,
         }
         _write_smoke_stage("gui_ready", **payload)
+        profile_test = None
+        if os.environ.get("ZISU_EXE_SMOKE_PROFILE_TEST") == "1":
+            jp_id = store.create_profile("ZISU smoke JP", "JP", "MORNING_CHILL_RAP")
+            kr_id = store.create_profile("ZISU smoke KR", "KR", "CHILL_RAP")
+            store.set_profile_search_terms(jp_id, "JP", ["smoke JP isolated term"])
+            store.set_profile_search_terms(kr_id, "KR", ["smoke KR isolated term"])
+            self.reload_profiles(jp_id)
+            jp_selected = self.active_id == jp_id and store.list_profile_search_terms(jp_id, "JP") == ["smoke JP isolated term"]
+            kr_index = [profile["id"] for profile in self.profiles].index(kr_id)
+            self.profile_combo.current(kr_index)
+            self.select_profile()
+            kr_selected = self.active_id == kr_id and store.list_profile_search_terms(kr_id, "KR") == ["smoke KR isolated term"]
+            no_cross_terms = (
+                not store.list_profile_search_terms(jp_id, "KR")
+                and not store.list_profile_search_terms(kr_id, "JP")
+            )
+            profile_test = {
+                "passed": bool(jp_selected and kr_selected and no_cross_terms),
+                "profiles_created": 2,
+                "profile_switch_verified": bool(jp_selected and kr_selected),
+                "search_terms_isolated": bool(no_cross_terms),
+            }
+        with store.connect() as database:
+            database_integrity = database.execute("PRAGMA quick_check").fetchone()[0]
+        payload["database_integrity"] = database_integrity
+        if profile_test is not None:
+            payload["profile_test"] = profile_test
+        _write_smoke_stage("offline_smoke_complete", **payload)
         self.destroy()
 
     def _header(self):

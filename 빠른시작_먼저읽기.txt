@@ -1,22 +1,17 @@
-ZISU Research Studio V4.4.1 — 첫 실행 가이드
-=======================================
-1. 기존 V2.1 프로그램은 삭제하지 마세요.
-2. 배포 ZIP을 새 폴더에 전체 압축 해제합니다. EXE와 _internal 폴더를 함께 둡니다.
-3. SHA256SUMS.txt와 EXE 해시를 확인한 뒤 ZisuResearchStudio.exe를 실행합니다.
-4. 첫 화면 '① 계정 연결'에서 Morning Chill Rap JP 프로필을 확인합니다.
-5. 간편 체험은 'Google Cloud 없이 먼저 유튜브 열기'로 웹 검색부터 시작할 수 있습니다.
-   실제 앱 계정 연결은 다음 OAuth 단계가 필요합니다.
-6. 처음 한 번 'OAuth_모듈_설치하기.bat'을 실행합니다.
-7. Google Cloud의 YouTube Data API v3와 Desktop OAuth 클라이언트를 준비하고 JSON 파일을 선택합니다.
-8. [2. 새 계정으로 Google 로그인 및 연결] → 새 Google 계정 선택 → 이메일/채널명을 확인한 뒤 승인합니다.
-9. '② 장르별 채널 검색' 탭에서 일본 모닝칠랩 전용 검색어로 후보를 찾습니다.
+ZISU Research Studio V4.4.2 — Windows first-run guide
+====================================================
+1. Keep your existing V2.1 installation and data. Do not delete the old database.
+2. Extract the entire V4.4.2 ZIP to a new folder. Keep ZisuResearchStudio.exe beside the complete _internal folder; do not separate or move only the EXE.
+3. The packaged EXE does not require Python or a separate Google OAuth module installation.
+4. Optional offline verification: run 검증하기.cmd from the validation tools. If Windows Sandbox is available, it launches an offline isolated check; otherwise it checks on this PC with Python removed from the child process PATH. That is not proof of a Python-uninstalled PC.
+5. Compare the ZIP hash to RELEASE_SHA256SUMS.txt from the same GitHub Actions artifact. After extraction, compare the EXE hash to SHA256SUMS.txt in the package. Do not run files when hashes differ.
+6. Actual Google Cloud configuration and OAuth account approval are reserved for the final real-world test. They are not needed to start the offline validator.
+7. For source execution only: install Python 3.10+ and run OAuth_모듈_설치하기.bat to install optional Google libraries. This batch file is not needed for the packaged EXE.
+8. In the final real-world stage, prepare desktop OAuth and YouTube Data API v3, connect the Morning Chill account read-only, then test JP/KR searches and multi-profile isolation.
+9. Listen to at least 100-200 real videos and label them by a human; then measure recommendation precision and exclusion error. Do not claim 95% before measuring adequate samples.
 
-* Google Cloud OAuth JSON은 Gmail 비밀번호가 아닙니다. 채팅/깃허브/지인에게 보내지 마세요.
-* YouTube Data API 검색은 일본 지역의 시청 가능한 검색결과이지, 현지 운영자 인증이나 내 YouTube 홈 추천 피드가 아닙니다.
-* Windows 10에서 확인한 V4.4 onefile 실행은 Python 시작 전 멈췄습니다. V4.4.1은 ZIP의 onedir 빌드를 검증 중이며, Python 미설치 독립 PC와 실제 OAuth는 별도 검증이 필요합니다.
-* 코드 서명이 없는 시험 배포본은 SmartScreen 경고가 나타날 수 있습니다. 공식 Actions 아티팩트와 SHA-256을 확인하세요.
-* 로그인 연결이 어려우면 Google 연결 없이 검색어를 고르고 '유튜브 검색 열기'로 시작할 수 있습니다.
-* 문제가 나면 '오류진단하기.bat'을 실행해 메시지를 확인하세요. 개인 인증정보는 전달하지 마세요.
+Never send OAuth JSON, account passwords, tokens, databases or personal logs in chat or GitHub. Keep the EXE and _internal folder together. Repeated playback, automated comments, likes and subscriptions are not provided.
 
-폴더 지정: D:\03 zisu (프로그램의 '로컬설치하기.ps1'로 복사 가능)
-GitHub: https://github.com/1976haru/zisu/
+Historical Windows 10 baseline (V4.4.1, Actions run 39015700620): ZIP SHA-256 e4eed1d31f84b4c7971759c1fdb9f250f65e0166e80ade9d9ad1b159a211b062; EXE SHA-256 53a13d722945ca53ca6abc8500fa58e7a38ce909453f0505deaf3057e4739724. For V4.4.2 always use the sidecar manifest from its own Actions artifact because hashes are build-specific.
+
+GitHub: https://github.com/1976haru/zisu/pull/2

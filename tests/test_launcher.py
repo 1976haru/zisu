@@ -63,6 +63,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
+        self.assertIn("V4.4.2-Windows.zip",workflow)
+        self.assertIn("validate_windows_release.ps1",workflow)
+        self.assertIn("create_windows_sandbox_config.ps1",workflow)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):
         smoke=(ROOT/"scripts/windows_exe_smoke.ps1").read_text(encoding="utf-8")
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
@@ -77,7 +80,27 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("launch_to_gui_ready_ms",smoke)
         self.assertIn("ZISU_EXE_SMOKE_START_COUNTER",smoke)
         self.assertIn("EXE process(es) remained",smoke)
+        self.assertIn("ZISU_EXE_SMOKE_PROFILE_TEST",smoke)
+        self.assertIn("profile_test",smoke)
+        self.assertIn("database_integrity",smoke)
         self.assertIn("_internal",package)
         self.assertIn("Refusing to overwrite existing package",package)
         for marker in ("client_secret","oauth_tokens","token\\.json","\\.db$","\\.log$"):
             self.assertIn(marker,package)
+
+    def test_offline_release_validator_checks_hashes_isolation_and_profiles(self):
+        validator=(ROOT/"scripts/validate_windows_release.ps1").read_text(encoding="utf-8")
+        sandbox=(ROOT/"scripts/create_windows_sandbox_config.ps1").read_text(encoding="utf-8")
+        command=(ROOT/"검증하기.cmd").read_text(encoding="utf-8")
+        for marker in ("Get-FileHash", "RELEASE_SHA256SUMS.txt", "SHA256SUMS.txt", "_internal", "fresh-path", "profile_create_switch_isolation", "network_oauth", "ZISU Validation 한글_日本語"):
+            self.assertIn(marker,validator)
+        self.assertIn("WindowsSandbox.exe",sandbox)
+        self.assertIn("<Networking>Disable</Networking>",sandbox)
+        self.assertIn("validate_windows_release.ps1",command)
+        self.assertIn("security setting was changed",sandbox)
+
+    def test_exe_smoke_creates_and_switches_isolated_test_profiles(self):
+        gui=(ROOT/"mcrs/gui.py").read_text(encoding="utf-8")
+        self.assertIn("ZISU_EXE_SMOKE_PROFILE_TEST",gui)
+        self.assertIn("profile_switch_verified",gui)
+        self.assertIn("search_terms_isolated",gui)

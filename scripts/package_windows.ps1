@@ -12,8 +12,8 @@ if (-not (Test-Path -LiteralPath $runtime -PathType Container)) {
     throw 'Expected PyInstaller onedir runtime folder _internal was not found beside the executable.'
 }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
-$stage = Join-Path $output 'ZISU-Research-Studio-V4.4.1-Windows'
-$zip = Join-Path $output 'ZISU-Research-Studio-V4.4.1-Windows.zip'
+$stage = Join-Path $output 'ZISU-Research-Studio-V4.4.2-Windows'
+$zip = Join-Path $output 'ZISU-Research-Studio-V4.4.2-Windows.zip'
 if (Test-Path -LiteralPath $stage) { throw "Refusing to overwrite existing package staging directory: $stage" }
 if (Test-Path -LiteralPath $zip) { throw "Refusing to overwrite existing package archive: $zip" }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -54,7 +54,7 @@ if (-not ($entries | Where-Object { $_ -like '_internal/*' })) {
 }
 
 $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
-"$zipHash  ZISU-Research-Studio-V4.4.1-Windows.zip" |
+"$zipHash  ZISU-Research-Studio-V4.4.2-Windows.zip" |
     Set-Content -Encoding ascii (Join-Path $output 'RELEASE_SHA256SUMS.txt')
 
 [ordered]@{

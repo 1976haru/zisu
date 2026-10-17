@@ -1,4 +1,4 @@
-# ZISU Research Studio V4.4.1 — Windows 실행 안정화
+# ZISU Research Studio V4.4.2 — Windows 배포 검증
 
 V4 기능 브랜치는 첫 실행 시작 마법사, 프로필별 Google 읽기 전용 OAuth,
 KR/JP 독립 검색어, 6개 장르의 `적합 / 검토 / 제외` 보수 판정과 V2 SQLite
@@ -17,10 +17,10 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 
 ## 가장 먼저 할 일
 
-1. 이미 작동하는 **V2.1은 지우지 마세요.** V4.4.1 배포 ZIP을 별도 폴더에 모두 압축 해제하고 EXE의 SHA-256을 확인합니다. `_internal` 폴더를 EXE와 분리하지 마세요.
+1. 이미 작동하는 **V2.1은 지우지 마세요.** V4.4.2 배포 ZIP을 별도 폴더에 **전체 압축 해제**합니다. EXE와 `_internal` 런타임 폴더를 분리하거나 EXE만 복사하지 마세요. EXE 배포판은 Python 설치가 필요 없습니다.
 2. 첫 번째 탭 **① 계정 연결**에서 대상 작업 프로필을 확인합니다. **설정 없이 바로 쓰고 싶다면 'Google Cloud 없이 먼저 유튜브 열기'** 버튼으로 브라우저에 로그인한 후 수동 검색할 수 있습니다. 이 모드는 앱 OAuth 연결은 아닙니다. 기존 V2 DB가 있으면 그대로 읽고 필요한 연결 필드만 자동 추가합니다.
-3. `OAuth_모듈_설치하기.bat`을 한번 실행합니다. Google OAuth용 공개 Python 패키지 3개가 설치됩니다. 기본 기능은 패키지 없이 동작합니다.
-4. Google Cloud에서 `YouTube Data API v3`를 켜고 `Google Auth Platform`의 앱 정보를 구성한 뒤, **데스크톱 앱** OAuth 클라이언트를 만들어 JSON 파일을 받습니다. 테스트 모드라면 연결할 새 Google 계정을 테스트 사용자로 등록합니다.
+3. 배포 EXE에는 Google OAuth 모듈이 함께 포함되어 있어 별도 모듈 설치가 필요 없습니다. `OAuth_모듈_설치하기.bat`은 Python으로 소스를 실행하는 개발/소스 설치용이며, EXE에서는 실행하지 마세요.
+4. 실제 Google Cloud 설정은 이번 오프라인 패키지 검증과 별개이며, 마지막 실전 검증 단계에서 진행합니다. 그때 `YouTube Data API v3` 및 데스크톱 OAuth를 구성하고 테스트 모드라면 Morning Chill 계정을 테스트 사용자로 등록합니다.
 5. 앱에서 **[1. Google Cloud OAuth JSON 선택] → [2. 새 계정으로 Google 로그인 및 연결]**을 선택합니다. 브라우저에서 **새 Morning Chill Rap Google 계정**을 선택한 뒤 실제 이메일/채널명을 확인하여 승인합니다.
 6. `② 장르별 채널 검색`에서 `JP / Morning Chill Rap` 전용 검색어를 사용합니다. 계정 연결이 완료되면 API 키를 별도로 입력하지 않고도 OAuth 읽기 권한으로 검색할 수 있습니다. 연결 없이 웹 검색도 가능합니다.
 
@@ -38,7 +38,7 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 
 ## 주요 기능
 
-| 기능 | V4.4.1 상태 |
+| 기능 | V4.4.2 상태 |
 |---|---|
 | JP/KR 다채널 프로필 분리 | 구현 |
 | 프로필별 Google OAuth 계정 연결·해제 | 구현 / 실제 Google 승인 미검증 |
@@ -53,12 +53,12 @@ V4.4는 제외된 영상도 별도 장르 감사 표본으로 보존합니다. �
 | 국가별 지표 수동 입력, CSV/DB 백업 | 구현 |
 | 앱 실행 중 예약 검색 | 구현 (로그인 연결 또는 별도 API 키 필요) |
 | 반복 자동재생/자동 댓글·좋아요·구독 | 구현하지 않음 (정책 리스크) |
-| Python 미설치 PC용 EXE | Windows CI 실행 통과 / Python 미설치 독립 PC는 미검증 |
+| Python 설치가 필요 없는 onedir EXE | Windows 10에서 Python PATH 제거 검증 통과 / Python 미설치 독립 PC는 별도 확인 |
 
 ## Windows 개발/실행
 
 - `실행하기.bat` : 기존 Python으로 실행 (Python 3.10 이상 필요)
-- `OAuth_모듈_설치하기.bat` : 최초 한 번 구글 계정 연동 모듈 설치
+- `OAuth_모듈_설치하기.bat` : **Python 소스 실행 전용**, EXE 배포판에는 불필요
 - `오류진단하기.bat` : 에러 메시지 저장
 - `EXE_만들기.ps1` : Windows에서 PyInstaller EXE 생성
 - `로컬설치하기.ps1` : `D:\03 zisu`로 소스 복사(이전 프로그램 폴더 백업, Git 파일 보존)
@@ -72,7 +72,7 @@ GUI 스모크: `xvfb-run -a python tests/smoke_gui.py` (Linux 테스트 환경)
 `오류진단하기.bat`은 OAuth 모듈 포함 여부, DB 무결성 및 테이블별 행 수만 기록합니다.
 이메일·채널 ID·토큰 값·DB 경로는 진단 보고서에 기록하지 않습니다.
 
-## V4.4.1 Windows 배포 ZIP 검증
+## V4.4.1 검증 기준선 (이전 버전, 2026-10-17)
 
 CI 배포 ZIP에는 onedir EXE와 동봉 런타임 `_internal` 폴더, `SHA256SUMS.txt`,
 초보자 설명서와 빠른 시작 안내만 포함합니다. 소스, DB, OAuth JSON, 토큰, 로그와
@@ -86,7 +86,7 @@ V4.4.1 Offline RC 코드 검증 게이트는 통과했습니다. 이는 Python �
 Windows 11, 실제 OAuth/API 및 실제 음악 분류 검증을 의미하지 않습니다. fresh-path는
 새 복사 경로 실행이며 OS 디스크 캐시를 비운 cold-disk 실행은 아닙니다.
 
-> 이 배포본은 로컬에서 구현한 소스 ZIP입니다. 사용자의 `D:\03 zisu`나 GitHub `1976haru/zisu`에 자동 업로드하지 않았습니다.
+> V4.4.2 Windows 배포 아티팩트는 GitHub Actions에서 생성됩니다. 사용자 PC의 DB, 토큰, OAuth JSON 또는 로컬 로그는 업로드하지 않습니다.
 
 ## 정책·공식 문서
 
@@ -94,14 +94,25 @@ Windows 11, 실제 OAuth/API 및 실제 음악 분류 검증을 의미하지 않
 - https://developers.google.com/youtube/v3/docs/search/list
 - https://support.google.com/youtube/answer/3399767
 
-## V4.4.1 오프라인 RC 검증 결과 (2026-10-17)
+## V4.4.1 실제 Windows 10 기준선의 해시 및 측정값
 
 정확한 GitHub Actions onedir ZIP을 Windows 10 Pro 22H2 (OS 빌드 19045.4780)에서
-검증했습니다. ZIP SHA-256은 `675a621c714ad238580c64a36dbc47b9e155cf98e3dffc4b2c2f1678214ac9f5`,
-EXE SHA-256은 `78e1f2ee13f7da6da0f461e9f61e2d6449d5ede3ffa578b0e13defc5e3fda095`입니다.
-Python PATH를 제거하고 한글·일본어·공백 경로에서 GUI 준비는 fresh-path 972.2/931.3/919.3 ms,
-warm 599.1/599.0/599.6 ms였습니다. 6회 전부 GUI 준비, 정상 종료, 잔류 프로세스 0건을
+검증했습니다 (Actions run `39015700620`). ZIP SHA-256은 `e4eed1d31f84b4c7971759c1fdb9f250f65e0166e80ade9d9ad1b159a211b062`,
+EXE SHA-256은 `53a13d722945ca53ca6abc8500fa58e7a38ce909453f0505deaf3057e4739724`입니다.
+Python PATH를 제거하고 한글·일본어·공백 경로에서 GUI 준비는 fresh-path 918/899.5/881.1 ms,
+warm 899.8/599.9/624.9 ms였습니다. 6회 전부 GUI 준비, 정상 종료, 잔류 프로세스 0건을
 확인했습니다. 여기서 fresh-path는 새 복사 경로 실행이며 디스크 캐시를 비운 cold boot가 아닙니다.
 오프라인 코드 검증 게이트는 통과했으나, Python 미설치 독립 PC, Windows 11, 실제 OAuth/API,
 실제 음원 장르 정밀도는 미검증입니다. 기존 onefile 시간 초과는 Python 진입 전 부트로더 단계에서
 발생한 사실까지 확인했으며, 해당 환경에서의 더 근본적인 트리거는 로그 증거가 없어 미확정입니다.
+
+## V4.4.2 독립 배포 검증
+
+GitHub Actions 아티팩트에는 `검증하기.cmd`, PowerShell 검증 스크립트 및
+`RELEASE_SHA256SUMS.txt`가 포함됩니다. ZIP 해시를 외부 sidecar와 대조하고,
+ZIP 내부 `SHA256SUMS.txt`로 EXE를 다시 대조합니다. 빌드마다 해시가 달라질 수 있으므로
+항상 ZIP과 **같은 Actions 아티팩트의** sidecar를 사용하세요. 검증기는 임시 격리 데이터에서
+프로필 생성·전환·검색어 분리 및 GUI 정상 종료를 3회 fresh-path + 3회 warm으로 검사하며,
+OAuth/네트워크는 사용하지 않습니다. Windows Sandbox가 활성화된 PC에서는 원클릭 CMD가
+네트워크·클립보드를 끈 Sandbox를 실행하고, 그렇지 않으면 현재 PC의 Python PATH를 제외한
+오프라인 검증을 수행합니다. 이 PATH 검사는 Python 미설치 PC의 증명은 아닙니다.
