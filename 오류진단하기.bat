@@ -5,7 +5,7 @@ cd /d "%~dp0"
 if defined LOCALAPPDATA (set "LOGDIR=%LOCALAPPDATA%\ZisuResearchStudio\logs") else (set "LOGDIR=%~dp0logs")
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul
 set "LOG=%LOGDIR%\diagnostic_latest.txt"
->"%LOG%" echo ZISU V4.3 Privacy-Safe Diagnostic Report
+>"%LOG%" echo ZISU V4.4 Privacy-Safe Diagnostic Report
 >>"%LOG%" echo Date: %DATE% %TIME%
 >>"%LOG%" echo Windows version:
 ver >>"%LOG%" 2>&1

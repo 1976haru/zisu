@@ -7,7 +7,7 @@ if not exist "mcrs\gui.py" goto missing_files
 if defined LOCALAPPDATA (set "LOGDIR=%LOCALAPPDATA%\ZisuResearchStudio\logs") else (set "LOGDIR=%~dp0logs")
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul
 set "LOG=%LOGDIR%\startup_latest.log"
->"%LOG%" echo ZISU V3.0 Startup Diagnostics
+>"%LOG%" echo ZISU V4.4 Source Startup Diagnostics
 >>"%LOG%" echo Source directory: %CD%
 >>"%LOG%" echo Date and time: %DATE% %TIME%
 >>"%LOG%" echo Checking Python 3.10+ and tkinter...

@@ -1,6 +1,15 @@
 """Beginners-first KR/JP multi-channel GUI with read-only account connection."""
 from __future__ import annotations
-import os, re, threading, time, webbrowser
+import json
+import os
+import platform
+import re
+import sqlite3
+import sys
+import threading
+import time
+import webbrowser
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from datetime import datetime, date
@@ -73,7 +82,8 @@ class Studio(tk.Tk):
         super().__init__()
         store.initialize()
         first_run = not store.list_profiles()
-        self.title("ZISU Research Studio V4.2 · KR / JP 장르 안전 조사")
+        smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
+        self.title("ZISU Research Studio V4.4 · KR / JP 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -123,10 +133,35 @@ class Studio(tk.Tk):
         self._help_ui(self.frames[5])
         ttk.Label(self,textvariable=self.footer).pack(anchor="w",padx=24,pady=(0,9))
         self.reload_profiles()
-        if first_run:
+        if first_run and not smoke_report:
             self.after(150, self.start_onboarding)
         self.after(1000,self._tick)
         self.after(14000,self._scheduled_tick)
+        if smoke_report:
+            self.after(250, lambda: self._complete_exe_smoke(smoke_report))
+
+    def _complete_exe_smoke(self, report_path):
+        """CI-only startup probe. It never performs OAuth or network requests."""
+        self.update_idletasks()
+        target = Path(report_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": 1,
+            "app_version": "4.4",
+            "gui_initialized": len(self.frames) == 6 and bool(self.winfo_exists()),
+            "profile_count": len(self.profiles),
+            "frozen_executable": bool(getattr(sys, "frozen", False)),
+            "python_executable": Path(sys.executable).name,
+            "windows_release": platform.release(),
+            "windows_version": platform.version(),
+            "data_directory_created": store.data_dir().is_dir(),
+            "oauth_connected": False,
+            "network_used": False,
+        }
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(target)
+        self.destroy()
 
     def _header(self):
         top=ttk.Frame(self,padding=(18,14))
@@ -765,4 +800,18 @@ class Studio(tk.Tk):
 
 
 def main():
-    Studio().mainloop()
+    try:
+        Studio().mainloop()
+    except (OSError, sqlite3.Error) as exc:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "ZISU 시작 실패",
+            "사용자 데이터 폴더를 만들거나 데이터베이스를 열 수 없습니다.\n"
+            "폴더 쓰기 권한과 남은 디스크 공간을 확인한 뒤 다시 실행하세요.\n\n"
+            f"오류 종류: {type(exc).__name__}\n"
+            "개인정보가 제외된 진단은 오류진단하기.bat에서 확인할 수 있습니다.",
+            parent=root,
+        )
+        root.destroy()
+        raise SystemExit(10) from None

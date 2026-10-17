@@ -8,8 +8,8 @@ jobs:
   test-and-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Run unit tests
@@ -36,11 +36,25 @@ jobs:
         run: |
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist\ZisuResearchStudio.exe).Hash.ToLowerInvariant()
           "$hash  ZisuResearchStudio.exe" | Set-Content -Encoding ascii dist\SHA256SUMS.txt
-      - name: Upload Windows EXE
-        uses: actions/upload-artifact@v4
+      - name: Create minimal release ZIP
+        shell: pwsh
+        run: ./scripts/package_windows.ps1 -ExePath dist/ZisuResearchStudio.exe -OutputDirectory dist/release -ManualPath 사용설명서_초보자.html -QuickStartPath 빠른시작_먼저읽기.txt
+      - name: Run copied EXE offline smoke without Python on PATH
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'ZISU 배포 日本語 path'
+          Expand-Archive -LiteralPath dist/release/ZISU-Research-Studio-V4.4-Windows.zip -DestinationPath $target
+          $expected = (Get-Content -LiteralPath (Join-Path $target 'SHA256SUMS.txt') -Raw).Trim().Split(' ')[0]
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $target 'ZisuResearchStudio.exe')).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw 'Packaged EXE hash mismatch.' }
+          ./scripts/windows_exe_smoke.ps1 -ExePath (Join-Path $target 'ZisuResearchStudio.exe') -WorkRoot (Join-Path $env:RUNNER_TEMP 'zisu-exe-smoke')
+      - name: Upload Windows release package
+        uses: actions/upload-artifact@v7
         with:
           name: ZisuResearchStudio-Windows
           path: |
             dist/ZisuResearchStudio.exe
             dist/SHA256SUMS.txt
+            dist/release/ZISU-Research-Studio-V4.4-Windows.zip
+            dist/release/RELEASE_SHA256SUMS.txt
           if-no-files-found: error
