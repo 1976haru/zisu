@@ -387,6 +387,14 @@ def reserve_ai_usage(profile_id, provider, model, session_id="", *,
     """Atomically account an outbound attempt before dispatch; unknown cost stays unknown."""
     if provider not in ("openai", "gemini", "ollama", "mock"):
         raise ValueError("AI 공급자를 확인하세요.")
+    if provider in ("openai", "gemini"):
+        try:
+            cost_estimate, cost_limit = float(cost_estimate), float(cost_limit)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (not math.isfinite(cost_estimate) or not math.isfinite(cost_limit) or
+                cost_estimate <= 0 or cost_limit <= 0 or cost_estimate > cost_limit):
+            return False
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
@@ -401,9 +409,6 @@ def reserve_ai_usage(profile_id, provider, model, session_id="", *,
         if provider in ("openai", "gemini"):
             # Do not invent vendor prices. Require the operator's own conservative
             # per-call estimate and ceiling; unknown historic spend fails closed.
-            if (cost_estimate is None or cost_limit is None or not math.isfinite(cost_estimate) or
-                    not math.isfinite(cost_limit) or cost_estimate <= 0 or cost_limit <= 0):
-                return False
             spent = db.execute("SELECT SUM(cost_estimate) FROM ai_usage WHERE profile_id=? AND provider=? AND created_at LIKE ?",
                                (profile_id, provider, day + "%")).fetchone()[0]
             if spent is None and daily:
@@ -425,7 +430,6 @@ def ai_usage_summary(profile_id, path=None):
         return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
 
 def start_research_session(profile_id, market, genre, target, max_search_calls, path=None):
-    import json
     session_id = uuid.uuid4().hex
     with connect(path) as db:
         row = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()

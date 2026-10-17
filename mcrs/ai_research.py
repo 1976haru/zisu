@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 from http.client import IncompleteRead
 import json
+import math
 import time
 import threading
 import csv
@@ -32,6 +33,8 @@ PROVIDER_ERROR_MESSAGES = {
     "bad_response": "공급자 응답 형식이 올바르지 않아 검토로 남겼습니다.",
     "budget": "AI 요청 한도에 도달했습니다. 규칙 엔진 결과는 계속 사용할 수 있습니다.",
     "consent": "유료 외부 AI 호출은 기본 차단되어 있습니다. 비용 상한 승인을 확인하세요.",
+    "invalid_request": "AI 모델이 이 요청 형식이나 출력 구조를 지원하지 않습니다. 선택한 모델과 출력 형식을 확인하고 규칙 전용 모드로 계속할 수 있습니다.",
+    "unsupported_model": "선택한 Gemini 모델의 구조화 응답 계약이 확인되지 않았습니다. 지원 목록의 모델을 선택하세요.",
     "unknown": "AI 검토에 실패했습니다. 규칙 판정을 유지하고 직접 확인하세요.",
 }
 
@@ -56,6 +59,31 @@ AI_JSON_SCHEMA = {
     "required": ["verdict", "positive_signals", "conflict_signals",
                  "evidence_from_metadata", "uncertainty", "recommended_human_check"],
 }
+
+# Raw REST request formats are model-family-specific. Gemini 2.5 models use
+# the GenerateContent JSON MIME/schema fields; Gemini 3.x uses the newer
+# responseFormat enum, whose JSON enum spelling is APPLICATION_JSON.
+GEMINI_REQUEST_CONTRACTS = {
+    "gemini-2.5-flash": "generate_content_response_json_schema",
+    "gemini-2.5-flash-lite": "generate_content_response_json_schema",
+    "gemini-2.5-pro": "generate_content_response_json_schema",
+    "gemini-3.1-flash-lite": "response_format_enum",
+    "gemini-3.6-flash": "response_format_enum",
+    "gemini-3.8-flash": "response_format_enum",
+}
+
+
+def validate_cost_budget(estimate, limit) -> tuple[float, float]:
+    """Validate user-entered estimates; these are controls, not billing guarantees."""
+    try:
+        estimate, limit = float(estimate), float(limit)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("Enter a finite positive estimate and ceiling.") from None
+    if not math.isfinite(estimate) or not math.isfinite(limit):
+        raise ValueError("Enter a finite positive estimate and ceiling.")
+    if estimate <= 0 or limit <= 0 or estimate > limit:
+        raise ValueError("Estimate and ceiling must be positive; estimate cannot exceed ceiling.")
+    return estimate, limit
 
 
 @dataclass(frozen=True)
@@ -143,6 +171,7 @@ class JsonHttpProvider:
             if status == 429: raise ProviderFailure("rate_limit") from None
             if status in (401, 403): raise ProviderFailure("auth") from None
             if 500 <= status <= 599: raise ProviderFailure("server") from None
+            if status == 400: raise ProviderFailure("invalid_request") from None
             raise ProviderFailure("bad_response") from None
         except TimeoutError:
             raise ProviderFailure("timeout") from None
@@ -233,10 +262,21 @@ class GeminiProvider(JsonHttpProvider):
         except CredentialError: return ""
     def review(self, candidate: Candidate, genre_id: str) -> AIOpinion:
         if not self.api_key: raise ProviderFailure("missing_key")
+        contract = GEMINI_REQUEST_CONTRACTS.get(self.model)
+        if contract == "generate_content_response_json_schema":
+            generation_config = {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": AI_JSON_SCHEMA,
+            }
+        elif contract == "response_format_enum":
+            generation_config = {"responseFormat": {"text": {
+                "mimeType": "APPLICATION_JSON", "schema": AI_JSON_SCHEMA,
+            }}}
+        else:
+            raise ProviderFailure("unsupported_model")
         raw = self._post(f"{self.endpoint}/{self.model}:generateContent", {"x-goog-api-key": self.api_key},
                          {"contents": [{"parts": [{"text": self._prompt(candidate, genre_id)}]}],
-                          "generationConfig": {"responseFormat": {"text": {
-                              "mimeType": "application/json", "schema": AI_JSON_SCHEMA}}}})
+                          "generationConfig": generation_config})
         try: text = raw["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError): raise ProviderFailure("bad_response") from None
         return self._decode(text)

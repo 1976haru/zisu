@@ -845,6 +845,8 @@ class Studio(tk.Tk):
         self.ai_cost_limit=tk.StringVar(value="")
         ttk.Entry(controls,textvariable=self.ai_cost_estimate,width=7).pack(side="left",padx=2)
         ttk.Entry(controls,textvariable=self.ai_cost_limit,width=7).pack(side="left",padx=2)
+        ttk.Label(tab,text="사용자 입력 예상 예산은 호출 차단용 추정치이며 실제 청구액을 보장하지 않습니다.",
+                  foreground="#8a4b08",wraplength=1000).grid(row=4,column=0,sticky="w",pady=(0,5))
         ttk.Button(controls,text="검토 보고서 내보내기",command=self._ai_export_report).pack(side="left",padx=6)
         credential=ttk.LabelFrame(tab,text="선택형 AI 키 보안 저장 · 현재 Windows 사용자 계정에만 복구 가능")
         credential.grid(row=5,column=0,sticky="ew",pady=5)
@@ -1041,9 +1043,8 @@ class Studio(tk.Tk):
         cost_estimate=cost_limit=None
         if provider_id in ("openai","gemini") and not provider_note:
             try:
-                cost_estimate=float(self.ai_cost_estimate.get())
-                cost_limit=float(self.ai_cost_limit.get())
-                if cost_estimate <= 0 or cost_limit <= 0 or cost_estimate > cost_limit: raise ValueError()
+                cost_estimate,cost_limit=ai_research.validate_cost_budget(
+                    self.ai_cost_estimate.get(),self.ai_cost_limit.get())
             except (TypeError,ValueError):
                 messagebox.showwarning("비용 상한 필요","유료 AI는 공급자의 현재 가격을 직접 확인하고, 안전 여유를 포함한 1회 추정 비용과 1일 상한(USD)을 입력해야 합니다. 가격을 확인할 수 없으면 규칙 전용 또는 Ollama를 사용하세요.",parent=self); return
         ai_privacy=("선택한 공급자에 검토 후보 제목·설명을 보낼 수 있습니다. 이메일, OAuth 토큰, 개인 메모는 보내지 않습니다."

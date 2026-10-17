@@ -148,7 +148,21 @@ class AIResearchTests(unittest.TestCase):
             gemini.review(candidate,"MORNING_CHILL_RAP")
         self.assertEqual(call.call_args.args[1]["x-goog-api-key"],"mock-gemini-key")
         self.assertNotIn("mock-gemini-key",call.call_args.args[0])
-        self.assertEqual(call.call_args.args[2]["generationConfig"]["responseFormat"]["text"]["mimeType"],"application/json")
+        gemini_payload=call.call_args.args[2]
+        self.assertEqual(gemini_payload["generationConfig"]["responseMimeType"],"application/json")
+        self.assertEqual(gemini_payload["generationConfig"]["responseJsonSchema"],ai_research.AI_JSON_SCHEMA)
+        self.assertNotIn("responseFormat",gemini_payload["generationConfig"])
+        gemini3=ai_research.GeminiProvider(api_key="mock-gemini-key",model="gemini-3.8-flash")
+        with mock.patch.object(gemini3,"_post",return_value={"candidates":[{"content":{"parts":[{"text":response}]}}]}) as call:
+            gemini3.review(candidate,"MORNING_CHILL_RAP")
+        self.assertEqual(call.call_args.args[2]["generationConfig"]["responseFormat"]["text"]["mimeType"],"APPLICATION_JSON")
+        self.assertEqual(ai_research.GEMINI_REQUEST_CONTRACTS["gemini-2.5-flash"],"generate_content_response_json_schema")
+        self.assertEqual(ai_research.GEMINI_REQUEST_CONTRACTS["gemini-3.8-flash"],"response_format_enum")
+        unsupported=ai_research.GeminiProvider(api_key="mock-gemini-key",model="unknown-model")
+        with mock.patch.object(unsupported,"_post") as call, self.assertRaises(ai_research.ProviderFailure) as caught:
+            unsupported.review(candidate,"MORNING_CHILL_RAP")
+        call.assert_not_called()
+        self.assertEqual(caught.exception.code,"unsupported_model")
         ollama=ai_research.OllamaProvider()
         with mock.patch.object(ollama,"_post",return_value={"response":response}) as call:
             ollama.review(candidate,"MORNING_CHILL_RAP")
@@ -285,6 +299,39 @@ class AIResearchTests(unittest.TestCase):
         self.assertFalse(store.reserve_ai_usage(self.kr,"openai","model","job-1",max_daily_requests=0,
                                                 cost_estimate=.01,cost_limit=.05,path=self.db))
 
+    def test_cost_estimate_rejects_nonfinite_zero_negative_and_malformed_values(self):
+        for value in ("NaN", "Infinity", "-Infinity", "-0.01", "0", "not-money", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ai_research.validate_cost_budget(value, "1.00")
+            self.assertFalse(store.reserve_ai_usage(self.jp,"openai","model","bad-budget",
+                                                    cost_estimate=value,cost_limit=1.0,path=self.db))
+        with self.assertRaises(ValueError):
+            ai_research.validate_cost_budget("0.02", "0.01")
+        self.assertEqual(ai_research.validate_cost_budget("0.01", "1.00"),(.01,1.0))
+        class PaidMock:
+            name="openai"; model="mock-model"
+            def __init__(self): self.calls=0
+            def review(self,candidate,genre_id):
+                self.calls+=1
+                return ai_research.MockProvider().review(candidate,genre_id)
+        provider=PaidMock()
+        result=ai_research.review_candidate(self.jp,self.candidate("朝のプレイリスト","音楽"),provider,self.db,
+            use_cache=False,allow_paid_external=True,cost_estimate_usd=float("nan"),cost_limit_usd=1.0)
+        self.assertEqual(provider.calls,0)
+        self.assertEqual(result.final_verdict,genres.REVIEW)
+
+    def test_daily_cost_ceiling_is_profile_scoped_and_atomic_across_concurrent_calls(self):
+        def reserve(item):
+            profile, index=item
+            return store.reserve_ai_usage(profile,"gemini","mock","job-"+str(index),
+                max_job_requests=20,max_daily_requests=20,cost_estimate=.01,cost_limit=.05,path=self.db)
+        requests=[(profile,index) for profile in (self.jp,self.kr) for index in range(20)]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results=list(pool.map(reserve,requests))
+        self.assertEqual(sum(result for result in results if result),10)
+        self.assertEqual(store.ai_usage_summary(self.jp,self.db)["gemini"]["requests"],5)
+        self.assertEqual(store.ai_usage_summary(self.kr,self.db)["gemini"]["requests"],5)
+
     def test_concurrent_usage_reservations_cannot_exceed_provider_limit(self):
         def reserve(_index):
             return store.reserve_ai_usage(self.jp,"ollama","local","same-job",
@@ -325,7 +372,7 @@ class AIResearchTests(unittest.TestCase):
 
     def test_provider_http_contract_handles_status_timeout_bad_json_truncation_and_size(self):
         base=ai_research.JsonHttpProvider()
-        for status,code in ((401,"auth"),(429,"rate_limit"),(503,"server"),(400,"bad_response")):
+        for status,code in ((401,"auth"),(403,"auth"),(429,"rate_limit"),(503,"server"),(400,"invalid_request")):
             error=HTTPError("https://provider.invalid",status,"private response body",{},io.BytesIO(b"private api key"))
             with mock.patch("mcrs.ai_research.urlopen",side_effect=error), self.subTest(status=status):
                 with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
@@ -347,6 +394,26 @@ class AIResearchTests(unittest.TestCase):
             with mock.patch("mcrs.ai_research.urlopen",return_value=response), self.subTest(length=len(payload)):
                 with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
                 self.assertEqual(caught.exception.code,"bad_response")
+
+    def test_gemini_response_shape_mismatch_and_unsupported_output_never_approve(self):
+        candidate=self.candidate("朝のプレイリスト", "실제 음원은 직접 감상 필요")
+        store.save_candidates(self.jp,[{"video_id":candidate.video_id,"video_title":candidate.title,
+                                       "description":candidate.description}],self.db)
+        store.label_genre_audit(self.jp,candidate.video_id,"적합","사람이 직접 음원을 확인",self.db)
+        provider=ai_research.GeminiProvider(api_key="mock-gemini-key")
+        with mock.patch.object(provider,"_post",return_value={"candidates":[]}):
+            with self.assertRaises(ai_research.ProviderFailure) as caught:
+                provider.review(candidate,"MORNING_CHILL_RAP")
+        self.assertEqual(caught.exception.code,"bad_response")
+        with mock.patch("mcrs.ai_research.urlopen",side_effect=HTTPError(
+                "https://provider.invalid",400,"INVALID_ARGUMENT",{},io.BytesIO(b"private details"))):
+            review=ai_research.review_candidate(self.jp,candidate,provider,self.db,use_cache=False,
+                allow_paid_external=True,cost_estimate_usd=.01,cost_limit_usd=.05)
+        self.assertEqual(review.final_verdict,genres.REVIEW)
+        self.assertEqual(review.ai_opinion.verdict,genres.REVIEW)
+        self.assertIn("요청 형식",review.ai_opinion.uncertainty)
+        audit=store.list_genre_audit(self.jp,path=self.db)[0]
+        self.assertEqual(audit["human_label"],"적합")
         provider=ai_research.OpenAIProvider(api_key="mock-openai-key")
         with mock.patch.object(provider,"_post",return_value={"choices":[]}):
             with self.assertRaises(ai_research.ProviderFailure) as caught: provider.review(self.candidate(),"MORNING_CHILL_RAP")
