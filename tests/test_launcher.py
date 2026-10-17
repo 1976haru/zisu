@@ -45,7 +45,9 @@ class LauncherTests(unittest.TestCase):
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
         self.assertIn("--offline-smoke-report",smoke)
         self.assertIn("--data-dir",smoke)
-        self.assertIn("last diagnostic stage",smoke)
+        self.assertIn("ZISU_EXE_SMOKE_REPORT",smoke)
+        self.assertIn("exe-smoke-failure.json",smoke)
+        self.assertIn("last_diagnostic_stage",smoke)
         self.assertIn("python_removed_from_path",smoke)
         for marker in ("client_secret","oauth_tokens","token\\.json","\\.db$","\\.log$"):
             self.assertIn(marker,package)
