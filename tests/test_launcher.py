@@ -54,6 +54,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("actions/setup-python@v7",workflow)
         self.assertIn("actions/upload-artifact@v7",workflow)
         self.assertIn("windows_exe_smoke.ps1",workflow)
+        self.assertIn("python tests/smoke_gui.py",workflow)
         self.assertIn("package_windows.ps1",workflow)
         self.assertIn("--onedir",workflow)
         self.assertIn("--onefile",workflow)
@@ -63,7 +64,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
-        self.assertIn("V4.4.2-Windows.zip",workflow)
+        self.assertIn("V4.5.0-Windows.zip",workflow)
         self.assertIn("validate_windows_release.ps1",workflow)
         self.assertIn("create_windows_sandbox_config.ps1",workflow)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):

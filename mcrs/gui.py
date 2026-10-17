@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import platform
+import queue
 import re
 import sqlite3
 import sys
@@ -17,6 +18,7 @@ from . import store
 from .genres import GENRES, search_terms, assess
 from .youtube_api import lookup_videos, APIError
 from . import oauth
+from . import ai_research
 from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
@@ -86,7 +88,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.4.2 · KR / JP 장르 안전 조사")
+        self.title("ZISU Research Studio V4.5 · AI 보조 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -124,7 +126,7 @@ class Studio(tk.Tk):
         self.tabs=ttk.Notebook(self)
         self.tabs.pack(fill="both",expand=True,padx=15,pady=8)
         self.frames=[]
-        for label in ("① 계정 연결","② 장르별 채널 검색","③ 후보·장르 검토","④ 댓글 초안","⑤ 국가별 성과","⑥ 예약·도움말"):
+        for label in ("① 계정 연결","② 장르별 채널 검색","③ 후보·장르 검토","④ 댓글 초안","⑤ 국가별 성과","⑥ 예약·도움말","⑦ AI 연구 도우미"):
             tab=ttk.Frame(self.tabs,padding=14)
             self.tabs.add(tab,text=label)
             self.frames.append(tab)
@@ -134,6 +136,7 @@ class Studio(tk.Tk):
         self._comment_ui(self.frames[3])
         self._metrics_ui(self.frames[4])
         self._help_ui(self.frames[5])
+        self._ai_research_ui(self.frames[6])
         ttk.Label(self,textvariable=self.footer).pack(anchor="w",padx=24,pady=(0,9))
         self.reload_profiles()
         if first_run and not smoke_report:
@@ -148,8 +151,8 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.4.2",
-            "gui_initialized": len(self.frames) == 6 and bool(self.winfo_exists()),
+            "app_version": "4.5.0",
+            "gui_initialized": len(self.frames) == 7 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
             "python_executable": Path(sys.executable).name,
@@ -227,6 +230,12 @@ class Studio(tk.Tk):
         if i<0 or i>=len(self.profiles): return
         profile=self.profiles[i]
         self.active_id=profile["id"]
+        if hasattr(self,"ai_tree") and getattr(self,"ai_expected_profile",None) != self.active_id:
+            self.ai_tree.delete(*self.ai_tree.get_children())
+            self.ai_reviews={}
+            self.ai_candidate_rows={}
+            self.ai_confirmed_plan=None
+            self.ai_status.set("프로필이 바뀌었습니다. 현재 프로필 기준으로 새 조사 계획을 미리보세요.")
         self.selected_video=None
         self.comment_video=None
         self.comment_label.set("영상 선택 없음")
@@ -802,6 +811,229 @@ class Studio(tk.Tk):
         self.help_text.grid(row=2,column=0,sticky="nsew",pady=10)
         self.help_text.insert("1.0",guide)
         self.help_text.configure(state="disabled")
+
+    def _ai_research_ui(self,tab):
+        tab.columnconfigure(0,weight=1)
+        tab.rowconfigure(4,weight=1)
+        ttk.Label(tab,text="원클릭 AI 조사 도우미 · 규칙 우선, AI는 검토 후보만 보조",font=("Malgun Gothic",15,"bold")).grid(row=0,column=0,sticky="w",pady=(4,10))
+        ttk.Label(tab,text="오프라인 Demo는 가상 메타데이터와 Mock AI를 사용합니다. Google/OAuth·네트워크·AI 키·사용자 DB를 사용하지 않습니다.",wraplength=1000).grid(row=1,column=0,sticky="w",pady=(0,12))
+        controls=ttk.Frame(tab)
+        controls.grid(row=2,column=0,sticky="ew",pady=5)
+        ttk.Label(controls,text="후보 목표").pack(side="left")
+        self.ai_target=tk.StringVar(value="10")
+        ttk.Combobox(controls,textvariable=self.ai_target,values=("10","30","50"),state="readonly",width=7).pack(side="left",padx=6)
+        ttk.Label(controls,text="검색 호출 상한").pack(side="left")
+        self.ai_max_calls=tk.StringVar(value="3")
+        ttk.Combobox(controls,textvariable=self.ai_max_calls,values=tuple(str(x) for x in range(1,13)),state="readonly",width=5).pack(side="left",padx=6)
+        ttk.Label(controls,text="AI 보조").pack(side="left")
+        self.ai_provider_choice=tk.StringVar(value="규칙만")
+        self.ai_provider_ids={"규칙만":"disabled","Ollama (로컬)":"ollama","Gemini":"gemini","OpenAI":"openai"}
+        ttk.Combobox(controls,textvariable=self.ai_provider_choice,values=tuple(self.ai_provider_ids),state="readonly",width=15).pack(side="left",padx=6)
+        ttk.Button(controls,text="1. 조사 계획 미리보기",command=self._ai_preview_plan,style="Accent.TButton").pack(side="left",padx=6)
+        ttk.Button(controls,text="2. 오프라인 Demo 시작",command=self._ai_start_demo).pack(side="left",padx=6)
+        ttk.Button(controls,text="실제 읽기 전용 조사",command=self._ai_start_live).pack(side="left",padx=6)
+        self.ai_cancel_button=ttk.Button(controls,text="진행 취소",command=self._ai_cancel,state="disabled")
+        self.ai_cancel_button.pack(side="left",padx=6)
+        ttk.Button(controls,text="검토 보고서 내보내기",command=self._ai_export_report).pack(side="left",padx=6)
+        self.ai_status=tk.StringVar(value="먼저 작업 프로필을 선택한 뒤 조사 계획을 미리 보세요.")
+        ttk.Label(tab,textvariable=self.ai_status,wraplength=1000).grid(row=3,column=0,sticky="w",pady=6)
+        body=ttk.Panedwindow(tab,orient="horizontal")
+        body.grid(row=4,column=0,sticky="nsew",pady=6)
+        results=ttk.Frame(body)
+        detail=ttk.Frame(body)
+        body.add(results,weight=2); body.add(detail,weight=3)
+        self.ai_tree=ttk.Treeview(results,columns=("decision","rule","ai","title"),show="headings",height=11)
+        for col,label,width in (("decision","추천 결과",85),("rule","규칙",70),("ai","AI 의견",75),("title","후보 제목",300)):
+            self.ai_tree.heading(col,text=label); self.ai_tree.column(col,width=width,stretch=col=="title")
+        self.ai_tree.pack(fill="both",expand=True)
+        self.ai_tree.bind("<<TreeviewSelect>>",self._ai_show_detail)
+        self.ai_listen=tk.BooleanVar(value=False)
+        ttk.Checkbutton(detail,text="실제 영상 감상 후 직접 확인함 (데모에서는 기록하지 않음)",variable=self.ai_listen).pack(anchor="w",pady=(0,5))
+        self.ai_detail=tk.Text(detail,font=("Malgun Gothic",10),wrap="word",height=14)
+        self.ai_detail.pack(fill="both",expand=True)
+        self.ai_detail.insert("1.0","결과를 선택하면 규칙 근거, AI 의견, 불확실성을 볼 수 있습니다. AI는 승인이나 댓글 게시를 수행하지 않습니다.")
+        self.ai_detail.configure(state="disabled")
+        self.ai_reviews={}
+        self.ai_candidate_rows={}
+        self.ai_expected_profile=None
+        self.ai_confirmed_plan=None
+        self.ai_demo_queue=queue.Queue()
+        self.ai_running=False
+        self.ai_cancel_event=None
+        ttk.Button(results,text="선택한 영상 직접 열기",command=self._ai_open_selected).pack(anchor="e",pady=5)
+
+    def _ai_preview_plan(self):
+        if not self.active_id:
+            messagebox.showinfo("프로필 선택","먼저 작업 프로필을 추가하거나 선택하세요.",parent=self); return
+        try:
+            plan=ai_research.preview_plan(self.active_id,int(self.ai_target.get()),max_search_calls=int(self.ai_max_calls.get()))
+        except (ValueError,KeyError) as exc:
+            messagebox.showwarning("계획 확인",str(exc),parent=self); return
+        self.ai_confirmed_plan=plan
+        terms="\n".join("  · "+term for term in plan["search_terms"][:6])
+        plan["provider_id"]=self.ai_provider_ids[self.ai_provider_choice.get()]
+        provider_label=self.ai_provider_choice.get()
+        budget="비용 없음 (규칙만)" if provider_label=="규칙만" else ("로컬 Ollama; 기기 자원 사용" if provider_label.startswith("Ollama") else "현재 모델 요금 확인이 필요해 비용을 추정하지 않음")
+        self.ai_status.set(f"미리보기: {plan['profile_name']} · {plan['market']} / {GENRES[plan['genre']].title} · 목표 {plan['target_candidates']}개 · 검색어 호출 최대 {plan['max_search_calls']}회 · AI {provider_label} · {budget}\n"
+                           f"검색어 예시:\n{terms}\n미리보기 중 API/AI 호출 0회. Demo는 오프라인이며, 실제 조사 버튼은 확인 후 YouTube 읽기 전용 검색을 수행합니다.")
+
+    def _ai_start_demo(self):
+        plan=self.ai_confirmed_plan
+        if not plan or plan.get("profile_id") != self.active_id:
+            messagebox.showinfo("계획 먼저 보기","조사 프로필을 선택한 뒤 계획을 다시 미리보기 하세요.",parent=self); return
+        if not messagebox.askyesno("Demo 계획 확인",
+             f"{plan['profile_name']} ({plan['market']} / {GENRES[plan['genre']].title})의 가상 데이터 3건을 검사합니다.\n\n"
+             "실제 검색·외부 AI 호출·DB 저장은 하지 않습니다. 진행할까요?",parent=self): return
+        if self.ai_running: return
+        profile_id=self.active_id
+        self.ai_expected_profile=profile_id
+        self.ai_running=True
+        self.ai_status.set("오프라인 Demo 실행 중… UI는 계속 사용할 수 있습니다.")
+        for item in self.ai_tree.get_children(): self.ai_tree.delete(item)
+        self.ai_reviews={}
+        def worker():
+            try: result=ai_research.run_demo(profile_id)
+            except Exception as exc: result=exc
+            self.ai_demo_queue.put(("demo",profile_id,result))
+        threading.Thread(target=worker,name="zisu-ai-demo",daemon=True).start()
+        self.after(50,self._poll_ai_demo_result)
+
+    def _poll_ai_demo_result(self):
+        try: kind,profile_id,result=self.ai_demo_queue.get_nowait()
+        except queue.Empty:
+            if self.ai_running and self.winfo_exists(): self.after(50,self._poll_ai_demo_result)
+            return
+        self.ai_running=False
+        self.ai_cancel_button.configure(state="disabled")
+        if kind=="live": self._ai_live_done(profile_id,result)
+        else: self._ai_demo_done(profile_id,result)
+
+    def _ai_demo_done(self,profile_id,result):
+        if not self.winfo_exists(): return
+        if self.active_id != profile_id:
+            self.ai_status.set("프로필이 전환되어 결과 표시를 생략했습니다. 기존 결과는 저장되지 않았습니다."); return
+        if isinstance(result,Exception):
+            self.ai_status.set("Demo 실행에 실패했습니다. 프로필·DB 상태를 확인하고 다시 시도하세요."); return
+        self.ai_reviews={review.video_id:review for review in result}
+        self.ai_candidate_rows={candidate.video_id:{"video_title":candidate.title,"video_url":candidate.url}
+                                for candidate in ai_research.demo_candidates("MORNING_CHILL_RAP")}
+        for review in result:
+            title=next((c.title for c in ai_research.demo_candidates("MORNING_CHILL_RAP") if c.video_id==review.video_id),review.video_id)
+            ai_label=review.ai_opinion.verdict if review.ai_opinion else "미호출"
+            self.ai_tree.insert("","end",iid=review.video_id,values=(review.final_verdict,review.rule_verdict,ai_label,title))
+        self.ai_status.set(f"Demo 완료: {len(result)}개 가상 사례 · 네트워크/OAuth/API 호출 0 · DB 변경 0 · 모든 분류는 사람 승인 전까지 제안입니다.")
+        children=self.ai_tree.get_children()
+        if children: self.ai_tree.selection_set(children[0]); self._ai_show_detail()
+
+    def _ai_cancel(self):
+        if self.ai_cancel_event:
+            self.ai_cancel_event.set()
+            self.ai_status.set("취소 요청됨 · 현재 읽기 요청이 끝나면 중단하고 수집된 프로필 전용 결과만 저장합니다.")
+
+    def _ai_start_live(self):
+        plan=self.ai_confirmed_plan
+        if not plan or plan.get("profile_id") != self.active_id:
+            messagebox.showinfo("계획 먼저 보기","프로필과 검색 범위를 미리보기한 뒤 실제 조사를 시작하세요.",parent=self); return
+        if (int(self.ai_target.get()) != plan["target_candidates"] or
+                int(self.ai_max_calls.get()) != plan["requested_search_calls"] or
+                self.ai_provider_ids.get(self.ai_provider_choice.get()) != plan.get("provider_id")):
+            self.ai_confirmed_plan=None
+            messagebox.showinfo("계획 변경됨","목표·검색 상한·AI 모드가 바뀌었습니다. 계획을 다시 미리보기 하세요.",parent=self); return
+        if self.ai_running: return
+        profile_id=self.active_id
+        key=self.api_key.get().strip()
+        if not key and not oauth.is_connected(profile_id):
+            messagebox.showinfo("읽기 전용 연결 필요","먼저 이 프로필의 Google 읽기 전용 연결을 완료하거나 YouTube API 키를 설정하세요. 실제 연결 설정은 이번 오프라인 개발 단계에서는 요구하지 않습니다.",parent=self); return
+        provider_id=plan["provider_id"]
+        provider=ai_research.create_provider(provider_id)
+        if provider_id in ("openai","gemini") and not provider.api_key:
+            provider=ai_research.create_provider("disabled")
+            provider_note=" · 해당 AI 공급자 키가 없어 규칙 전용으로 실행"
+        else: provider_note=""
+        ai_privacy=("선택한 공급자에 검토 후보 제목·설명을 보낼 수 있습니다. 이메일, OAuth 토큰, 개인 메모는 보내지 않습니다."
+                    if provider_id in ("ollama","openai","gemini") and not provider_note else "AI 외부 전송은 하지 않고 기존 규칙 엔진만 사용합니다.")
+        consent_text=(f"{plan['profile_name']} · {plan['market']} · {GENRES[plan['genre']].title}\n"
+                      f"목표 {plan['target_candidates']}개 / 검색어 호출 최대 {plan['max_search_calls']}회\n\n"
+                      f"YouTube 읽기 전용 검색을 실행하고 후보를 이 프로필에 저장합니다. {ai_privacy} 취소해도 수집된 결과는 이 프로필에만 남습니다.\n\n계속할까요?")
+        if not messagebox.askyesno("실제 조사 실행 확인",consent_text,parent=self): return
+        self.ai_running=True
+        self.ai_cancel_event=threading.Event()
+        self.ai_cancel_button.configure(state="normal")
+        self.ai_status.set("읽기 전용 조사 중… 프로필을 전환해도 결과는 시작한 프로필에만 저장됩니다."+provider_note)
+        self.ai_reviews={}
+        for item in self.ai_tree.get_children(): self.ai_tree.delete(item)
+        def worker():
+            try:
+                token=oauth.get_access_token(profile_id) if not key else None
+                def collect(term,market,limit):
+                    return lookup_videos(key,term,market,limit=min(20,limit),access_token=token)
+                run=ai_research.run_bounded_research(profile_id,collect,target=plan["target_candidates"],
+                    max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event)
+                counts=store.save_candidates(profile_id,run.candidates) if run.candidates else {"적합":0,"검토":0,"제외":0}
+                result=(run,counts,provider_note)
+            except (APIError,oauth.OAuthError,ValueError,OSError) as exc:
+                result=RuntimeError(str(exc))
+            except Exception:
+                result=RuntimeError("조사 중 예기치 않은 문제가 발생했습니다. 연결·공급자 설정을 확인하고 다시 시도하세요.")
+            self.ai_demo_queue.put(("live",profile_id,result))
+        threading.Thread(target=worker,name="zisu-ai-research",daemon=True).start()
+        self.after(50,self._poll_ai_demo_result)
+
+    def _ai_live_done(self,profile_id,result):
+        if not self.winfo_exists(): return
+        if self.active_id != profile_id:
+            self.ai_status.set("작업 중 프로필이 전환되어 현재 화면에는 결과를 표시하지 않습니다. 후보와 AI 검토 캐시는 시작한 원래 프로필에만 저장됐습니다."); return
+        if isinstance(result,Exception):
+            self.ai_status.set("읽기 전용 조사에 실패했습니다: "+str(result)[:300]); return
+        run,counts,provider_note=result
+        self.ai_reviews={review.video_id:review for review in run.reviews}
+        self.ai_candidate_rows={str(row.get("video_id")):row for row in run.candidates}
+        for review in run.reviews:
+            candidate=self.ai_candidate_rows.get(review.video_id,{})
+            ai_label=review.ai_opinion.verdict if review.ai_opinion else "미호출"
+            self.ai_tree.insert("","end",iid=review.video_id,values=(review.final_verdict,review.rule_verdict,ai_label,candidate.get("video_title",review.video_id)))
+        state="취소되어 일부 결과" if run.cancelled else "완료"
+        self.ai_status.set(f"실제 읽기 전용 조사 {state}: 후보 {run.unique_count}개 · 검색어 호출 {run.calls_used}회 · 저장 통계 적합 {counts['적합']} / 검토 {counts['검토']} / 제외 {counts['제외']}{provider_note}. AI 의견은 승인 아님.")
+        children=self.ai_tree.get_children()
+        if children: self.ai_tree.selection_set(children[0]); self._ai_show_detail()
+
+    def _ai_show_detail(self,_event=None):
+        selected=self.ai_tree.selection()
+        review=self.ai_reviews.get(selected[0]) if selected else None
+        if not review: return
+        opinion=review.ai_opinion
+        text=(f"규칙 분류: {review.rule_verdict} ({review.rule_score}/100)\n"
+              f"규칙 근거: {review.rule_reason}\n\n최종 제안: {review.final_verdict}\n"
+              f"출처: {review.provenance}\n경고: {review.warning}\n")
+        if opinion:
+            text+=(f"\nAI 의견(자동 승인 아님): {opinion.verdict}\n"
+                   f"긍정 신호: {', '.join(opinion.positive_signals) or '없음'}\n"
+                   f"충돌 신호: {', '.join(opinion.conflict_signals) or '없음'}\n"
+                   f"메타데이터 인용: {', '.join(opinion.evidence_from_metadata) or '검증된 인용 없음'}\n"
+                   f"불확실성: {opinion.uncertainty or '남아 있을 수 있음'}\n"
+                   f"사람이 확인할 점: {opinion.recommended_human_check}\n")
+        candidate=getattr(self,"ai_candidate_rows",{}).get(review.video_id,{})
+        url=candidate.get("video_url") or candidate.get("url","")
+        text+=f"\n영상 URL: {url or 'Demo 가상 표본'}\n직접 영상을 듣고 최종 분류·승인을 판단하세요. 감상 체크는 자동 저장되지 않습니다."
+        self.ai_detail.configure(state="normal"); self.ai_detail.delete("1.0","end"); self.ai_detail.insert("1.0",text); self.ai_detail.configure(state="disabled")
+
+    def _ai_open_selected(self):
+        selected=self.ai_tree.selection()
+        if not selected: return
+        candidate=getattr(self,"ai_candidate_rows",{}).get(selected[0],{})
+        url=candidate.get("video_url") or candidate.get("url")
+        if url: webbrowser.open(url,new=2)
+
+    def _ai_export_report(self):
+        if not self.ai_reviews:
+            messagebox.showinfo("내보낼 결과 없음","먼저 오프라인 Demo를 실행하세요.",parent=self); return
+        target=filedialog.asksaveasfilename(parent=self,defaultextension=".csv",initialfile="zisu_ai_review.csv",filetypes=[("CSV","*.csv")])
+        if not target: return
+        try:
+            count=ai_research.export_review_report(self.ai_reviews.values(),target)
+            messagebox.showinfo("보고서 저장 완료",f"{count}개 검토 결과를 UTF-8 CSV로 저장했습니다.\n{target}",parent=self)
+        except OSError:
+            messagebox.showerror("저장 실패","선택한 폴더에 쓸 수 없습니다. 쓰기 권한이 있는 폴더를 선택하세요.",parent=self)
 
     def save_schedule(self):
         try:

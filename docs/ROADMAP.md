@@ -1,3 +1,11 @@
+# V4.5 AI Research Manager (개발 브랜치)
+
+- 기준: PR #2의 V4.4.2 검증 커밋 `959dd11b18ff0700e19fd591c5d9c4b7390e4f19`; 별도 브랜치 `feature/v4.5-ai-research-manager`.
+- 진행 중: 규칙 우선 AI 검토, 오프라인 Mock Demo, 선택형 Gemini/OpenAI/Ollama 어댑터, 프로필 격리 AI 캐시, 설명 가능한 검토 GUI.
+- 검증 예정: 단위/통합, 216 장르 경계, 100 프로필·10,000 후보 스트레스, Mock OAuth, Tk GUI, onedir Windows Actions EXE.
+- 미검증/실전 후순위: 실 API 키 및 provider 응답, Google OAuth 및 실제 YouTube JP/KR 검색, 실제 음악 수작업 정답 라벨·정밀도, Python 미설치 독립 PC 및 Windows 11.
+- 사용자 승인 없이 main 병합하지 않음. 기존 PR #2는 유지하며 새 Draft PR은 main이 아닌 기존 V4.4.2 기능 브랜치를 대상으로 한다.
+
 # ZISU V4.4.1 Windows 시작 안정화 / 상태 보고 (2026-10-17)
 
 ## 최신 상태: V4.4.2 오프라인 배포 검증 (2026-10-17)

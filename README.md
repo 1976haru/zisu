@@ -1,4 +1,4 @@
-# ZISU Research Studio V4.4.2 — Windows 배포 검증
+# ZISU Research Studio V4.5.0 — AI Research Manager 개발
 
 V4 기능 브랜치는 첫 실행 시작 마법사, 프로필별 Google 읽기 전용 OAuth,
 KR/JP 독립 검색어, 6개 장르의 `적합 / 검토 / 제외` 보수 판정과 V2 SQLite
@@ -139,3 +139,17 @@ XML 검사까지 했으나, Sandbox VM 자체 실행은 미검증입니다. 따�
 RC 게이트는 통과했지만 Python 미설치 독립 PC, Windows 11, 실계정 OAuth/API 및 실제 음악
 정밀도는 남아 있습니다. Actions 재빌드의 해시는 달라질 수 있으니 항상 같은 run의 sidecar를
 사용하세요.
+
+## V4.5 개발: AI 연구 도우미
+
+V4.5는 기존 장르 규칙을 먼저 적용하고 `검토` 후보만 선택형 AI 공급자가 보조하도록
+분리합니다. AI `적합` 의견만으로 후보를 자동 승인하지 않으며, 규칙 `제외`는 AI가
+뒤집을 수 없습니다. AI 응답에는 출처와 메타데이터 한계, 불확실성 및 직접 감상 권고가
+표시됩니다. YouTube API/OAuth는 읽기 전용이며 자동 댓글·좋아요·구독·반복 재생은 없습니다.
+
+새 `AI 연구 도우미` 탭의 조사 계획 미리보기 → 오프라인 Demo는 가상 사례와 Mock AI를
+사용합니다. 네트워크, OAuth, 실제 계정, AI API 키, 사용자 DB를 쓰지 않습니다.
+OpenAI, Gemini, Ollama 공급자 어댑터는 선택형이며 기본 동작은 모델 없이 유지됩니다.
+공급자 설정과 실제 JP/KR 검색은 마지막 실전 승인 단계에서 별도 검증해야 합니다.
+
+설계 결정과 보안 경계: [V4.5 AI Research ADR](docs/ADR-004-v4.5-ai-research.md).

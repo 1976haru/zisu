@@ -90,6 +90,15 @@ def initialize(path=None):
           enabled INTEGER NOT NULL DEFAULT 1,
           PRIMARY KEY(profile_id,market,term),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS ai_reviews (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, metadata_hash TEXT NOT NULL,
+          genre TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+          prompt_version TEXT NOT NULL, ai_verdict TEXT NOT NULL,
+          positive_signals TEXT NOT NULL, conflict_signals TEXT NOT NULL,
+          evidence TEXT NOT NULL, uncertainty TEXT NOT NULL, human_check TEXT NOT NULL,
+          latency_ms INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
           ON candidates(profile_id,genre_decision,status);
         """)
@@ -328,3 +337,31 @@ def list_profile_search_terms(profile_id, market, path=None):
     with connect(path) as db:
         return [row[0] for row in db.execute("""SELECT term FROM profile_search_terms
           WHERE profile_id=? AND market=? AND enabled=1 ORDER BY rowid""",(profile_id,market))]
+
+def get_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, path=None):
+    """Read a cached AI opinion only inside the exact profile and provenance scope."""
+    with connect(path) as db:
+        row = db.execute("""SELECT * FROM ai_reviews WHERE profile_id=? AND video_id=? AND metadata_hash=?
+          AND genre=? AND provider=? AND model=? AND prompt_version='genre-review-v1'""",
+          (profile_id,video_id,metadata_hash,genre,provider,model)).fetchone()
+        return dict(row) if row else None
+
+def save_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, opinion, latency_ms=0, path=None):
+    """Add/update an AI cache row; never touches human labels or candidate decisions."""
+    import json
+    if opinion.verdict not in ("적합", "검토", "제외"):
+        raise ValueError("AI 판정 값이 올바르지 않습니다.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM profiles WHERE id=?",(profile_id,)).fetchone():
+            raise ValueError("선택한 프로필을 찾을 수 없습니다.")
+        db.execute("""INSERT INTO ai_reviews(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version,
+          ai_verdict,positive_signals,conflict_signals,evidence,uncertainty,human_check,latency_ms)
+          VALUES(?,?,?,?,?,?, 'genre-review-v1',?,?,?,?,?,?,?)
+          ON CONFLICT(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version) DO UPDATE SET
+          ai_verdict=excluded.ai_verdict,positive_signals=excluded.positive_signals,
+          conflict_signals=excluded.conflict_signals,evidence=excluded.evidence,
+          uncertainty=excluded.uncertainty,human_check=excluded.human_check,latency_ms=excluded.latency_ms""",
+          (profile_id,video_id,metadata_hash,genre,provider,model,opinion.verdict,
+           json.dumps(opinion.positive_signals,ensure_ascii=False),json.dumps(opinion.conflict_signals,ensure_ascii=False),
+           json.dumps(opinion.evidence_from_metadata,ensure_ascii=False),opinion.uncertainty,
+           opinion.recommended_human_check,max(0,int(latency_ms))))

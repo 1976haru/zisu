@@ -13,7 +13,36 @@ with WorkspaceTemp() as temp:
     app.update_idletasks()
     assert len(app.profiles)>=1
     assert app.active_id
-    assert len(app.frames)==6
+    assert len(app.frames)==7
+    assert len(app.ai_tree.get_children())==0
+    app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
+    app.select_profile()
+    app._ai_preview_plan()
+    assert app.ai_confirmed_plan["profile_id"] == first
+    with store.connect() as database:
+        ai_rows_before = database.execute("SELECT COUNT(*) FROM ai_reviews").fetchone()[0]
+    with patch("mcrs.gui.messagebox.askyesno", return_value=True):
+        app._ai_start_demo()
+    demo_deadline = time.monotonic() + 3
+    while not app.ai_tree.get_children() and time.monotonic() < demo_deadline:
+        app.update()
+        time.sleep(0.02)
+    assert len(app.ai_tree.get_children()) == 3
+    with store.connect() as database:
+        assert database.execute("SELECT COUNT(*) FROM ai_reviews").fetchone()[0] == ai_rows_before
+    app.api_key.set("offline-mock-key")
+    fake_search_row={"video_id":"aBcDeF12345","video_title":"朝のプレイリスト","description":"落ち着く音楽",
+                     "video_url":"https://www.youtube.com/watch?v=aBcDeF12345"}
+    app._ai_preview_plan()
+    with patch("mcrs.gui.messagebox.askyesno", return_value=True), patch("mcrs.gui.lookup_videos", return_value=[fake_search_row]):
+        app._ai_start_live()
+        live_deadline=time.monotonic()+5
+        while app.ai_running and time.monotonic()<live_deadline:
+            app.update()
+            time.sleep(0.02)
+    assert not app.ai_running
+    assert store.get_candidate(first,"aBcDeF12345") is not None
+    assert len(app.ai_tree.get_children()) == 1
     assert "미연결" in app.oauth_status.get()
     second_index = [profile["id"] for profile in app.profiles].index(second)
     app.profile_combo.current(second_index)
