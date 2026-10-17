@@ -89,7 +89,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.5 · AI 보조 장르 안전 조사")
+        self.title("ZISU Research Studio V4.5.3 · AI 보조 장르 안전 조사")
         self.geometry("1320x840")
         self.minsize(1060,710)
         self.configure(background=BG)
@@ -152,7 +152,7 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.5.0",
+            "app_version": "4.5.3",
             "gui_initialized": len(self.frames) == 7 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -845,8 +845,6 @@ class Studio(tk.Tk):
         self.ai_cost_limit=tk.StringVar(value="")
         ttk.Entry(controls,textvariable=self.ai_cost_estimate,width=7).pack(side="left",padx=2)
         ttk.Entry(controls,textvariable=self.ai_cost_limit,width=7).pack(side="left",padx=2)
-        ttk.Label(tab,text="사용자 입력 예상 예산은 호출 차단용 추정치이며 실제 청구액을 보장하지 않습니다.",
-                  foreground="#8a4b08",wraplength=1000).grid(row=4,column=0,sticky="w",pady=(0,5))
         ttk.Button(controls,text="검토 보고서 내보내기",command=self._ai_export_report).pack(side="left",padx=6)
         credential=ttk.LabelFrame(tab,text="선택형 AI 키 보안 저장 · 현재 Windows 사용자 계정에만 복구 가능")
         credential.grid(row=5,column=0,sticky="ew",pady=5)
@@ -858,6 +856,14 @@ class Studio(tk.Tk):
         ttk.Button(credential,text="키 삭제",command=self._ai_delete_credential).pack(side="left",padx=4)
         self.ai_credential_status=tk.StringVar(value="키 미등록 · 외부 모델 기본 차단")
         ttk.Label(credential,textvariable=self.ai_credential_status).pack(side="left",padx=8)
+        gemini_test_frame=ttk.Frame(tab)
+        gemini_test_frame.grid(row=6,column=0,sticky="ew",pady=(2,0))
+        self.ai_gemini_test_button=ttk.Button(gemini_test_frame,text="Gemini 실제 연결 테스트 (1회)",
+            command=self._ai_gemini_connection_test)
+        self.ai_gemini_test_button.pack(side="left")
+        ttk.Label(gemini_test_frame,text="YouTube/OAuth 없이 가상 일본어 자료만 전송합니다.").pack(side="left",padx=10)
+        ttk.Label(tab,text="사용자 입력 예상 예산은 호출 차단용 추정치이며 실제 청구액을 보장하지 않습니다.",
+                  foreground="#8a4b08",wraplength=1000).grid(row=7,column=0,sticky="w",pady=(2,4))
         self.ai_status=tk.StringVar(value="먼저 작업 프로필을 선택한 뒤 조사 계획을 미리 보세요.")
         ttk.Label(tab,textvariable=self.ai_status,wraplength=1000).grid(row=3,column=0,sticky="w",pady=6)
         body=ttk.Panedwindow(tab,orient="horizontal")
@@ -881,6 +887,7 @@ class Studio(tk.Tk):
         self.ai_expected_profile=None
         self.ai_confirmed_plan=None
         self.ai_demo_queue=queue.Queue()
+        self.ai_gemini_test_queue=queue.Queue()
         self.ai_running=False
         self.ai_cancel_event=None
         self.ai_pause_event=None
@@ -901,6 +908,92 @@ class Studio(tk.Tk):
         except Exception:
             label="Windows 보안 저장소 확인 불가"
         self.ai_credential_status.set(label)
+
+    def _ai_gemini_connection_test(self):
+        if self.ai_running:
+            return
+        try:
+            estimate, ceiling = ai_research.validate_cost_budget(
+                self.ai_cost_estimate.get(), self.ai_cost_limit.get())
+        except ValueError:
+            messagebox.showwarning("예상 예산 확인",
+                "공급자의 현재 가격을 확인해 1회 예상 비용과 1일 한도(USD)를 입력하세요. "
+                "비용 확인이 어려우면 이 테스트를 진행하지 마세요.", parent=self)
+            return
+        try:
+            stored_key = CredentialStore().load("gemini")
+            configured = bool(stored_key)
+            del stored_key
+        except Exception:
+            configured = False
+        if not configured:
+            self.ai_credential_provider.set("gemini")
+            self.ai_credential_entry.focus_set()
+            messagebox.showinfo("Gemini 키 등록 필요",
+                "Gemini 키가 보안 저장소에 없습니다. 이 화면의 마스킹된 키 입력란에서 직접 저장한 뒤 다시 시작하세요. "
+                "키를 채팅이나 로그에 붙여넣지 마세요.", parent=self)
+            return
+        consent=("Gemini 실제 연결 테스트를 1회 실행합니다.\n\n"
+            "모델: gemini-2.5-flash\n"
+            "전송 자료: 朝のプレイリスト / 朝に聴きたい落ち着いた音楽。ボーカルとラップの有無は不明です。\n"
+            f"입력 예상 비용: ${estimate:g} · 입력 한도: ${ceiling:g}\n\n"
+            "예상치는 실제 청구액을 보장하지 않으며 프로젝트 과금이 발생할 수 있습니다. "
+            "무료/유료 상태는 앱이 추측하지 않습니다. 확인 후 외부 요청은 최대 1회이며 자동 재시도는 없습니다.\n"
+            "YouTube/OAuth, 사용자 DB, 실제 영상·메모·이메일·채널 ID·토큰은 사용하지 않습니다.\n\n"
+            "이 요청 1회를 승인하시겠습니까?")
+        if not messagebox.askyesno("Gemini 1회 호출 최종 승인",consent,parent=self):
+            self.ai_status.set("Gemini 연결 테스트 취소됨 · 외부 요청 0회")
+            return
+        self.ai_running=True
+        self.ai_gemini_test_button.configure(state="disabled")
+        self.ai_status.set("Gemini 연결 테스트 중 · 가상 자료 1건만 전송하며 재시도하지 않습니다.")
+        def worker():
+            try:
+                result=ai_research.run_gemini_connection_test(
+                    cost_estimate_usd=estimate,cost_limit_usd=ceiling)
+            except Exception:
+                result=ai_research.GeminiConnectionResult("gemini-2.5-flash",0,False,False,
+                    False,"","검토",0,False,True,"unknown")
+            self.ai_gemini_test_queue.put(result)
+        threading.Thread(target=worker,name="zisu-gemini-one-shot",daemon=True).start()
+        self.after(75,self._poll_gemini_connection_test)
+
+    def _poll_gemini_connection_test(self):
+        try:
+            result=self.ai_gemini_test_queue.get_nowait()
+        except queue.Empty:
+            if self.ai_running and self.winfo_exists():
+                self.after(75,self._poll_gemini_connection_test)
+            return
+        self.ai_running=False
+        self.ai_gemini_test_button.configure(state="normal")
+        if result.error_code:
+            errors={
+                "missing_key":"키 없음 · 이 화면의 보안 입력란에서 Gemini 키를 저장하세요.",
+                "auth":"인증 오류 401/403 · 키 유효성, API 사용 설정, 프로젝트 권한을 확인하세요.",
+                "invalid_request":"요청 형식 400 · 모델 또는 출력 형식이 거부되었습니다.",
+                "rate_limit":"사용량 초과 429 · 할당량/속도 제한을 확인하고 자동 재호출하지 마세요.",
+                "server":"서버 오류 5xx · 공급자 상태를 확인하고 결과가 불명확하면 대시보드를 확인하세요.",
+                "timeout":"네트워크 시간 초과 · 요청이 처리됐는지 알 수 없으므로 자동 재시도하지 마세요.",
+                "network":"네트워크 연결 실패 · 연결을 점검하세요. 자동 재시도하지 않았습니다.",
+                "model_unavailable":"모델 사용 불가 · 프로젝트에서 gemini-2.5-flash를 사용할 수 있는지 확인하세요.",
+                "json_invalid":"JSON 파싱 실패 · 응답은 저장하거나 표시하지 않았습니다.",
+                "schema_invalid":"JSON Schema 검증 실패 · 응답은 저장하거나 판정에 반영하지 않았습니다.",
+                "bad_response":"JSON/응답 검증 실패 · 원문 응답은 표시하지 않았습니다.",
+                "budget":"예산 검사 차단 · 유효한 양수 예상 비용과 한도를 입력하세요.",
+            }
+            message=errors.get(result.error_code,"알 수 없는 오류 · 비밀정보와 응답 원문은 폐기했습니다.")
+            report=(f"Gemini 연결: FAIL · {message}\n요청 횟수: {result.request_count} · "
+                    f"HTTP 응답 성공: {'예' if result.http_success else '아니요'} · "
+                    f"소요시간: {result.elapsed_ms}ms · API 키 노출: 없음 · 임시 DB 격리: 예")
+        else:
+            japanese="PASS (일본어 문자 처리)" if result.japanese_text_processed else "PASS (UTF-8 응답 처리; 일본어 문자 미포함)"
+            report=(f"Gemini 연결: PASS\n모델: {result.model}\nHTTP 요청/응답: 성공 · JSON Schema 검증: PASS\n"
+                    f"일본어 응답 처리: {japanese}\nAI 판정: {result.ai_verdict} · 최종 판정: {result.final_verdict}\n"
+                    f"소요시간: {result.elapsed_ms}ms · 요청 횟수: {result.request_count}\n"
+                    "API 키 노출: 없음 · 테스트 DB: 격리됨\n실제 사용료: 공급자 대시보드 확인 필요")
+        self.ai_status.set(report)
+        messagebox.showinfo("Gemini 연결 테스트 결과",report,parent=self)
 
     def _ai_save_credential(self):
         provider=self.ai_credential_provider.get()

@@ -1,4 +1,4 @@
-# ZISU Research Studio V4.5.2 — AI Research Manager 호환성 강화
+# ZISU Research Studio V4.5.3 — AI Research Manager 호환성 강화
 
 V4 기능 브랜치는 첫 실행 시작 마법사, 프로필별 Google 읽기 전용 OAuth,
 KR/JP 독립 검색어, 6개 장르의 `적합 / 검토 / 제외` 보수 판정과 V2 SQLite
@@ -156,6 +156,10 @@ V4.5.2 API 호환성: Gemini 2.5 계열은 `generationConfig.responseMimeType`�
 `responseJsonSchema`를 사용하고, 지정된 Gemini 3 계열은 `responseFormat.text.mimeType`
 에 `APPLICATION_JSON` enum을 사용합니다. 알 수 없는 모델은 네트워크 요청 전에 차단합니다.
 이 포맷은 Mock HTTP 계약으로 검증했으며 실제 API 키 연결은 하지 않았습니다.
+
+V4.5.3에는 YouTube/OAuth 없이 가상 일본어 자료 한 건만 보내는 명시 승인형
+Gemini 실전 연결 테스트가 추가되었습니다. DPAPI 저장 키만 내부에서 읽고, 별도 임시 DB,
+요청 1회 상한, 자동 재시도 없음, 비밀정보/응답 원문 비노출을 적용합니다.
 
 V4.5.1 보안 강화: OpenAI/Gemini 키는 Windows 현재 사용자 DPAPI로 암호화해
 `%LOCALAPPDATA%\ZisuResearchStudio\provider_credentials`에 저장하며 키 자체는 다시

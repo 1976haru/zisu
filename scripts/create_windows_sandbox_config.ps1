@@ -10,7 +10,7 @@ if (-not $sandbox -and -not $GenerateOnly) {
     Write-Host 'Windows Sandbox is not available in PATH. No Windows feature or security setting was changed.' -ForegroundColor Yellow
     exit 2
 }
-if (-not $PackageZip) { $PackageZip = Read-Host 'Enter the full path to the V4.5.1 release ZIP' }
+if (-not $PackageZip) { $PackageZip = Read-Host 'Enter the full path to the V4.5.3 release ZIP' }
 $zip = (Resolve-Path -LiteralPath $PackageZip).Path
 $packageRoot = Split-Path -Parent $zip
 if (-not $ZipManifestPath) { $ZipManifestPath = Join-Path $packageRoot 'RELEASE_SHA256SUMS.txt' }
@@ -23,7 +23,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'validate_windows_release.ps1') 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'windows_exe_smoke.ps1') -Destination $toolsRoot
 $resultsRoot = Join-Path $OutputRoot 'results'
 New-Item -ItemType Directory -Path $resultsRoot | Out-Null
-$wsb = Join-Path $OutputRoot 'ZISU-V4.5.1-validation.wsb'
+$wsb = Join-Path $OutputRoot 'ZISU-V4.5.3-validation.wsb'
 $zipName = [IO.Path]::GetFileName($zip)
 $command = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\ZISUTools\validate_windows_release.ps1 -PackageZip 'C:\ZISUInput\$zipName' -ZipManifestPath C:\ZISUInput\RELEASE_SHA256SUMS.txt -ReportPath C:\ZISUOutput\ZISU-validation-report.json -PauseAtEnd"
 $escape = { param($s) [Security.SecurityElement]::Escape($s) }

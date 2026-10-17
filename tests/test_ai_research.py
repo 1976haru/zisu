@@ -1,6 +1,7 @@
 """Offline tests for the optional AI research workflow and safety gates."""
 import json
 import io
+import hashlib
 import unittest
 import csv
 import socket
@@ -11,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from unittest import mock
 
 from mcrs import ai_research, genres, store
+from mcrs.gui import Studio
 from mcrs.credential_store import CredentialStore, CredentialError, WindowsDPAPI
 from tests.support import WorkspaceTemp
 
@@ -372,7 +374,8 @@ class AIResearchTests(unittest.TestCase):
 
     def test_provider_http_contract_handles_status_timeout_bad_json_truncation_and_size(self):
         base=ai_research.JsonHttpProvider()
-        for status,code in ((401,"auth"),(403,"auth"),(429,"rate_limit"),(503,"server"),(400,"invalid_request")):
+        for status,code in ((401,"auth"),(403,"auth"),(429,"rate_limit"),(503,"server"),
+                            (400,"invalid_request"),(404,"model_unavailable"),(410,"model_unavailable")):
             error=HTTPError("https://provider.invalid",status,"private response body",{},io.BytesIO(b"private api key"))
             with mock.patch("mcrs.ai_research.urlopen",side_effect=error), self.subTest(status=status):
                 with self.assertRaises(ai_research.ProviderFailure) as caught: base._post("https://provider.invalid",{}, {})
@@ -404,7 +407,7 @@ class AIResearchTests(unittest.TestCase):
         with mock.patch.object(provider,"_post",return_value={"candidates":[]}):
             with self.assertRaises(ai_research.ProviderFailure) as caught:
                 provider.review(candidate,"MORNING_CHILL_RAP")
-        self.assertEqual(caught.exception.code,"bad_response")
+        self.assertEqual(caught.exception.code,"schema_invalid")
         with mock.patch("mcrs.ai_research.urlopen",side_effect=HTTPError(
                 "https://provider.invalid",400,"INVALID_ARGUMENT",{},io.BytesIO(b"private details"))):
             review=ai_research.review_candidate(self.jp,candidate,provider,self.db,use_cache=False,
@@ -417,7 +420,94 @@ class AIResearchTests(unittest.TestCase):
         provider=ai_research.OpenAIProvider(api_key="mock-openai-key")
         with mock.patch.object(provider,"_post",return_value={"choices":[]}):
             with self.assertRaises(ai_research.ProviderFailure) as caught: provider.review(self.candidate(),"MORNING_CHILL_RAP")
-        self.assertEqual(caught.exception.code,"bad_response")
+        self.assertEqual(caught.exception.code,"schema_invalid")
+
+    def test_one_shot_gemini_connection_uses_only_fixture_and_makes_one_request(self):
+        opinion={"verdict":genres.REVIEW,"positive_signals":[],"conflict_signals":[],
+            "evidence_from_metadata":["朝のプレイリスト"],"uncertainty":"音声内容は不明です。",
+            "recommended_human_check":"実際の音源を確認してください。"}
+        model_text=json.dumps(opinion,ensure_ascii=False)
+        body=json.dumps({"candidates":[{"content":{"parts":[{"text":model_text}]}}]},ensure_ascii=False)
+        response=io.BytesIO(body.encode("utf-8")); response.status=200
+        provider=ai_research.GeminiProvider(api_key="mock-test-key")
+        before=store.list_profiles(self.db)
+        before_db_hash=hashlib.sha256(self.db.read_bytes()).hexdigest()
+        with mock.patch("mcrs.ai_research.urlopen",return_value=response) as request:
+            result=ai_research.run_gemini_connection_test(cost_estimate_usd=.01,
+                cost_limit_usd=.05,provider=provider,temp_root=self.temp.path)
+        request.assert_called_once()
+        req=request.call_args.args[0]
+        sent=req.data.decode("utf-8")
+        self.assertIn("朝のプレイリスト",sent)
+        self.assertIn("朝に聴きたい落ち着いた音楽。ボーカルとラップの有無は不明です。",sent)
+        self.assertNotIn("mock-test-key",req.full_url)
+        self.assertNotIn("@",sent)
+        self.assertNotIn("channel_id",sent)
+        self.assertEqual(result.request_count,1)
+        self.assertTrue(result.http_success and result.schema_valid and result.japanese_text_processed)
+        self.assertEqual(result.ai_verdict,genres.REVIEW)
+        self.assertEqual(result.final_verdict,genres.REVIEW)
+        self.assertFalse(result.api_key_exposed)
+        self.assertTrue(result.isolated_db)
+        self.assertEqual(store.list_profiles(self.db),before)
+        self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(),before_db_hash)
+        self.assertFalse(list(self.temp.path.glob(".gemini-connection-test-*")))
+
+    def test_one_shot_gemini_invalid_json_is_reported_without_retry(self):
+        broken={"candidates":[{"content":{"parts":[{"text":"not-json"}]}}]}
+        response=io.BytesIO(json.dumps(broken).encode("utf-8")); response.status=200
+        provider=ai_research.GeminiProvider(api_key="mock-test-key")
+        with mock.patch("mcrs.ai_research.urlopen",return_value=response) as request:
+            result=ai_research.run_gemini_connection_test(cost_estimate_usd=.01,
+                cost_limit_usd=.05,provider=provider,temp_root=self.temp.path)
+        request.assert_called_once()
+        self.assertEqual(result.error_code,"json_invalid")
+        self.assertEqual(result.request_count,1)
+        self.assertTrue(result.http_success)
+        self.assertFalse(result.schema_valid)
+
+    def test_one_shot_gemini_missing_key_invalid_budget_and_failure_never_retry(self):
+        class FakeGemini:
+            name="gemini"; model="gemini-2.5-flash"; api_key=""
+            def __init__(self): self.calls=0
+            def review(self,*_args): self.calls+=1; raise AssertionError("must not call")
+        provider=FakeGemini()
+        missing=ai_research.run_gemini_connection_test(cost_estimate_usd=.01,cost_limit_usd=.05,provider=provider)
+        self.assertEqual(missing.error_code,"missing_key")
+        self.assertEqual(missing.request_count,0)
+        malformed=ai_research.run_gemini_connection_test(cost_estimate_usd=float("nan"),
+            cost_limit_usd=.05,provider=provider,temp_root=self.temp.path)
+        self.assertEqual(malformed.error_code,"budget")
+        self.assertEqual(provider.calls,0)
+
+        provider=ai_research.GeminiProvider(api_key="mock-test-key")
+        error=HTTPError("https://generativelanguage.googleapis.com/",503,"unavailable",{},io.BytesIO(b"private"))
+        with mock.patch("mcrs.ai_research.urlopen",side_effect=error) as request:
+            failed=ai_research.run_gemini_connection_test(cost_estimate_usd=.01,
+                cost_limit_usd=.05,provider=provider,temp_root=self.temp.path)
+        request.assert_called_once()
+        self.assertEqual(failed.error_code,"server")
+        self.assertEqual(failed.request_count,1)
+        self.assertFalse(failed.http_success)
+
+    def test_gemini_connection_dialog_cancel_never_dispatches(self):
+        class Value:
+            def __init__(self,value=""): self.value=value
+            def get(self): return self.value
+            def set(self,value): self.value=value
+        app=Studio.__new__(Studio)
+        app.ai_running=False
+        app.ai_cost_estimate=Value("0.01")
+        app.ai_cost_limit=Value("0.05")
+        app.ai_status=Value()
+        class CredentialMock:
+            def load(self,_provider): return "mock-only-secret"
+        with mock.patch("mcrs.gui.CredentialStore",return_value=CredentialMock()), \
+             mock.patch("mcrs.gui.messagebox.askyesno",return_value=False), \
+             mock.patch("mcrs.ai_research.run_gemini_connection_test") as run:
+            Studio._ai_gemini_connection_test(app)
+        run.assert_not_called()
+        self.assertIn("요청 0회",app.ai_status.value)
 
     def test_incomplete_session_can_resume_from_profile_scoped_checkpoint(self):
         pause=__import__("threading").Event()
