@@ -76,12 +76,38 @@ with WorkspaceTemp() as temp:
     app._dashboard_open_profile()
     assert app.active_id==first
     # Mechanically exercise Tk scaling and scrollable layout; this is not a visual screenshot check.
+    easy_tab=app.tabs.tabs()[0]
+    app.tabs.select(easy_tab);app.update()
     for scaling in (1.0,1.25,1.5,2.0):
         app.tk.call("tk","scaling",scaling)
         app.update_idletasks()
-        assert app._easy_canvas.winfo_width()>0 and app._easy_canvas.winfo_height()>0
-        assert len(app._easy_canvas.bbox("all"))==4
-    easy_tab=app.tabs.tabs()[0]
+        canvas=app._easy_canvas
+        assert canvas.winfo_width()>0 and canvas.winfo_height()>0
+        bounds=canvas.bbox("all")
+        assert len(bounds)==4 and bounds[2]<=canvas.winfo_width()+2, (scaling,bounds,canvas.winfo_width(),canvas.itemcget(app._easy_canvas_window,"width"))
+        if bounds[3]>canvas.winfo_height():
+            canvas.yview_moveto(1.0);app.update_idletasks()
+            assert canvas.yview()[1]>=0.99
+            canvas.yview_moveto(0.0);app.update_idletasks()
+        pending=[app.easy_dashboard]
+        while pending:
+            parent=pending.pop()
+            children=parent.winfo_children();pending.extend(children)
+            for child in children:
+                if child.winfo_class() == "TButton":
+                    assert child.winfo_width()>0 and child.winfo_height()>0
+                    assert child.winfo_height()+2>=child.winfo_reqheight()
+        assert app.easy_next.cget("text")
+    # Verify actual Tk key bindings and focus navigation on the beginner screen.
+    app.tabs.select(easy_tab);app.update_idletasks()
+    app.dashboard_channels.selection_set("profile:"+third)
+    app.dashboard_channels.focus_set();app.event_generate("<Return>");app.update()
+    assert app.active_id==third
+    app.event_generate("<Escape>");app.update_idletasks()
+    assert app.focus_get() is app.profile_combo
+    assert app.easy_next.tk_focusNext() is not None
+    app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
+    app.select_profile();app.update_idletasks()
     assert app.bind_all("<Escape>")
     assert app.bind_all("<Return>")
     app._ai_preview_plan()
