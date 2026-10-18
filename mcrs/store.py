@@ -182,6 +182,27 @@ def initialize(path=None):
           calls_used INTEGER NOT NULL DEFAULT 0, duplicate_count INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS research_schedules (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
+          market TEXT NOT NULL CHECK(market IN ('JP','KR')),
+          core_genre TEXT NOT NULL, related_genres_json TEXT NOT NULL DEFAULT '[]',
+          channel_id TEXT NOT NULL DEFAULT '', start_at_utc TEXT NOT NULL,
+          total_minutes INTEGER NOT NULL, research_minutes INTEGER NOT NULL,
+          break_minutes INTEGER NOT NULL, approved_search_calls INTEGER NOT NULL,
+          search_calls_used INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('scheduled','running','paused','completed','cancelled')),
+          phase TEXT NOT NULL DEFAULT 'waiting', elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+          running_since_utc TEXT NOT NULL DEFAULT '', search_in_flight INTEGER NOT NULL DEFAULT 0,
+          pause_reason TEXT NOT NULL DEFAULT '',
+          checkpoint_json TEXT NOT NULL DEFAULT '{}',
+          autopilot_session_id TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_research_schedules_one_active
+          ON research_schedules(profile_id) WHERE state IN ('scheduled','running','paused');
+        CREATE INDEX IF NOT EXISTS idx_research_schedules_recovery
+          ON research_schedules(profile_id,state,updated_at);
         CREATE TABLE IF NOT EXISTS autopilot_run_settings (
           session_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, settings_json TEXT NOT NULL,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -217,6 +238,7 @@ def initialize(path=None):
             _add_column(db, "profiles", definition)
         _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "research_schedules", "pause_reason TEXT NOT NULL DEFAULT ''")
         _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
         _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
         for definition in (

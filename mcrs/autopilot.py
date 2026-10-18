@@ -151,7 +151,8 @@ class AutopilotController:
         return True
 
     def run(self, config: AutopilotConfig, collector: Callable, *, provider=None,
-            on_event: Callable[[dict], None] | None = None) -> AutopilotResult:
+            on_event: Callable[[dict], None] | None = None, continue_check=None,
+            resource_check=None) -> AutopilotResult:
         config.validate()
         profile = store.get_profile(config.profile_id, self.path)
         if not profile:
@@ -219,7 +220,8 @@ class AutopilotController:
                 ), session_id=config.session_id,
                 allow_paid_external=config.allow_paid_external,
                 cost_estimate_usd=config.cost_estimate_usd,
-                cost_limit_usd=config.cost_limit_usd, session_ready=session_ready)
+                cost_limit_usd=config.cost_limit_usd, session_ready=session_ready,
+                continue_check=continue_check, resource_check=resource_check)
             emit("drafts", message="사람의 실제 감상 메모가 있는 추천 후보에만 초안 준비")
             report, exceptions = self._build_report(config, profile, run, actual_queries)
             store.save_autopilot_report(config.profile_id, run.session_id, report, exceptions, self.path)
@@ -328,6 +330,12 @@ class AutopilotController:
         if run.shortfall:
             exceptions.append(_exception("goal_not_met", f"목표보다 적합 후보가 {run.shortfall}개 부족합니다.",
                                          "검색 한도 안에서 후보만 더 조사하거나, 새 승인 범위를 설정하세요. 부적합 후보는 승격하지 않았습니다.", False))
+        if any(item.ai_source == "resource_blocked" for item in run.reviews):
+            exceptions.append(_exception("low_resources", "PC 부하 보호를 위해 일부 AI 검토를 보류했습니다.",
+                                         "다른 작업이 끝난 뒤 저장된 조사에서 이어가세요. 승인된 예산은 늘어나지 않았습니다.", False))
+        if "resource policy deferred" in run.warning.casefold():
+            exceptions.append(_exception("low_resources", "PC 부하 보호를 위해 다음 검색을 시작하지 않았습니다.",
+                                         "컴퓨터 여유가 생기면 저장된 조사에서 이어가세요.", False))
         if any(review.ai_opinion and review.ai_opinion.uncertainty.startswith("AI 검토 실패")
                for review in run.reviews):
             exceptions.append(_exception("ai_provider_failure", "첫 AI 오류 후 추가 공급자 요청을 차단했습니다.",
@@ -340,7 +348,7 @@ class AutopilotController:
         else:
             ai_usage = {"requests": 0, "estimated_cost_usd": 0.0}
         ai_sources = {key: sum(1 for item in run.reviews if item.ai_source == key)
-                      for key in ("success", "failure", "cache", "budget_blocked", "rules_only")}
+                      for key in ("success", "failure", "cache", "budget_blocked", "rules_only", "resource_blocked")}
         report = {
             "schema": 1, "generated_at": datetime.now(timezone.utc).isoformat(),
             "profile_id": config.profile_id, "profile_name": profile["name"],
@@ -361,6 +369,7 @@ class AutopilotController:
             "ai_cache_reused": ai_sources["cache"],
             "ai_budget_blocked": ai_sources["budget_blocked"],
             "rules_only_candidates": ai_sources["rules_only"],
+            "resource_deferred_candidates": ai_sources["resource_blocked"],
             "ai_requests_used": int(ai_usage["requests"]),
             "ai_request_limit": 10,
             "ai_requests_remaining": max(0, 10 - int(ai_usage["requests"])),

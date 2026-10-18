@@ -23,6 +23,7 @@ from . import ai_research
 from . import comments
 from . import timers
 from . import autopilot
+from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .startup_probe import write_stage as _write_smoke_stage
@@ -1487,6 +1488,16 @@ class Studio(tk.Tk):
         ttk.Label(row,textvariable=self.ai_gemini_model).pack(side="left",padx=5)
         ttk.Label(self.autopilot_detail_panel,text="유료 AI 예산은 사용자 입력 기반 예상치이며 실제 청구액을 보장하지 않습니다. 기존 AI 연구 도우미에서 추정액과 1일 상한을 설정하세요.",
                   wraplength=1020,foreground="#8a4b08").pack(anchor="w",pady=3)
+        resource_row=ttk.Frame(self.autopilot_detail_panel); resource_row.pack(fill="x",pady=3)
+        self.resource_cpu_limit=tk.StringVar(value="80")
+        self.resource_cpu_seconds=tk.StringVar(value="60")
+        self.resource_ram_gb=tk.StringVar(value="2")
+        ttk.Label(resource_row,text="저부하 기준: CPU % / 지속 초 / 사용 가능 RAM GB").pack(side="left")
+        for variable,low,high,width in ((self.resource_cpu_limit,10,100,4),
+                                       (self.resource_cpu_seconds,10,600,5),
+                                       (self.resource_ram_gb,0,64,4)):
+            ttk.Spinbox(resource_row,from_=low,to=high,textvariable=variable,width=width).pack(side="left",padx=3)
+        ttk.Button(resource_row,text="기준 적용",command=self._apply_resource_limits).pack(side="left",padx=5)
         self.autopilot_detail_panel.pack_forget()
         self.autopilot_details_button=ttk.Button(detail,text="상세 설정 열기",command=self._autopilot_toggle_details)
         self.autopilot_details_button.pack(anchor="w",padx=5,pady=3)
@@ -1497,6 +1508,12 @@ class Studio(tk.Tk):
         self.autopilot_resume_button.pack(side="left",padx=3)
         self.autopilot_stop_button=ttk.Button(actions,text="안전 중단",command=self._autopilot_stop,state="disabled")
         self.autopilot_stop_button.pack(side="left",padx=3)
+        self.resource_low_load_var=tk.BooleanVar(value=True)
+        self.resource_guard=ResourceGuard()
+        self.resource_status_text=tk.StringVar(value="컴퓨터 여유 있음 · 저부하 모드 권장")
+        ttk.Checkbutton(actions,text="저부하 모드 · 권장",variable=self.resource_low_load_var).pack(side="left",padx=5)
+        ttk.Button(actions,text="리소스 상태 보기",command=self._resource_status).pack(side="left",padx=3)
+        ttk.Label(actions,textvariable=self.resource_status_text).pack(side="left",padx=6)
         ttk.Button(actions,text="결과 보고서 내보내기",command=self._autopilot_export).pack(side="left",padx=3)
         ttk.Button(actions,text="AI 상세 화면",command=lambda:self.tabs.select(self.frames[6])).pack(side="left",padx=3)
         ttk.Label(tab,text="예외 / 사람 확인 대기함",font=("Malgun Gothic",11,"bold")).grid(row=9,column=0,sticky="w",pady=(6,2))
@@ -1517,6 +1534,30 @@ class Studio(tk.Tk):
         self.ai_max_calls.trace_add("write",lambda *_: self._autopilot_refresh_profile())
         self.ai_provider_choice.trace_add("write",lambda *_: self._autopilot_refresh_profile())
         self._autopilot_refresh_profile()
+
+    def _resource_status(self):
+        decision=self.resource_guard.check(sample_resources)
+        labels={"available":"컴퓨터 여유 있음","busy":"다른 작업이 바빠 잠시 쉬는 중",
+                "low_memory":"메모리가 부족해 조사를 기다리는 중"}
+        self.resource_status_text.set(labels.get(decision.status,"리소스 상태를 확인할 수 없습니다"))
+        snap=decision.snapshot
+        details=[labels.get(decision.status,"리소스 상태를 확인할 수 없습니다")]
+        if snap and snap.system_cpu_percent is not None: details.append(f"시스템 CPU: {snap.system_cpu_percent:.0f}%")
+        if snap and snap.available_ram_bytes is not None: details.append(f"사용 가능 메모리: {snap.available_ram_bytes/(1024**3):.1f} GB")
+        if snap and snap.process_rss_bytes is not None: details.append(f"ZISU 메모리: {snap.process_rss_bytes/(1024**2):.0f} MB")
+        if decision.reasons: details.append("보류 이유: "+", ".join(decision.reasons))
+        messagebox.showinfo("리소스 상태", "\n".join(details), parent=self)
+
+    def _apply_resource_limits(self):
+        try:
+            self.resource_guard=ResourceGuard(ResourceLimits(
+                cpu_percent=float(self.resource_cpu_limit.get()),
+                cpu_sustain_seconds=float(self.resource_cpu_seconds.get()),
+                min_available_ram_bytes=int(float(self.resource_ram_gb.get())*(1024**3))))
+        except (TypeError,ValueError):
+            messagebox.showerror("기준을 확인해 주세요","CPU, 지속 시간, 메모리 기준을 숫자로 입력해 주세요.",parent=self)
+            return
+        self.resource_status_text.set("저부하 기준을 적용했습니다")
 
     def _autopilot_toggle_details(self):
         if self.autopilot_detail_panel.winfo_ismapped():
@@ -1633,6 +1674,7 @@ class Studio(tk.Tk):
                 session_id=session_id)
         key=self.api_key.get().strip()
         profile_id=profile["id"]
+        low_load_enabled=bool(self.resource_low_load_var.get())
         self.autopilot_result=None
         self.autopilot_exception_tree.delete(*self.autopilot_exception_tree.get_children())
         self.autopilot_progress.configure(value=0)
@@ -1644,11 +1686,22 @@ class Studio(tk.Tk):
         def worker():
             try:
                 token=oauth.get_access_token(profile_id) if not key else None
+                def resource_check():
+                    if not low_load_enabled:
+                        return True
+                    decision=self.resource_guard.check(sample_resources)
+                    labels={"available":"컴퓨터 여유 있음","busy":"다른 작업이 바빠 잠시 쉬는 중",
+                            "low_memory":"메모리가 부족해 조사를 기다리는 중"}
+                    self.autopilot_events.put({"stage":"resource_status",
+                        "status":labels.get(decision.status,"리소스 상태를 확인할 수 없습니다"),
+                        "allow":decision.allow_new_work})
+                    return decision.allow_new_work
                 def collect(term,market,limit,page_token=None):
                     return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
                                          page_token=page_token,return_page=True)
                 outcome=self.autopilot_controller.run(config,collect,provider=provider,
-                                                       on_event=self.autopilot_events.put)
+                    on_event=self.autopilot_events.put,continue_check=resource_check,
+                    resource_check=resource_check)
                 self.autopilot_events.put({"stage":"result","result":outcome,"profile_id":profile_id})
             except Exception:
                 self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
@@ -1678,6 +1731,10 @@ class Studio(tk.Tk):
                     self.autopilot_stop_button.configure(state="disabled")
                     self._autopilot_show_exception(event["exception"])
                     self.autopilot_stage_text.set(event["exception"]["impact"]+" "+event["exception"]["recommended_action"])
+                elif stage=="resource_status":
+                    self.resource_status_text.set(event.get("status","리소스 상태를 확인할 수 없습니다"))
+                    if not event.get("allow",True):
+                        self.autopilot_stage_text.set(event.get("status","리소스 사용량이 높아 잠시 멈췄습니다")+" · 저장된 예산 안에서 다시 시작할 수 있어요")
                 elif stage=="progress":
                     max_calls=max(1,int(self.ai_max_calls.get()))
                     self.autopilot_progress.configure(value=min(95,100*event.get("calls_used",0)/max_calls))

@@ -56,7 +56,9 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(4, result.report["shortfall"])
         self.assertFalse(result.report["target_met"])
         self.assertEqual(1, result.report["counts"]["ai_recommended_fit"])
-        self.assertNotEqual("auto_fit", store.list_genre_audit(self.profile,path=self.db)[-1]["proposed_verdict"])
+        review_audit=next(item for item in store.list_genre_audit(self.profile,path=self.db)
+                          if item["video_id"]=="review00001")
+        self.assertNotEqual("auto_fit", review_audit["proposed_verdict"])
         self.assertIn("goal_not_met", [item["type"] for item in result.exceptions])
 
     def test_search_ceiling_and_duplicate_pages_are_accounted_exactly(self):
@@ -125,6 +127,23 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(1,result.report["ai_requests_used"])
         self.assertIn("ai_provider_failure",[item["type"] for item in result.exceptions])
         self.assertNotIn("sensitive provider response",str(result.report))
+
+    def test_low_resource_policy_defers_ai_without_counting_a_request(self):
+        class CountingMock(ai_research.MockProvider):
+            def review(inner, *args, **kwargs):
+                inner.calls += 1
+                return super(CountingMock, inner).review(*args, **kwargs)
+        provider = CountingMock()
+        uncertain = {"video_id":"resource001", "video_title":"朝のプレイリスト",
+                     "description":"朝に聴きたい音楽。ボーカルとラップは不明。"}
+        result = autopilot.AutopilotController(self.db).run(
+            autopilot.AutopilotConfig(self.profile, target=5, max_search_calls=1,
+                                      provider_id="ollama"),
+            lambda *_args: {"items":[uncertain], "nextPageToken":""},
+            provider=provider, resource_check=lambda: False)
+        self.assertEqual(0, provider.calls)
+        self.assertEqual(1, result.report["resource_deferred_candidates"])
+        self.assertEqual(0, result.report["ai_request_success"])
 
     def test_resume_reuses_saved_scope_and_skips_uncertain_inflight_page(self):
         config=autopilot.AutopilotConfig(self.profile,target=10,max_search_calls=2)

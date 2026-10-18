@@ -504,7 +504,8 @@ def _validated_opinion(opinion: AIOpinion, candidate: Candidate) -> AIOpinion:
 def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProvider | None = None,
                      path=None, *, use_cache: bool = True, persist_cache: bool = True,
                      session_id: str = "", allow_paid_external: bool = False,
-                     cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None) -> ResearchReview:
+                     cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None,
+                     resource_check=None) -> ResearchReview:
     profile = store.get_profile(profile_id, path)
     if not profile: raise ValueError("선택한 조사 프로필을 찾을 수 없습니다.")
     if len(candidate.title) > 10_000 or len(candidate.description) > 50_000:
@@ -526,6 +527,9 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
             opinion = AIOpinion(cached["ai_verdict"], tuple(json.loads(cached["positive_signals"])),
                                 tuple(json.loads(cached["conflict_signals"])), tuple(json.loads(cached["evidence"])),
                                 cached["uncertainty"], cached["human_check"])
+        elif resource_check is not None and not resource_check():
+            ai_source = "resource_blocked"
+            provenance = "Rule engine; AI deferred by low-resource policy"
         else:
             started = time.monotonic()
             cacheable = True
@@ -569,7 +573,7 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
                 store.save_ai_review(profile_id, candidate.video_id, digest, profile["genre"], provider.name, provider.model,
                                      opinion, int((time.monotonic() - started) * 1000), path, cache_scope)
         # Only a rule REVIEW can be narrowed; never promote to FIT without a human.
-        if opinion.verdict == genres.EXCLUDE:
+        if opinion and opinion.verdict == genres.EXCLUDE:
             final = genres.EXCLUDE
         provenance = f"규칙 엔진 + AI 의견 ({provider.name}/{provider.model})"
     elif rule.decision == genres.EXCLUDE:
@@ -691,7 +695,7 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
         cancel_event: threading.Event | None = None, pause_event: threading.Event | None = None,
         progress=None, session_id: str | None = None, allow_paid_external: bool = False,
         cost_estimate_usd: float | None = None, cost_limit_usd: float | None = None,
-        session_ready=None) -> AutoResearchRun:
+        session_ready=None, continue_check=None, resource_check=None) -> AutoResearchRun:
     """Search pages until the requested number of rule-supported fits or budget.
 
     A search attempt counts once before dispatch and is never automatically retried
@@ -748,8 +752,14 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
 
     warning = recovery_warning
     search_failed = False
+    scheduled_pause = False
     while (query_index < len(terms) and calls_used < max_search_calls and fit_count() < target
            and not cancel_event.is_set() and not pause_event.is_set()):
+        if continue_check is not None and not continue_check():
+            scheduled_pause = True
+            warning = (warning + " Scheduled research or resource policy deferred the next search; "
+                       "no new external request was started.").strip()
+            break
         current = store.get_profile(profile_id, path)
         if not current or _profile_settings_hash(current, path, max_search_calls) + ":fit-target-v1" != settings_hash:
             raise ValueError("Profile search settings changed. Start a new search to keep results separate.")
@@ -798,7 +808,7 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
                                       str(row.get("description", "")), str(row.get("video_url", "")))
                 review = review_candidate(profile_id, candidate, provider, path, session_id=session_id,
                     allow_paid_external=allow_paid_external, cost_estimate_usd=cost_estimate_usd,
-                    cost_limit_usd=cost_limit_usd)
+                    cost_limit_usd=cost_limit_usd, resource_check=resource_check)
                 reviews.append(review)
                 processed.add(review.video_id)
                 ai = review.ai_opinion
@@ -825,7 +835,7 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
                 "human_reviewed_count": sum(1 for item in store.list_genre_audit(profile_id, labeled=True, path=path)),
                 "uncertain_count": sum(1 for item in reviews if item.final_verdict == genres.REVIEW),
                 "profile_id": profile_id})
-    state = "cancelled" if cancel_event.is_set() else "paused" if pause_event.is_set() or search_failed else "complete"
+    state = "cancelled" if cancel_event.is_set() else "paused" if pause_event.is_set() or search_failed or scheduled_pause else "complete"
     store.checkpoint_research_session(session_id, profile_id, state=state, query_index=query_index,
         page_token=page_token, calls_used=calls_used, duplicate_count=duplicate_count,
         candidates=list(candidates.values()), processed=sorted(processed),
