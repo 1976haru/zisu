@@ -17,3 +17,14 @@
 이 프로그램은 임의의 브라우저 프로필을 복사하지 않으며 보안 정책을 바꾸거나 `--no-sandbox`를 사용하지 않습니다. 닫기 검증은 도구가 직접 시작해 소유권을 확인한 테스트 프로세스만 대상으로 합니다. X 닫기 이후의 재실행은 창이 실제로 닫힌 것을 확인한 후 진행합니다. 사용자의 일반 브라우저를 일괄 종료하지 않습니다. 테스트 중 Windows 보안 경고를 우회하지 마세요.
 
 Codex에서 실행하지 못한 것은 일반 Windows 데스크톱의 실패를 의미하지 않습니다. 보고서를 전달하면 실제 브라우저 창 검증 게이트를 판정할 수 있습니다. 브라우저가 실행되지 않으면 저장된 FAIL 보고서와 종료 코드만 공유하면 되며, 사용자명이나 비밀정보는 포함되지 않습니다.
+## Lifecycle diagnostics update (2026-10-18)
+
+The verifier now records lifecycle states `STARTING`, `OPEN`, `USER_CLOSED`, `BACKGROUND_PROCESS_ONLY`, `CLOSING`, `CLOSED`, and `ERROR`. A normal exit code 0 is recorded as a clean close, not a crash. A missing window with a still-running owned Chromium process is reported separately.
+
+Latest build (Windows 10 22H2 build 19045, Python 3.10.11 build environment, PyInstaller 6.14.2): `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_XCloseRecovery_20261018_1610\dist\ZISU_V46-03_Browser_Verifier\ZISU_V46-03_Browser_Verifier.exe`. SHA-256: `8135370d5ff6627f459e3789649cfe2bb8e41d28b3f9652eaf5d1a2522450f07`. ZIP: `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_XCloseRecovery_20261018_1610\dist\ZISU_V46-03_Browser_Verifier.zip` (SHA-256 `51ff7d74f2f7c79b1065533ee8af661aefb657edb2c13ddd4174e4bb426a5dfe`). The bundle is onedir: extract the complete ZIP and keep `_internal` beside the EXE.
+
+For the five-cycle check, open the test window, close it with its X button, then use **X 닫기 확인 후 다시 열기**. Repeat this sequence five times. The report records each attempt, the user-confirmed close, whether the manager saw zero windows, local-page load, window/process count, verified PIDs, exit code, close reason, and CPU/RAM samples. User-confirmed intent is kept separate from process-observed evidence.
+
+PID recovery is accepted only when the process executable matches the selected Edge/Chrome binary and its parsed `--user-data-dir` argument exactly matches the isolated verifier profile. Stale PID identities are discarded before process-tree expansion. No process is selected or terminated by image name alone.
+
+Current user-supplied run summary (not independently reproduced here): 5 Chrome attempts; attempts 1 and 3 passed; 2 and 4 failed the window-retention check; attempt 5 displayed then exited with code 0. This mixed result remains incomplete until the updated verifier records five successful reopen cycles on the user's interactive desktop.

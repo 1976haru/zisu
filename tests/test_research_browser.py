@@ -161,6 +161,90 @@ class ResearchBrowserTests(unittest.TestCase):
             self.assertEqual(profile, manager.session.profile_dir)
             self.assertEqual(2, launcher.call_count)  # one owned tree; second launch only forwards to it
 
+    def test_lifecycle_distinguishes_last_window_close_background_and_clean_exit(self):
+        executable = str(self.root / "chrome.exe")
+        manager = research_browser.ResearchBrowserManager(app_data_root=self.root / "lifecycle",
+            executable=executable)
+        fake_process = FakeProcess()
+        manager.session = research_browser.BrowserSession("life", 4242, 100, executable,
+            str(manager.profile_root / "life"), time.time(), process=fake_process,
+            owned_processes={4242: (100, executable)}, lifecycle_state="OPEN", last_window_count=1)
+        with patch.object(manager, "_refresh_owned_processes"), \
+             patch.object(research_browser, "_process_identity", return_value=(100, executable, 1234)), \
+             patch.object(research_browser, "_window_count", side_effect=[0, 0, 0]):
+            first = manager.metrics()
+            self.assertEqual("USER_CLOSED", first.lifecycle_state)
+            self.assertTrue(first.running)
+            self.assertEqual("last_window_disappeared", first.last_close_reason)
+            second = manager.metrics()
+            self.assertEqual("BACKGROUND_PROCESS_ONLY", second.lifecycle_state)
+            fake_process.returncode = 0
+            # The owned process remains visible in this snapshot; a clean code-0
+            # exit is explicitly non-crash and the state machine keeps the
+            # background-only observation until all verified PIDs disappear.
+            third = manager.metrics()
+            self.assertEqual(0, third.last_exit_code)
+            self.assertNotEqual("ERROR", third.lifecycle_state)
+
+    def test_reused_pid_is_not_expanded_as_owned_process_root(self):
+        executable = str(self.root / "chrome.exe")
+        manager = research_browser.ResearchBrowserManager(app_data_root=self.root / "stale-pid",
+            executable=executable)
+        manager.session = research_browser.BrowserSession("stale", 4242, 100, executable,
+            str(manager.profile_root / "stale"), time.time(),
+            owned_processes={4242: (100, executable)})
+        with patch.object(research_browser, "_process_identity", return_value=(200, executable, 10)), \
+             patch.object(research_browser, "_process_tree") as process_tree, \
+             patch.object(research_browser, "_profile_owned_processes", return_value={}), \
+             patch.object(research_browser.time, "monotonic", return_value=100):
+            manager._refresh_owned_processes(manager.session)
+        process_tree.assert_not_called()
+        self.assertEqual({}, manager.session.owned_processes)
+
+    def test_zero_exit_after_visible_window_is_reported_as_normal_close(self):
+        executable = str(self.root / "chrome.exe")
+        manager = research_browser.ResearchBrowserManager(app_data_root=self.root / "zero-exit",
+            executable=executable)
+        fake_process = FakeProcess()
+        manager.session = research_browser.BrowserSession("zero", 5151, 300, executable,
+            str(manager.profile_root / "zero"), time.time(), process=fake_process,
+            owned_processes={5151: (300, executable)}, lifecycle_state="OPEN", last_window_count=1)
+        fake_process.returncode = 0
+        with patch.object(manager, "_refresh_owned_processes"), \
+             patch.object(research_browser, "_process_identity", return_value=None), \
+             patch.object(research_browser, "_window_count", return_value=0):
+            metrics = manager.metrics()
+        self.assertFalse(metrics.running)
+        self.assertEqual("CLOSED", metrics.lifecycle_state)
+        self.assertEqual(0, metrics.last_exit_code)
+        self.assertEqual("normal_exit_code_0", metrics.last_close_reason)
+
+    def test_recovery_without_live_process_preserves_validated_profile_for_reopen(self):
+        root = self.root / "closed-recovery"
+        root.mkdir()
+        executable = root / "edge.exe"
+        first = research_browser.ResearchBrowserManager(app_data_root=root, executable=str(executable))
+        profile = first.profile_root / "recover-me"
+        profile.mkdir(parents=True)
+        first._write_manifest(research_browser.BrowserSession("recover-me", 7777, 50,
+            str(executable), str(profile), 10, lifecycle_state="CLOSED", last_window_count=1,
+            last_exit_code=0, last_close_reason="normal_exit_code_0"))
+        resumed = research_browser.ResearchBrowserManager(app_data_root=root, executable=str(executable))
+        with patch.object(research_browser, "_process_identity", return_value=None), \
+             patch.object(research_browser, "_profile_owned_processes", return_value={}), \
+             patch.object(research_browser, "_window_count", return_value=0):
+            metrics = resumed.recover_owned_session()
+        self.assertEqual("CLOSED", metrics.lifecycle_state)
+        self.assertEqual(str(profile), resumed.session.profile_dir)
+        self.assertTrue(resumed.manifest_path.exists())
+
+    def test_chromium_profile_argument_match_is_exact(self):
+        profile = str(self.root / "isolated profile")
+        self.assertTrue(research_browser._command_uses_profile(
+            f'chrome.exe --user-data-dir="{profile}" --new-window', profile))
+        self.assertFalse(research_browser._command_uses_profile(
+            f'chrome.exe --user-data-dir="{profile}-other" --new-window', profile))
+
     def test_saved_session_manifest_is_reconnected_before_open_after_app_restart(self):
         root = self.root / "manifest-reopen"
         root.mkdir()

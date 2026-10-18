@@ -69,6 +69,26 @@ class BrowserVerifierTests(unittest.TestCase):
         payload = build_report([{"step": "open", "state": "FAIL"}])
         self.assertEqual(payload["result"], "INCOMPLETE_OR_FAIL")
 
+    def test_report_declares_separate_browser_lifecycle_stages(self):
+        payload = build_report([{"step": "open", "state": "PASS", "event_stage": "A_INITIAL_OPEN"}])
+        self.assertIn("C_USER_CLOSE_OBSERVED", payload["lifecycle_checks"])
+        self.assertIn("F_RESIDUAL_PROCESS_CHECK", payload["lifecycle_checks"])
+
+    def test_lifecycle_stage_classification_is_not_based_on_exit_code_zero_as_crash(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+        self.assertEqual("D_REOPEN_AFTER_CLOSE", BrowserVerifierApp._lifecycle_stage(
+            "X 닫기 확인 후 다시 열기", {"exit_code": 0}))
+        self.assertEqual("E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK",
+            BrowserVerifierApp._lifecycle_stage("전용 브라우저 닫기", {"normal_close": True}))
+
+    def test_x_close_reopen_cycle_is_user_confirmed_and_incremented(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._x_reopen_cycles = 0
+        app._open_test = lambda **kwargs: self.assertTrue(kwargs["require_closed"])
+        app._reopen_after_x_test()
+        self.assertEqual(1, app._x_reopen_cycles)
+
     def test_browser_failure_preserves_numeric_exit_code_without_raw_payload(self):
         result = _safe_error_result(BrowserError("브라우저 종료 코드 4294930433"))
         self.assertEqual(result["browser_exit_code"], 4294930433)

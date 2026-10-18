@@ -58,6 +58,11 @@ class BrowserSession:
     initial_rss_bytes: int = 0
     process: subprocess.Popen | None = field(default=None, repr=False)
     owned_processes: dict[int, tuple[int, str]] = field(default_factory=dict, repr=False)
+    lifecycle_state: str = "STARTING"
+    last_window_count: int = 0
+    last_exit_code: int | None = None
+    last_close_reason: str = ""
+    last_profile_scan: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,9 @@ class BrowserMetrics:
     window_count: int
     child_process_ids: tuple[int, ...] = ()
     rss_change_bytes: int = 0
+    lifecycle_state: str = "CLOSED"
+    last_exit_code: int | None = None
+    last_close_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -169,18 +177,17 @@ class ResearchBrowserManager:
                 except BrowserError:
                     if self._recovery_record is not None:
                         raise
-            if self.session and self._session_alive(self.session):
-                self._refresh_owned_processes(self.session)
+            reuse_profile = None
+            if self.session:
                 before = self.metrics()
                 if before.window_count > 1:
                     raise BrowserOwnershipUncertain("전용 창이 여러 개 감지되어 중복 실행을 막았습니다. 전용 창을 하나만 남긴 뒤 다시 시도하세요.")
-                # Chromium may keep its isolated root alive after the user closes
-                # the last window with X. In that case the normal single-instance
-                # handoff opens a fresh window in the same owned profile. It is
-                # distinct from opening a second browser tree and remains scoped
-                # to the PID+creation-time+image recorded by this session.
-                return self._open_in_owned_session(safe_url, before)
-            if self.session:
+                if before.running:
+                    # A root PID can exit while the browser's profile-owned main
+                    # process remains. Reuse is allowed only after exact profile
+                    # process discovery, never by image name alone.
+                    return self._open_in_owned_session(safe_url, before)
+                reuse_profile = (self.session.session_id, self.session.profile_dir)
                 previous = self.close_owned(grace_seconds=1)
                 if not previous.closed:
                     raise BrowserOwnershipUncertain("이전 연구 창의 자식 프로세스가 남아 있어 새 창을 열지 않았습니다.")
@@ -193,8 +200,14 @@ class ResearchBrowserManager:
                 raise BrowserError("설치된 Microsoft Edge 또는 Google Chrome을 찾지 못했습니다.")
             self.profile_root.mkdir(parents=True, exist_ok=True)
             session_id = uuid.uuid4().hex
-            profile = self.profile_root / session_id
-            profile.mkdir(parents=True, exist_ok=False)
+            if reuse_profile and _within(reuse_profile[1], self.profile_root):
+                session_id, profile_text = reuse_profile
+                profile = Path(profile_text)
+                profile.mkdir(parents=True, exist_ok=True)
+            else:
+                session_id = uuid.uuid4().hex
+                profile = self.profile_root / session_id
+                profile.mkdir(parents=True, exist_ok=False)
             command = [self.executable, f"--user-data-dir={profile}",
                        "--no-first-run", "--no-default-browser-check", "--disable-sync",
                        "--disable-background-mode", "--disable-background-networking",
@@ -229,8 +242,12 @@ class ResearchBrowserManager:
                             self._refresh_owned_processes(self.session)
                             if not self._alive_owned(self.session):
                                 exit_code = process.poll()
+                                self.session.last_exit_code = exit_code
+                                self.session.lifecycle_state = "CLOSED" if exit_code == 0 else "ERROR"
+                                self.session.last_close_reason = "normal_exit" if exit_code == 0 else "process_exit"
                                 detail = f" (종료 코드 {exit_code})" if exit_code is not None else ""
-                                raise BrowserError("연구용 브라우저가 창을 표시한 직후 종료되었습니다." + detail)
+                                outcome = "정상 종료 코드 0이며 충돌로 분류하지 않았습니다." if exit_code == 0 else "비정상 종료로 분류했습니다."
+                                raise BrowserError("연구용 브라우저 창이 시작 확인 중 닫혔습니다. " + outcome + detail)
                             if self.metrics().window_count != 1:
                                 raise BrowserError("연구용 브라우저 창이 계속 표시되는지 확인하지 못했습니다.")
                             time.sleep(0.1)
@@ -238,11 +255,14 @@ class ResearchBrowserManager:
                     if not self._alive_owned(self.session):
                         exit_code=process.poll()
                         detail=f" (종료 코드 {exit_code})" if exit_code is not None else ""
-                        raise BrowserError("연구용 브라우저가 정상 실행되지 않았습니다."+detail)
+                        outcome = "종료 코드 0(정상 종료)" if exit_code == 0 else "비정상 종료"
+                        raise BrowserError("연구용 브라우저가 창을 유지하지 못했습니다. " + outcome + detail)
                     time.sleep(0.1)
                 else:
                     raise BrowserError("연구용 창 표시를 확인할 수 없어 소유한 프로세스만 정리했습니다.")
                 metrics=self.metrics()
+                self.session.lifecycle_state = "OPEN"
+                self.session.last_window_count = metrics.window_count
                 self.session.initial_rss_bytes=metrics.owned_rss_bytes
                 self._write_manifest(self.session)
                 return metrics
@@ -279,8 +299,15 @@ class ResearchBrowserManager:
         while time.monotonic() < deadline:
             self._refresh_owned_processes(session)
             after = self.metrics()
-            if (after.root_pid == before.root_pid and after.window_count == 1
-                    and self._session_alive(session)):
+            if after.window_count == 1 and after.running:
+                session.lifecycle_state = "OPEN"
+                session.last_window_count = 1
+                if after.root_pid and after.root_pid != session.pid:
+                    # The old launcher/root can exit after Chromium hands the
+                    # profile to another verified process. Record that identity.
+                    identity = session.owned_processes.get(after.root_pid)
+                    if identity:
+                        session.pid, session.creation_time = after.root_pid, identity[0]
                 self._write_manifest(session)
                 return after
             if not self._alive_owned(session):
@@ -305,9 +332,49 @@ class ResearchBrowserManager:
             session.owned_processes = alive
             if session.initial_rss_bytes <= 0:
                 session.initial_rss_bytes = rss
-            return BrowserMetrics(self._session_alive(session), session.pid, len(alive), rss,
-                                  _window_count(alive), tuple(sorted(set(alive) - {session.pid})),
-                                  rss - session.initial_rss_bytes)
+            windows = _window_count(alive)
+            running = bool(alive)
+            exit_code = session.process.poll() if session.process else session.last_exit_code
+            if windows:
+                session.lifecycle_state = "OPEN"
+                session.last_close_reason = ""
+            elif session.lifecycle_state == "CLOSING":
+                pass
+            elif session.last_window_count > 0:
+                # Closing the last managed top-level window is a normal user
+                # close signal. A still-live Chromium process is then reported
+                # separately as background-only.
+                if not running and exit_code == 0:
+                    session.lifecycle_state = "CLOSED"
+                    session.last_close_reason = "normal_exit_code_0"
+                elif exit_code not in (None, 0):
+                    session.lifecycle_state = "ERROR"
+                    session.last_close_reason = "nonzero_process_exit"
+                else:
+                    session.lifecycle_state = "USER_CLOSED"
+                    session.last_close_reason = "last_window_disappeared"
+            elif running and windows == 0:
+                session.lifecycle_state = "BACKGROUND_PROCESS_ONLY"
+            elif not running:
+                if exit_code == 0 and session.last_window_count > 0:
+                    session.lifecycle_state = "CLOSED"
+                    session.last_close_reason = "normal_exit_code_0"
+                elif exit_code not in (None, 0):
+                    session.lifecycle_state = "ERROR"
+                    session.last_close_reason = "nonzero_process_exit"
+                else:
+                    session.lifecycle_state = "CLOSED"
+            session.last_exit_code = exit_code
+            session.last_window_count = windows
+            active_pid = session.pid if session.pid in alive else (min(alive) if alive else None)
+            if active_pid and active_pid != session.pid:
+                session.pid = active_pid
+                session.creation_time = alive[active_pid][0]
+                self._write_manifest(session)
+            return BrowserMetrics(running, active_pid, len(alive), rss, windows,
+                                  tuple(sorted(set(alive) - {active_pid} if active_pid else alive)),
+                                  rss - session.initial_rss_bytes, session.lifecycle_state,
+                                  exit_code, session.last_close_reason)
 
     def close_owned(self, *, grace_seconds: float = 10.0) -> BrowserCloseResult:
         with self._lock:
@@ -318,6 +385,7 @@ class ResearchBrowserManager:
                 self._refresh_owned_processes(session)
             self._refresh_owned_processes(session)
             before = self.metrics()
+            session.lifecycle_state = "CLOSING"
             owned = dict(session.owned_processes)
             _close_owned_windows(owned)
             deadline = time.monotonic() + max(0, float(grace_seconds))
@@ -379,15 +447,36 @@ class ResearchBrowserManager:
             except (KeyError, TypeError, ValueError, OSError):
                 raise BrowserOwnershipUncertain("이전 연구 창의 소유권 기록이 올바르지 않습니다. 자동 종료하지 않았습니다.") from None
             current = _process_identity(pid)
-            if (not current or current[0] != creation or not _same_executable(current[1], executable)
-                    or not _within(profile, self.profile_root)):
-                self._remove_manifest()
-                self._recovery_record = None
-                raise BrowserOwnershipUncertain("PID가 바뀌었거나 소유권이 확인되지 않아 창을 건드리지 않았습니다.")
+            valid_recorded_pid = bool(current and current[0] == creation and _same_executable(current[1], executable))
+            profile_processes = _profile_owned_processes(executable, profile) if _within(profile, self.profile_root) else {}
+            if not _within(profile, self.profile_root):
+                raise BrowserOwnershipUncertain("격리 프로필 위치를 확인할 수 없어 브라우저에 연결하지 않았습니다.")
+            if not valid_recorded_pid and not profile_processes:
+                # Preserve the validated isolated profile path when the old
+                # process is gone. The caller can safely relaunch into this same
+                # profile after the normal resource/approval gates.
+                self.executable = executable
+                self.session = BrowserSession(str(record["session_id"]), pid, creation, executable,
+                    profile, float(record.get("started_at", time.time())), process=None,
+                    owned_processes={}, lifecycle_state="CLOSED",
+                    last_window_count=int(record.get("last_window_count", 0) or 0),
+                    last_exit_code=record.get("last_exit_code"),
+                    last_close_reason="process_not_found_after_restart")
+                self.session.initial_rss_bytes = int(record.get("initial_rss_bytes", 0) or 0)
+                return self.metrics()
+            owned = dict(profile_processes)
+            if valid_recorded_pid:
+                owned[pid] = current[:2]
+            active_pid = pid if valid_recorded_pid else min(owned)
+            active_identity = owned[active_pid]
             self.executable = executable
-            self.session = BrowserSession(str(record["session_id"]), pid, creation, executable,
+            self.session = BrowserSession(str(record["session_id"]), active_pid, active_identity[0], executable,
                 profile, float(record.get("started_at", time.time())),
-                process=None, owned_processes={pid: current[:2]})
+                process=None, owned_processes=owned,
+                lifecycle_state=str(record.get("lifecycle_state", "STARTING")),
+                last_window_count=int(record.get("last_window_count", 0) or 0),
+                last_exit_code=record.get("last_exit_code"),
+                last_close_reason=str(record.get("last_close_reason", "")))
             self.session.initial_rss_bytes = int(record.get("initial_rss_bytes", 0) or 0)
             self._refresh_owned_processes(self.session)
             return self.metrics()
@@ -409,21 +498,41 @@ class ResearchBrowserManager:
                    for pid, ident in session.owned_processes.items())
 
     def _refresh_owned_processes(self, session):
-        roots = tuple(session.owned_processes)
-        tree = set()
+        # Never expand a process tree from a stale PID: Windows may reuse it.
+        # Every root must still match its recorded creation time and image.
+        valid = {pid: expected for pid, expected in session.owned_processes.items()
+                 if (current := _process_identity(pid)) and current[0] == expected[0]
+                 and _same_executable(current[1], expected[1])}
+        session.owned_processes = valid
+        roots = tuple(valid)
+        tree_by_root = {}
         for root_pid in roots:
-            tree.update(_process_tree(root_pid))
-        for pid in tree:
-            identity = _process_identity(pid)
-            if identity:
-                session.owned_processes.setdefault(pid, identity[:2])
+            expected = valid[root_pid]
+            tree = _process_tree(root_pid)
+            current_root = _process_identity(root_pid)
+            if current_root and current_root[0] == expected[0] and _same_executable(current_root[1], expected[1]):
+                tree_by_root[root_pid] = tree
+        for tree in tree_by_root.values():
+            for pid in tree:
+                identity = _process_identity(pid)
+                if identity and _same_executable(identity[1], session.executable):
+                    session.owned_processes.setdefault(pid, identity[:2])
+        now = time.monotonic()
+        if (now - session.last_profile_scan >= 1.0
+                and (not roots or not any(pid == session.pid for pid in roots))):
+            session.last_profile_scan = now
+            session.owned_processes.update(_profile_owned_processes(session.executable, session.profile_dir))
 
     def _write_manifest(self, session):
         self.root.mkdir(parents=True, exist_ok=True)
         payload = {"session_id": session.session_id, "pid": session.pid,
             "creation_time": session.creation_time, "executable": session.executable,
             "profile_dir": session.profile_dir, "started_at": session.started_at,
-            "initial_rss_bytes": session.initial_rss_bytes}
+            "initial_rss_bytes": session.initial_rss_bytes,
+            "lifecycle_state": session.lifecycle_state,
+            "last_window_count": session.last_window_count,
+            "last_exit_code": session.last_exit_code,
+            "last_close_reason": session.last_close_reason}
         temp = self.manifest_path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(temp, self.manifest_path)
@@ -612,6 +721,155 @@ def _process_tree(root_pid):
         return owned
     except Exception:
         return {int(root_pid)} if _process_identity(root_pid) else set()
+
+
+def _profile_owned_processes(executable, profile_dir):
+    """Discover live processes only when image and exact isolated profile match."""
+    if os.name != "nt":
+        return {}
+    expected_profile = os.path.normcase(os.path.abspath(str(profile_dir)))
+    try:
+        from ctypes import wintypes
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel.Process32FirstW.restype = wintypes.BOOL
+        kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel.Process32NextW.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            return {}
+        pids = []
+        expected_image = Path(executable).name.casefold()
+        entry = PROCESSENTRY32W(); entry.dwSize = ctypes.sizeof(entry)
+        try:
+            ok = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                if str(entry.szExeFile).casefold() == expected_image:
+                    pids.append(int(entry.th32ProcessID))
+                ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel.CloseHandle(snapshot)
+        matched = {}
+        for pid in pids:
+            identity = _process_identity(pid)
+            if not identity or not _same_executable(identity[1], executable):
+                continue
+            command_line = _process_command_line(pid)
+            if command_line and _command_uses_profile(command_line, expected_profile):
+                matched[pid] = identity[:2]
+        return matched
+    except Exception:
+        return {}
+
+
+def _process_command_line(pid):
+    """Read a process command line on Windows; access failures fail closed."""
+    if os.name != "nt":
+        return None
+    handle = None
+    try:
+        from ctypes import wintypes
+        pointer_size = ctypes.sizeof(ctypes.c_void_p)
+        class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+            _fields_ = [("ExitStatus", ctypes.c_long), ("PebBaseAddress", ctypes.c_void_p),
+                ("AffinityMask", ctypes.c_void_p), ("BasePriority", ctypes.c_long),
+                ("UniqueProcessId", ctypes.c_void_p), ("InheritedFromUniqueProcessId", ctypes.c_void_p)]
+        class UNICODE_STRING(ctypes.Structure):
+            _fields_ = [("Length", ctypes.c_ushort), ("MaximumLength", ctypes.c_ushort),
+                ("Buffer", ctypes.c_void_p)]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.ReadProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+        kernel.ReadProcessMemory.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x0400 | 0x0010, False, int(pid))
+        if not handle:
+            return None
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+            wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
+        ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+        basic = PROCESS_BASIC_INFORMATION()
+        returned = wintypes.ULONG()
+        if ntdll.NtQueryInformationProcess(handle, 0, ctypes.byref(basic),
+                ctypes.sizeof(basic), ctypes.byref(returned)) != 0 or not basic.PebBaseAddress:
+            return None
+        peb = int(basic.PebBaseAddress)
+        parameters_offset = 0x20 if pointer_size == 8 else 0x10
+        command_line_offset = 0x70 if pointer_size == 8 else 0x40
+        pointer = ctypes.c_void_p()
+        read = ctypes.c_size_t()
+        if not kernel.ReadProcessMemory(handle, ctypes.c_void_p(peb + parameters_offset),
+                ctypes.byref(pointer), pointer_size, ctypes.byref(read)) or not pointer.value:
+            return None
+        remote_unicode = UNICODE_STRING()
+        if not kernel.ReadProcessMemory(handle, ctypes.c_void_p(int(pointer.value) + command_line_offset),
+                ctypes.byref(remote_unicode), ctypes.sizeof(remote_unicode), ctypes.byref(read)):
+            return None
+        if remote_unicode.Length <= 0 or remote_unicode.Length > 32768:
+            return None
+        buffer = ctypes.create_string_buffer(remote_unicode.Length)
+        if not kernel.ReadProcessMemory(handle, remote_unicode.Buffer, buffer,
+                remote_unicode.Length, ctypes.byref(read)) or read.value != remote_unicode.Length:
+            return None
+        return buffer.raw.decode("utf-16-le", errors="strict")
+    except Exception:
+        return None
+    finally:
+        if handle:
+            try:
+                ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+            except Exception:
+                pass
+
+
+def _command_uses_profile(command_line, expected_profile):
+    """Match Chromium's --user-data-dir argument without substring ambiguity."""
+    expected_profile = os.path.normcase(os.path.abspath(str(expected_profile)))
+    if os.name == "nt":
+        try:
+            shell = ctypes.WinDLL("shell32", use_last_error=True)
+            shell.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+            shell.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.LocalFree.argtypes = [ctypes.c_void_p]
+            kernel.LocalFree.restype = ctypes.c_void_p
+            count = ctypes.c_int()
+            argv = shell.CommandLineToArgvW(str(command_line), ctypes.byref(count))
+            if not argv:
+                return False
+            try:
+                args = [argv[i] for i in range(count.value)]
+            finally:
+                kernel.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+        except Exception:
+            return False
+    else:
+        import shlex
+        try:
+            args = shlex.split(command_line)
+        except ValueError:
+            return False
+    for index, arg in enumerate(args):
+        value = None
+        if arg.casefold().startswith("--user-data-dir="):
+            value = arg.split("=", 1)[1]
+        elif arg.casefold() == "--user-data-dir" and index + 1 < len(args):
+            value = args[index + 1]
+        if value and os.path.normcase(os.path.abspath(value)) == expected_profile:
+            return True
+    return False
 
 
 def _process_identity(pid):
