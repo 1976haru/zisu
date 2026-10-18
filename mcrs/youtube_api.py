@@ -77,8 +77,10 @@ def classify_network_exception(exc, *, before="", after=""):
         return "dns_failure", False
     if isinstance(reason, (TimeoutError, socket.timeout)):
         return "network_timeout", True
-    if isinstance(reason, OSError) and reason.errno in {
-            errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED}:
+    # Winsock exposes WSA* codes (10050+) where POSIX uses errno.ENET*.
+    offline_errnos = {errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                      errno.ECONNREFUSED, 10050, 10051, 10061, 10065}
+    if isinstance(reason, OSError) and reason.errno in offline_errnos:
         return "network_offline", False
     if isinstance(reason, (ConnectionResetError, BrokenPipeError)):
         return "network_timeout", True

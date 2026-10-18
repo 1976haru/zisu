@@ -83,7 +83,7 @@ class CredentialStore:
     def _provider(provider: str) -> str:
         # OAuth client JSON and public YouTube API keys reuse the existing
         # per-user DPAPI vault without changing the separate OAuth token files.
-        if provider not in _PROVIDERS | {"youtube-data"}:
+        if provider not in _PROVIDERS | {"youtube-data", "youtube-analytics"}:
             raise CredentialError("지원하지 않는 보안 저장 항목입니다.")
         return provider
 

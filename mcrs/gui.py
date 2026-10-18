@@ -30,6 +30,9 @@ from .research_browser import (ResearchBrowserManager, BrowserError, BrowserReso
                                BrowserOwnershipUncertain, open_manual_research_url)
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
+from .analytics import (AnalyticsClient, AnalyticsCredentialManager, AnalyticsError,
+                        AnalyticsRepository, dashboard_view, project_scope_hash,
+                        begin_analytics_consent)
 from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
@@ -125,6 +128,10 @@ class Studio(tk.Tk):
         _write_smoke_stage("tk_root_created")
         _write_smoke_stage("database_initializing")
         store.initialize()
+        self.analytics_credentials=AnalyticsCredentialManager()
+        self.analytics_repository=AnalyticsRepository()
+        self.analytics_busy=False
+        self.analytics_days=tk.IntVar(value=28)
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
@@ -360,6 +367,17 @@ class Studio(tk.Tk):
             ttk.Button(browser_row,text=label,command=command).grid(row=index,column=0,sticky="ew",padx=3,pady=2)
         ttk.Label(content,text="수동 모드로 연 일반 브라우저는 ZISU가 자동으로 닫지 않습니다. 영상 재생·댓글·좋아요·구독은 직접 수행합니다.",
                   wraplength=1000).grid(row=14,column=0,columnspan=2,sticky="w",pady=(5,12))
+        performance=ttk.LabelFrame(content,text="실제 YouTube 채널 성과 · 읽기 전용",padding=10)
+        performance.grid(row=15,column=0,columnspan=2,sticky="ew",pady=(8,4))
+        performance.columnconfigure(0,weight=1)
+        ttk.Label(performance,text="연구 후보·메모 수와 별개의 YouTube Analytics 측정값입니다. 가져오지 못한 값은 0이 아니라 미수집으로 표시합니다.",wraplength=1000).grid(row=0,column=0,columnspan=3,sticky="w",pady=(0,4))
+        ttk.Label(performance,text="기간:").grid(row=1,column=0,sticky="w")
+        ttk.Combobox(performance,textvariable=self.analytics_days,values=(7,28,90),state="readonly",width=6).grid(row=1,column=1,sticky="w",padx=4)
+        ttk.Button(performance,text="성과 읽기 권한 연결",command=self._analytics_consent).grid(row=1,column=2,sticky="e",padx=3)
+        ttk.Button(performance,text="성과 가져오기 (Google 조회)",command=self._analytics_fetch,style="Accent.TButton").grid(row=2,column=2,sticky="e",padx=3,pady=4)
+        self.analytics_dashboard_text=tk.StringVar(value="아직 성과를 가져오지 않았습니다.")
+        ttk.Label(performance,textvariable=self.analytics_dashboard_text,wraplength=1000,justify="left").grid(row=2,column=0,columnspan=2,sticky="w",pady=4)
+        ttk.Label(performance,text="노출수·썸네일 클릭률은 reports.query 미지원 지표입니다. 별도 Reporting API Reach 보고서는 아직 연결되지 않았습니다.",wraplength=1000,foreground="#8a4b08").grid(row=3,column=0,columnspan=3,sticky="w",pady=4)
         self._easy_enter_button=None
         self.bind_all("<Return>",self._easy_enter,add="+")
         self.bind_all("<Escape>",self._easy_escape,add="+")
@@ -433,6 +451,7 @@ class Studio(tk.Tk):
             node="profile:"+self.active_id;self.dashboard_channels.selection_set(node);self.dashboard_channels.focus(node)
         profile=store.dashboard_summary(self.active_id) if self.active_id else None
         if not profile:
+            self._refresh_analytics_panel(None)
             self.dashboard_selected_text.set("현재 선택: 조사 채널을 추가하거나 위 목록에서 선택하세요")
             self.dashboard_today_text.set("오늘 저장·갱신한 후보: 0");self.dashboard_ai_text.set("AI 분석: 아직 없음")
             self.dashboard_review_text.set("사람 확인 필요: 0 · 사람 검증: 0")
@@ -460,6 +479,8 @@ class Studio(tk.Tk):
         dedicated=browser.get() if browser else "전용 창 상태 확인 전"
         self.dashboard_browser_text.set(dedicated+" · 일반 브라우저 수동 모드는 ZISU가 자동 종료하지 않습니다")
 
+        self._refresh_analytics_panel(profile)
+
     def _dashboard_insert_profile(self,parent,profile):
         profile_id=profile["id"];node="profile:"+profile_id
         genre=GENRES.get(profile.get("genre"))
@@ -482,6 +503,111 @@ class Studio(tk.Tk):
             next_time=next((x for x in times if x>now),times[0])
             return f"연구 상태: 예약 일정 없음 · 다음 저장된 검색 시각 {next_time} · Autopilot 예약은 필요할 때 설정하세요"
         return "연구 상태: 예약된 연구가 없습니다. ‘연구 시간 설정’에서 일정을 만들 수 있어요."
+
+    def _refresh_analytics_panel(self, profile=None):
+        if not hasattr(self,"analytics_dashboard_text"):
+            return
+        profile=profile or self.current_profile()
+        if not profile or not profile.get("youtube_channel_id"):
+            self.analytics_dashboard_text.set("YouTube 채널 연결 후 성과 데이터를 가져올 수 있습니다. 채널 없는 조사 프로필의 성과는 미수집입니다.")
+            return
+        try:
+            view=dashboard_view(profile["id"],profile["youtube_channel_id"],int(self.analytics_days.get()),self.analytics_repository)
+        except Exception:
+            self.analytics_dashboard_text.set("성과 저장 결과를 읽지 못했습니다. 기존 조사 자료는 별도로 유지됩니다.")
+            return
+        if view["state"]=="not_collected":
+            self.analytics_dashboard_text.set("이 채널의 실제 성과는 아직 미수집입니다. [성과 가져오기]를 눌러 Google에 읽기 전용으로 요청할 수 있습니다.")
+            return
+        metrics=view.get("metrics",{})
+        def show(key, suffix=""):
+            value=metrics.get(key)
+            return "미수집" if value is None else (f"{value:,.1f}{suffix}" if isinstance(value,float) else f"{value:,}{suffix}")
+        top=" · ".join(str(row.get("video", "")) for row in view.get("top_videos",[])[:3]) or "미수집"
+        countries=" · ".join(f"{r.get('country')}: {r.get('views')}" for r in view.get("countries",[])[:3]) or "미수집"
+        ideas="\n".join(("측정 사실: " if row.get("kind")=="measured_fact" else
+                            "검토 가설: " if row.get("kind")=="hypothesis" else "미지원: ")+row.get("text","")
+                           for row in view.get("suggestions",[])[:4]) or "개선 제안은 실제 자료가 더 모이면 표시됩니다."
+        self.analytics_dashboard_text.set(
+            f"최근 {view['window_days']}일 실제 성과 · 조회수 {show('views')} · 시청시간 {show('watch_minutes','분')} · "
+            f"직전 같은 기간 대비 조회수 {show('views_change')} ({show('views_change_percent','%')}) · 시청시간 변화 {show('watch_minutes_change','분')} · "
+            f"평균 지속시간 {show('avg_view_duration_seconds','초')} · 평균 시청비율 {show('avg_view_percentage','%')} · "
+            f"구독자 순증감 {show('subscriber_change')}\n성과 상위 영상 ID: {top}\n주요 시청 국가: {countries}\n{ideas}\n"
+            "YouTube Analytics 성과는 연구 활동 수치와 별도이며, 개선안은 원인 확정이나 성장 보장이 아닙니다.")
+
+    def _analytics_client_config(self):
+        selected=self.oauth_client_ids.get(self.oauth_client_choice.get())
+        if selected:
+            return self.oauth_registry.load_config(selected)
+        path=self.oauth_client_file.get().strip()
+        if path and Path(path).is_file():
+            try:
+                with open(path,"r",encoding="utf-8") as stream:
+                    config=json.load(stream)
+                if config.get("installed",{}).get("client_id"):
+                    return config
+            except (OSError,ValueError,TypeError):
+                pass
+        raise AnalyticsError("consent_required")
+
+    def _analytics_consent(self):
+        profile=store.get_profile(self.active_id) if self.active_id else None
+        if not profile or not profile.get("youtube_channel_id") or not profile.get("connected_email"):
+            messagebox.showinfo("Google 연결 필요","먼저 이 프로필에 Google 계정과 YouTube 채널을 연결해 주세요.",parent=self);return
+        if self.analytics_busy:return
+        try: config=self._analytics_client_config()
+        except (AnalyticsError,OAuthClientRegistryError):
+            messagebox.showinfo("OAuth 설정 필요","먼저 OAuth 클라이언트를 등록하거나 선택해 주세요.",parent=self);return
+        if not messagebox.askyesno("읽기 전용 성과 권한",
+                "Google 로그인 창에서 YouTube Analytics 보고서 읽기 권한만 추가합니다. 기존 YouTube 연결 토큰은 덮어쓰지 않습니다. 계속할까요?",parent=self):return
+        self.analytics_busy=True
+        self.analytics_dashboard_text.set("Google 읽기 전용 권한을 기다리는 중입니다. 브라우저에서 연결할 계정을 확인해 주세요.")
+        def worker():
+            try:
+                result=begin_analytics_consent(profile,config,approved=True,credential_manager=self.analytics_credentials)
+                error="" if result.get("state")=="connected" else "동의가 취소되었습니다. 기존 연결은 유지됩니다."
+            except AnalyticsError as exc:error=str(exc)
+            except Exception:error="권한을 연결하지 못했습니다. 기존 계정 연결은 그대로 유지됩니다."
+            self.after(0,lambda:self._analytics_consent_finished(profile["id"],error))
+        threading.Thread(target=worker,name="zisu-analytics-consent",daemon=True).start()
+
+    def _analytics_consent_finished(self,profile_id,error):
+        self.analytics_busy=False
+        if error:self.analytics_dashboard_text.set(error)
+        else:self.analytics_dashboard_text.set("성과 읽기 권한이 이 채널 프로필에 안전하게 연결되었습니다. 다음으로 [성과 가져오기]를 선택하세요.")
+        if self.active_id==profile_id:self._refresh_analytics_panel()
+
+    def _analytics_fetch(self):
+        profile=store.get_profile(self.active_id) if self.active_id else None
+        if not profile or not profile.get("youtube_channel_id"):
+            messagebox.showinfo("채널 연결 필요","성과를 확인할 YouTube 채널을 먼저 연결해 주세요.",parent=self);return
+        if self.analytics_busy:return
+        if not self.analytics_credentials.configured(profile["id"]):
+            messagebox.showinfo("추가 동의 필요","먼저 [성과 읽기 권한 연결]을 눌러 Google의 추가 동의를 완료해 주세요. 기존 Google 연결은 변경되지 않습니다.",parent=self);return
+        days=int(self.analytics_days.get())
+        if not messagebox.askyesno("YouTube 성과 읽기",
+                f"{profile['name']} 프로필의 최근 {days}일과 직전 같은 기간 성과를 Google에 읽기 전용으로 요청합니다. 최대 5개 보고서 요청이며 저장된 결과는 캐시에서 재사용합니다. 진행할까요?",parent=self):return
+        profile_id=profile["id"];self.analytics_busy=True
+        self.analytics_dashboard_text.set("성과를 읽고 있습니다. 이 작업은 다른 프로필과 분리 저장됩니다.")
+        def worker():
+            try:
+                identity=oauth.quota_project_identity(profile_id) or "unknown-google-project"
+                client=AnalyticsClient(lambda _pid:self.analytics_credentials.token_data(profile),
+                    repository=self.analytics_repository,resource_guard=getattr(self,"resource_guard",None),
+                    project_hash=project_scope_hash(identity))
+                result=client.fetch(profile,days,use_cache=True)
+                error=result.get("message","")
+                if not error and result.get("state") not in {"data"}:error="성과를 가져오지 못했습니다."
+            except AnalyticsError as exc:error=str(exc)
+            except Exception:error="성과를 안전하게 가져오지 못했습니다. 기존 자료는 보존했습니다."
+            self.after(0,lambda:self._analytics_fetch_finished(profile_id,error))
+        threading.Thread(target=worker,name="zisu-analytics-fetch",daemon=True).start()
+
+    def _analytics_fetch_finished(self,profile_id,error):
+        self.analytics_busy=False
+        if self.active_id==profile_id:
+            self._refresh_analytics_panel()
+            if error:self.analytics_dashboard_text.set(error)
 
     def _refresh_easy_step(self):
         if not hasattr(self,"easy_progress"):

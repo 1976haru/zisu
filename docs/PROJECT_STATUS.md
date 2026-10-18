@@ -1,6 +1,6 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-06 network/auth/quota safe-stop implementation and scoped regression)
+Last checked: 2026-10-18 (V46-07 offline Analytics implementation and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
@@ -11,14 +11,15 @@ Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 84% estimated (84.20 weighted points using the existing backlog scoring, rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
+- **Overall ZISU:** 85% estimated (84.85 weighted points using the existing backlog scoring after V46-07 is set to 65%; rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 74% estimated (74.25% weighted across V4.6.0 rows after V46-06 implementation; branding is a release gate accounted within REL-01). Schedule state, offline account/channel registry, resource sampling/admission, dashboard, browser lifecycle control, candidate diversification, and network/auth/quota safeguards are present; browser page navigation/clean process shutdown, dashboard visual DPI, live discovery quality, actual project quota reconciliation and live APIs remain incomplete.
+- **V4.6.0:** 76% estimated (75.875% weighted across V4.6.0 rows after V46-07 offline implementation; branding is a release gate accounted within REL-01). Schedule state, offline account/channel registry, resource sampling/admission, dashboard, browser lifecycle control, candidate diversification, network/auth/quota safeguards and read-only Analytics reporting core are present; browser page navigation/clean process shutdown, dashboard visual DPI, live discovery quality, actual project quota reconciliation, real Analytics authorization/data and live APIs remain incomplete.
 - **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 81% estimated (21.9/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth and wall-clock EXE runtime remain.
 - **Current V46-03:** 65% estimated and unchanged. Edge produced a visible top-level frame, but the local test page did not load and the isolated process needed a verified cleanup fallback; Chrome failed during startup. End-to-end browser use is not complete.
 - **Current V46-04:** 65% estimated. Dashboard grouping and profile-scoped counts/scheduler/resource status are implemented and scoped tests pass; real Windows DPI appearance remains unverified.
 - **Current V46-05:** 65% estimated. Profile-scoped discovery provenance, query categories, bounded recent-first searches, within-page/history duplicate suppression and deterministic genre-first/channel-exposure ordering are implemented. Scoped Mock suite passes; live recommendation quality and human-reviewed KR/JP precision are not measured.
 - **Current V46-06:** 65% estimated. Typed safe handling, pre-request quota reservations, Pacific-day project buckets, profile/session ledger, bounded retries, safe scheduled pause and explicit auth/quota resume confirmation are implemented offline. Live account/project quota reconciliation is not verified.
+- **Current V46-07:** 65% estimated. Profile/channel-specific Analytics read-only consent, `reports.query` daily/video/country/traffic requests, previous-period comparisons, bounded per-profile/shared-project request ledger, cache, safe error mapping and beginner dashboard display are implemented with Mock coverage. No real OAuth, Analytics API or live Reach report has been called.
 
 ## Verified and unverified state
 
@@ -91,6 +92,18 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 ## Immediate constraints and next order
 
 No data-loss or credential issue was found; prior tasks did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Browser live navigation/clean-close and dashboard visual DPI checks remain incomplete gates. V46-RESOURCE-01 long-run validation remains. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
+
+### V46-07 read-only YouTube Analytics (2026-10-18)
+
+- Added `mcrs/analytics.py` with strict allowlisted `reports.query` GET requests scoped to the profile's exact linked channel ID. It reads daily views/watch-time/average duration/average view percentage/subscriber gains and losses, video performance, country and `insightTrafficSourceType` reports. Current 7/28/90-day windows are compared against the immediately prior equal-length window. Incomplete current-day totals are avoided.
+- Incremental user consent requests `yt-analytics.readonly` plus only the already-needed YouTube/OIDC read scopes; unexpected/write scopes are rejected. The existing per-profile YouTube Data API OAuth JSON/token path is not overwritten. The additional Analytics credential envelope is isolated per profile in the existing current-user DPAPI store; email and selected channel ID are rechecked before use.
+- Added profile/channel keyed SQLite result cache and durable request reservations/statuses. Local caps are 40 report calls/profile/day and 200/shared OAuth project/day; these are ZISU request-count safeguards, not Google's authoritative quota units or billing. The existing process-wide search slot and ResourceGuard are reused; HTTP calls have no automatic retry, and uncertain calls remain counted. Responses/errors are sanitized and missing/null metrics remain unavailable rather than becoming zero.
+- Beginner dashboard adds a 7/28/90-day actual-performance section, period deltas, top video IDs, countries and traffic sources. Research activity stays in its existing separate cards. Suggestions are labelled as measured facts, hypotheses or unavailable; causality, growth and algorithm outcomes are not promised. `reports.query` does not provide the thumbnail Reach metrics used here; impressions/CTR remain uncollected because the separate YouTube Reporting API Reach integration is not implemented.
+- Scoped tests: Analytics **15/15**, dashboard **3/3**, OAuth management **16/16**, network/quota **9/9**, scheduler **18/18**, resource lifecycle **7/7** = **68/68 PASS**. `compileall`, `tests/smoke_gui.py` (`GUI_SMOKE_PASS`) and `git diff --check` PASS. This is scoped regression, not final/full QA.
+- Analytics failure handling reuses the V46-06 network classifier: DNS, offline, timeout, changed network/VPN route, and generic connection failures are distinguished without retrying uncertain requests. HTTP 403 quota/rate-limit reason codes are parsed only into an allowlisted category; provider response text is never shown or retained.
+- No actual Google OAuth, YouTube Analytics/Reporting API or Gemini call was made. No real user DB, OAuth token or existing Gemini DPAPI key was read or changed. No Windows EXE build/install or live Analytics dashboard visual check was performed. A fake protector tests the new Analytics DPAPI-vault boundary; it does not prove the current Windows user's real DPAPI round trip.
+- Official contract checked: Analytics channel reports/query parameters and channel IDs/scopes; read-only scope is `https://www.googleapis.com/auth/yt-analytics.readonly`. Thumbnail impressions/CTR appear in the separate Reporting API Reach report (`channel_reach_basic_a1`), not the integrated query reports. See linked official API references in the handoff report.
+- Next gates remain V46-03 actual page navigation/clean close, V46-04 visual DPI, V46-05 human/live discovery quality, V46-06 real project quota/auth reconciliation, V46-07 authorized live consent/data validation, V46-RESOURCE-01 real long run, V46-BRAND-01 and final Windows/package QA. Do not interpret the offline implementation as a live feature verification.
 
 ### V46-RESOURCE-01 continuation (2026-10-18)
 
