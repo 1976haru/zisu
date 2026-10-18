@@ -334,15 +334,46 @@ def list_google_accounts(path=None):
                 "SELECT channel_id,channel_title FROM google_account_channels WHERE account_id=? "
                 "ORDER BY channel_title,channel_id", (account["id"],))]
             account["profiles"] = [dict(row) for row in db.execute(
-                "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title "
+                "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title,connected_email "
                 "FROM profiles WHERE google_account_id=? ORDER BY name,id", (account["id"],))]
     return accounts
 
 def list_account_profiles(account_id, path=None):
     with connect(path) as db:
         return [dict(row) for row in db.execute(
-            "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title "
+            "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title,connected_email "
             "FROM profiles WHERE google_account_id=? ORDER BY name,id", (account_id,))]
+
+def dashboard_summary(profile_id, path=None):
+    """Return small, profile-scoped dashboard counts without loading candidate rows."""
+    with connect(path) as db:
+        profile = db.execute(
+            "SELECT id,name,market,genre,connected_email,youtube_channel_id,"
+            "youtube_channel_title,schedule,google_account_id FROM profiles WHERE id=?",
+            (profile_id,)).fetchone()
+        if not profile:
+            return None
+        counts = db.execute("""SELECT
+            (SELECT COUNT(*) FROM candidates WHERE profile_id=?) AS candidates,
+            (SELECT COUNT(*) FROM candidates WHERE profile_id=? AND date(updated_at)=date('now')) AS today_candidates,
+            (SELECT COUNT(*) FROM ai_reviews WHERE profile_id=?) AS ai_reviews,
+            (SELECT COUNT(*) FROM ai_reviews WHERE profile_id=? AND date(created_at)=date('now')) AS today_ai_reviews,
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND human_label<>'') AS human_labels,
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND review_status='needs_review') AS needs_review""",
+            (profile_id, profile_id, profile_id, profile_id, profile_id, profile_id)).fetchone()
+        account = None
+        if profile["google_account_id"]:
+            row = db.execute("SELECT email FROM google_accounts WHERE id=?", (profile["google_account_id"],)).fetchone()
+            account = row["email"] if row else None
+        active_schedule = db.execute("SELECT id,state,phase,start_at_utc,total_minutes,research_minutes,"
+            "break_minutes,elapsed_seconds,approved_search_calls,search_calls_used "
+            "FROM research_schedules WHERE profile_id=? AND state IN ('scheduled','running','paused') "
+            "ORDER BY created_at DESC LIMIT 1", (profile_id,)).fetchone()
+    result = dict(profile)
+    result.update(dict(counts))
+    result["account_email"] = account or profile["connected_email"] or ""
+    result["schedule_state"] = dict(active_schedule) if active_schedule else None
+    return result
 
 def bind_google_account_channel(profile_id, channel_id, channel_title, email="", *, allow_account_change=False, path=None):
     """Bind a profile to an account and one authenticated channel in one DB transaction."""

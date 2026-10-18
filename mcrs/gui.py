@@ -288,31 +288,197 @@ class Studio(tk.Tk):
         ttk.Label(bar,textvariable=self.profile_description).pack(side="left",padx=12)
 
     def _easy_ui(self, tab):
-        tab.columnconfigure(0, weight=1)
-        ttk.Label(tab, text="처음 오셨나요? 한 단계씩 같이 진행해요", font=("Malgun Gothic", 20, "bold")).grid(row=0,column=0,sticky="w",pady=(10,12))
-        self.easy_progress = tk.StringVar(value="먼저 조사 채널을 만들거나 기존 채널을 선택하세요.")
-        ttk.Label(tab,textvariable=self.easy_progress,wraplength=900,font=("Malgun Gothic",13)).grid(row=1,column=0,sticky="w",pady=8)
-        self.easy_next = ttk.Button(tab,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
-        self.easy_next.grid(row=2,column=0,sticky="ew",ipady=12,pady=12)
-        row=ttk.Frame(tab); row.grid(row=3,column=0,sticky="w",pady=6)
-        ttk.Button(row,text="Google 연결 도우미",command=self.open_google_wizard).pack(side="left",padx=4)
-        ttk.Button(row,text="이전 작업 복원",command=self._offer_recovery).pack(side="left",padx=4)
-        ttk.Button(row,text="도움말",command=lambda:self.tabs.select(self.frames[5])).pack(side="left",padx=4)
-        ttk.Label(tab,text="Google 로그인과 영상 확인은 직접 하며, ZISU는 읽기 전용으로 조사합니다.",wraplength=900).grid(row=4,column=0,sticky="w",pady=12)
-        browser_row=ttk.Frame(tab); browser_row.grid(row=5,column=0,sticky="ew",pady=4)
-        ttk.Button(browser_row,text="연구 시간 설정",command=lambda:self.tabs.select(self.frames[7])).pack(side="left",padx=4)
-        ttk.Button(browser_row,text="현재 영상 보기",command=self._research_browser_open).pack(side="left",padx=4)
-        tab.bind_all("<Return>", self._easy_enter, add="+")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(0, weight=1)
+        canvas=tk.Canvas(tab,highlightthickness=0,background=BG)
+        scrollbar=ttk.Scrollbar(tab,orient="vertical",command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0,column=0,sticky="nsew"); scrollbar.grid(row=0,column=1,sticky="ns")
+        content=ttk.Frame(canvas,padding=(12,10)); self.easy_dashboard=content
+        self._easy_canvas=canvas
+        self._easy_canvas_window=canvas.create_window((0,0),window=content,anchor="nw")
+        content.bind("<Configure>",lambda _e:canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",lambda event:canvas.itemconfigure(self._easy_canvas_window,width=event.width))
+        content.columnconfigure(0,weight=1); content.columnconfigure(1,weight=1)
+        ttk.Label(content,text="내 조사 대시보드",font=("Malgun Gothic",20,"bold")).grid(row=0,column=0,sticky="w",pady=(3,8))
+        ttk.Label(content,text="Google 계정과 채널은 목록에서 구분됩니다. 채널별 조사 기록과 인증은 서로 섞이지 않습니다.",
+                  wraplength=1000).grid(row=1,column=0,columnspan=2,sticky="w",pady=(0,8))
+        self.easy_progress=tk.StringVar(value="먼저 조사 채널을 만들거나 기존 채널을 선택하세요.")
+        ttk.Label(content,textvariable=self.easy_progress,wraplength=1000,font=("Malgun Gothic",13,"bold")).grid(row=2,column=0,columnspan=2,sticky="ew",pady=5)
+        account_panel=ttk.LabelFrame(content,text="Google 계정 → YouTube 채널 → 조사 프로필",padding=8)
+        account_panel.grid(row=3,column=0,columnspan=2,sticky="nsew",pady=5)
+        account_panel.columnconfigure(0,weight=1);account_panel.rowconfigure(0,weight=1)
+        self.dashboard_channels=ttk.Treeview(account_panel,columns=("market","genre","state"),show="tree headings",height=5)
+        self.dashboard_channels.heading("#0",text="계정 / 채널 / 조사 프로필")
+        for col,label,width in (("market","국가",65),("genre","핵심 장르",180),("state","연결 상태",115)):
+            self.dashboard_channels.heading(col,text=label);self.dashboard_channels.column(col,width=width,stretch=col=="genre")
+        self.dashboard_channels.grid(row=0,column=0,sticky="nsew")
+        tree_scroll=ttk.Scrollbar(account_panel,orient="vertical",command=self.dashboard_channels.yview)
+        tree_scroll.grid(row=0,column=1,sticky="ns");self.dashboard_channels.configure(yscrollcommand=tree_scroll.set)
+        self._dashboard_tree_profiles={}
+        self.dashboard_channels.bind("<Double-1>",self._dashboard_open_profile)
+        self.dashboard_channels.bind("<Return>",self._dashboard_open_profile)
+        self.dashboard_selected_text=tk.StringVar(value="현재 선택: 아직 프로필이 없습니다")
+        ttk.Label(content,textvariable=self.dashboard_selected_text,wraplength=1000,font=("Malgun Gothic",12,"bold")).grid(row=4,column=0,columnspan=2,sticky="w",pady=5)
+        cards=ttk.LabelFrame(content,text="현재 채널 요약",padding=8);cards.grid(row=5,column=0,columnspan=2,sticky="ew",pady=5)
+        for col in range(3):cards.columnconfigure(col,weight=1)
+        self.dashboard_today_text=tk.StringVar(value="오늘 조사한 후보: 0")
+        self.dashboard_ai_text=tk.StringVar(value="AI 분석: 아직 없음")
+        self.dashboard_review_text=tk.StringVar(value="사람 확인 필요: 0 · 사람 검증: 0")
+        for index,var in enumerate((self.dashboard_today_text,self.dashboard_ai_text,self.dashboard_review_text)):
+            ttk.Label(cards,textvariable=var,wraplength=1000).grid(row=index,column=0,sticky="ew",padx=5,pady=4)
+        cards.columnconfigure(0,weight=1)
+        self.dashboard_schedule_text=tk.StringVar(value="연구 일정: 아직 설정되지 않았습니다")
+        self.dashboard_resource_text=tk.StringVar(value="컴퓨터 여유 있음 · 저부하 모드 권장")
+        self.dashboard_browser_text=tk.StringVar(value="연구용 창: 전용 모드 또는 직접 여는 수동 모드를 선택할 수 있어요")
+        ttk.Label(content,textvariable=self.dashboard_schedule_text,wraplength=1000).grid(row=6,column=0,columnspan=2,sticky="w",pady=3)
+        ttk.Label(content,textvariable=self.dashboard_resource_text,wraplength=1000).grid(row=7,column=0,columnspan=2,sticky="w",pady=3)
+        ttk.Label(content,textvariable=self.dashboard_browser_text,wraplength=1000).grid(row=8,column=0,columnspan=2,sticky="w",pady=3)
+        self.easy_next=ttk.Button(content,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
+        self.easy_next.grid(row=9,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
+        actions=ttk.Frame(content);actions.grid(row=10,column=0,columnspan=2,sticky="ew",pady=4)
+        actions.columnconfigure(0,weight=1)
+        for index,(label,command,style_name) in enumerate((
+            ("Google 계정 연결",lambda:self.tabs.select(self.frames[0]),"TButton"),
+            ("장르·채널 설정",self.edit_profile,"TButton"),
+            ("연구 시간 설정",lambda:self.tabs.select(self.frames[7]),"TButton"),
+            ("연구 시작",self._dashboard_start_research,"Accent.TButton"),
+            ("결과 확인",lambda:self.tabs.select(self.frames[2]),"TButton"),
+            ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
+            ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
+        browser_row=ttk.Frame(content);browser_row.grid(row=11,column=0,columnspan=2,sticky="ew",pady=4)
+        browser_row.columnconfigure(0,weight=1)
+        for index,(label,command) in enumerate((
+            ("연구용 인터넷 창 열기",self._research_browser_open),
+            ("일반 브라우저로 직접 열기",self._research_browser_manual_open),
+            ("이전 작업 복원",self._offer_recovery),
+            ("도움말",lambda:self.tabs.select(self.frames[5])))):
+            ttk.Button(browser_row,text=label,command=command).grid(row=index,column=0,sticky="ew",padx=3,pady=2)
+        ttk.Label(content,text="수동 모드로 연 일반 브라우저는 ZISU가 자동으로 닫지 않습니다. 영상 재생·댓글·좋아요·구독은 직접 수행합니다.",
+                  wraplength=1000).grid(row=12,column=0,columnspan=2,sticky="w",pady=(5,12))
+        self._easy_enter_button=None
+        self.bind_all("<Return>",self._easy_enter,add="+")
+        self.bind_all("<Escape>",self._easy_escape,add="+")
 
     def _easy_enter(self, _event=None):
         if self.tabs.select() == str(self.tabs.tabs()[0]):
-            self.easy_next.invoke()
+            focus=self.focus_get()
+            if focus is self.dashboard_channels:
+                self._dashboard_open_profile()
+                return "break"
+        return None
+
+    def _easy_escape(self,_event=None):
+        if self.tabs.select()==str(self.tabs.tabs()[0]):
+            self.profile_combo.focus_set()
             return "break"
+        return None
+
+    def _dashboard_open_profile(self,_event=None):
+        selection=self.dashboard_channels.selection()
+        if not selection:return "break"
+        profile_id=self._dashboard_tree_profiles.get(selection[0])
+        if not profile_id:return "break"
+        if profile_id!=self.active_id and (self.search_inflight or getattr(self,"ai_running",False) or
+                getattr(self,"autopilot_schedule_running",False)):
+            messagebox.showinfo("조사 중인 채널","현재 채널의 작업을 안전하게 마친 뒤 채널을 바꿔 주세요. 진행 중인 조사는 다른 채널로 옮겨지지 않습니다.",parent=self)
+            return "break"
+        ids=[p["id"] for p in self.profiles]
+        if profile_id in ids:
+            self.profile_combo.current(ids.index(profile_id));self.select_profile()
+        return "break"
+
+    def _dashboard_start_research(self):
+        if not self.active_id:
+            self.add_profile();return
+        self.tabs.select(self.frames[7])
+        # Keep the existing Autopilot approval, budget and confirmation path.
+        self._autopilot_start()
+
+    def _dashboard_refresh(self):
+        if not hasattr(self,"dashboard_channels"):return
+        self.dashboard_channels.delete(*self.dashboard_channels.get_children())
+        self._dashboard_tree_profiles={}
+        accounts=store.list_google_accounts()
+        seen=set()
+        for account in accounts:
+            account_id=account["id"]
+            account_node="account:"+account_id
+            email=account.get("email") or "이메일 정보 없음"
+            self.dashboard_channels.insert("","end",iid=account_node,text="Google · "+email,values=("","","계정"),open=True)
+            channels=account.get("channels",[])
+            if not channels:channels=[{"channel_id":"","channel_title":"채널 미연결"}]
+            for index,channel in enumerate(channels):
+                channel_id=channel.get("channel_id") or ""
+                node=f"{account_node}:channel:{index}"
+                title=channel.get("channel_title") or ("YouTube 채널 없음" if not channel_id else "이름 없는 채널")
+                self.dashboard_channels.insert(account_node,"end",iid=node,text=title,values=("","",("채널 없음" if not channel_id else "등록됨")),open=True)
+                for profile in account.get("profiles",[]):
+                    if channel_id and profile.get("youtube_channel_id")!=channel_id:continue
+                    if not channel_id and profile.get("youtube_channel_id"):continue
+                    if profile["id"] in seen:continue
+                    seen.add(profile["id"]);self._dashboard_insert_profile(node,profile)
+            for profile in account.get("profiles",[]):
+                if profile["id"] not in seen:
+                    seen.add(profile["id"]);self._dashboard_insert_profile(account_node,profile)
+        unlinked=[profile for profile in self.profiles if profile["id"] not in seen]
+        if unlinked:
+            self.dashboard_channels.insert("","end",iid="unlinked",text="Google 미연결 프로필",values=("","","연결 전"),open=True)
+            for profile in unlinked:self._dashboard_insert_profile("unlinked",profile)
+        if self.active_id and self.dashboard_channels.exists("profile:"+self.active_id):
+            node="profile:"+self.active_id;self.dashboard_channels.selection_set(node);self.dashboard_channels.focus(node)
+        profile=store.dashboard_summary(self.active_id) if self.active_id else None
+        if not profile:
+            self.dashboard_selected_text.set("현재 선택: 조사 채널을 추가하거나 위 목록에서 선택하세요")
+            self.dashboard_today_text.set("오늘 저장·갱신한 후보: 0");self.dashboard_ai_text.set("AI 분석: 아직 없음")
+            self.dashboard_review_text.set("사람 확인 필요: 0 · 사람 검증: 0")
+            self.dashboard_schedule_text.set("연구 일정: 아직 설정되지 않았습니다")
+            self.dashboard_resource_text.set("컴퓨터 상태: 조사 채널을 선택하세요")
+            self.dashboard_browser_text.set("연구용 창: 전용 모드 또는 직접 여는 수동 모드를 선택할 수 있어요")
+            return
+        connected="연결됨" if oauth.is_connected(profile["id"]) else "연결 전"
+        genre=GENRES.get(profile["genre"])
+        self.dashboard_selected_text.set(f"현재 선택: {profile['name']} · {profile['market']} · {genre.title if genre else profile['genre']} · {profile['account_email'] or 'Google 미연결'} · {profile['youtube_channel_title'] or 'YouTube 채널 정보 없음'} ({connected})")
+        schedule=profile.get("schedule_state")
+        if schedule and schedule.get("state") in {"running","scheduled"}:
+            try: profile["schedule_state"]=research_scheduler.get(schedule["id"],profile["id"])
+            except (sqlite3.Error,ValueError): pass
+        self.dashboard_today_text.set(f"오늘 저장·갱신한 후보: {profile['today_candidates']} · 저장 후보 전체: {profile['candidates']}")
+        self.dashboard_ai_text.set(f"AI 분석 결과: 전체 {profile['ai_reviews']} · 오늘 {profile['today_ai_reviews']} · 분석은 사람의 청취 정답과 별도")
+        self.dashboard_review_text.set(f"사람 확인 필요: {profile['needs_review']} · 사람 검증 완료: {profile['human_labels']}")
+        self.dashboard_schedule_text.set(self._dashboard_schedule_label(profile))
+        self.dashboard_resource_text.set("컴퓨터 상태: "+getattr(self,"resource_status_text",tk.StringVar(value="컴퓨터 여유 있음")).get())
+        browser=getattr(self,"research_browser_status",None)
+        dedicated=browser.get() if browser else "전용 창 상태 확인 전"
+        self.dashboard_browser_text.set(dedicated+" · 일반 브라우저 수동 모드는 ZISU가 자동 종료하지 않습니다")
+
+    def _dashboard_insert_profile(self,parent,profile):
+        profile_id=profile["id"];node="profile:"+profile_id
+        genre=GENRES.get(profile.get("genre"))
+        linked=oauth.is_connected(profile_id)
+        self.dashboard_channels.insert(parent,"end",iid=node,text=profile.get("name",profile_id),
+            values=(profile.get("market",""),genre.title if genre else profile.get("genre",""),"연결됨" if linked else "연결 전"))
+        self._dashboard_tree_profiles[node]=profile_id
+
+    def _dashboard_schedule_label(self,profile):
+        schedule=profile.get("schedule_state")
+        if schedule:
+            state=schedule.get("state");phase=schedule.get("phase")
+            elapsed=max(0,int(schedule.get("elapsed_seconds",0)));total=int(schedule.get("total_minutes",0))*60
+            remaining=max(0,total-elapsed)
+            phase_text={"research":"연구 중","break":"휴식 중","waiting":"시작 대기","paused":"일시 정지"}.get(phase,phase or "예약됨")
+            return f"연구 상태: {phase_text} · 남은 시간 {remaining//3600}시간 {(remaining%3600)//60}분 · 검색 {schedule.get('search_calls_used',0)}/{schedule.get('approved_search_calls',0)}회"
+        times=sorted(x for x in (profile.get("schedule") or "").split(",") if re.fullmatch(r"\d{2}:\d{2}",x))
+        if times:
+            now=datetime.now().strftime("%H:%M")
+            next_time=next((x for x in times if x>now),times[0])
+            return f"연구 상태: 예약 일정 없음 · 다음 저장된 검색 시각 {next_time} · Autopilot 예약은 필요할 때 설정하세요"
+        return "연구 상태: 예약된 연구가 없습니다. ‘연구 시간 설정’에서 일정을 만들 수 있어요."
 
     def _refresh_easy_step(self):
         if not hasattr(self,"easy_progress"):
             return
         profile=self.current_profile()
+        self._dashboard_refresh()
         if not profile:
             self.easy_progress.set("1단계: 조사 채널을 만들거나 기존 채널을 선택하세요.")
             self.easy_next.configure(text="내 조사 채널 만들기",command=self.add_profile)
@@ -1114,6 +1280,11 @@ class Studio(tk.Tk):
                 self.timer_end=0
                 self.timer_text.set("알림 완료")
                 messagebox.showinfo("분석 시간","실제 감상한 점을 메모하세요. 프로그램은 영상을 자동 재생하지 않습니다.")
+        now=time.monotonic()
+        if (hasattr(self,"tabs") and self.tabs.select()==str(self.tabs.tabs()[0]) and
+                now-getattr(self,"_dashboard_last_refresh",0)>=15):
+            self._dashboard_last_refresh=now
+            self._dashboard_refresh()
         self.after(1000,self._tick)
 
     def _comment_ui(self,tab):

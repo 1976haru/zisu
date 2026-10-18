@@ -1,6 +1,6 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-03 dedicated browser lifecycle implementation and scoped regression)
+Last checked: 2026-10-18 (V46-04 beginner dashboard implementation and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
@@ -11,11 +11,12 @@ Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 82% estimated (81.6 weighted points using the existing backlog scoring; this includes remaining V4.6 scope and is not a test-pass percentage).
+- **Overall ZISU:** 83% estimated (82.5 weighted points using the existing backlog scoring; rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 68% estimated (67.7% weighted across its backlog). Schedule state, offline account/channel registry, resource sampling/admission, widget-level schedule UI and browser lifecycle control are present; browser page navigation/clean process shutdown, expanded dashboard and actual APIs remain incomplete.
+- **V4.6.0:** 72% estimated (72.25% weighted across its backlog). Schedule state, offline account/channel registry, resource sampling/admission, dashboard and browser lifecycle control are present; browser page navigation/clean process shutdown, dashboard visual DPI, and actual APIs remain incomplete.
 - **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 81% estimated (21.9/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth and wall-clock EXE runtime remain.
-- **Current V46-03:** 65% estimated. Edge produced a visible top-level frame, but the local test page did not load and the isolated process needed a verified cleanup fallback; Chrome failed during startup. End-to-end browser use is not complete.
+- **Current V46-03:** 65% estimated and unchanged. Edge produced a visible top-level frame, but the local test page did not load and the isolated process needed a verified cleanup fallback; Chrome failed during startup. End-to-end browser use is not complete.
+- **Current V46-04:** 65% estimated. Dashboard grouping and profile-scoped counts/scheduler/resource status are implemented and scoped tests pass; real Windows DPI appearance remains unverified.
 
 ## Verified and unverified state
 
@@ -97,4 +98,17 @@ No data-loss or credential issue was found; this task did not open or modify the
 - Fixed window counting to include only Chromium's top-level `Chrome_WidgetWin_1` frame, avoiding UAC/input overlay false positives. Added a 1.5-second stable-process check so transient frames cannot be reported as successful startup, and moved periodic process metrics off the Tkinter main thread. Edge is preferred when installed. Added explicit user-confirmed manual default-browser mode; it never claims ownership or closes the user's browser and continues to save ZISU notes. Manual browser navigation is unit-mocked only.
 - Latest bounded resource experiment: system CPU 3.17%, available RAM 8,682,815,488 bytes, system memory load 74%, Python process RSS 37,183,488 bytes, process CPU 0.0%. Virtual 12 six-hour sessions/12 pause-resume cycles: RSS decreased 1,114,112 bytes; `tracemalloc` current 56,304 / peak 75,082 bytes; threads 1→1, handles 114→114. This is not a real six-hour browser/EXE run or sustained CPU benchmark.
 - No full suite, final QA, EXE build/install, user DB access, OAuth/Gemini/YouTube request, or write to the V4.5.9 installation was performed. `gh auth status` remains invalid in this Codex process; no push/CI attempt was made. Three inaccessible temporary directories still cause harmless Git status enumeration warnings and were not modified.
-- Next work remains in the backlog sequence: verify browser navigation and graceful close in a normal user AppData-backed Windows session, then complete V46-04 dashboard/DPI work. Keep V4.5.9 install and all credentials/data untouched.
+- Browser real-page navigation/clean close remains an explicit incomplete V46-03 gate. V46-04 work does not change its status.
+
+### V46-04 beginner dashboard (2026-10-18)
+
+- Replaced the minimal first tab with a scrollable beginner dashboard: Google account → registered YouTube channel → profile tree, selected profile/account/channel identity, profile-scoped candidate and AI review counts, human-review counts, scheduler phase/remaining time/search allowance, resource status, and separate dedicated/manual browser status.
+- The hierarchy reuses the additive V46-02 account/channel registry and existing profiles; it does not create duplicate accounts/profiles or copy OAuth credentials. Only profile nodes select a working channel profile. During active search, AI review, or scheduled work, dashboard channel switching is blocked with a clear Korean explanation so work cannot be reassigned.
+- Dashboard actions reuse existing Google connection, profile genre editor, recovery, result views, schedule and Autopilot confirmation/budget path. Starting from the dashboard still passes through existing Autopilot approval gates. Manual browser mode is explicitly described as not owned or auto-closed by ZISU.
+- Added a count-only `store.dashboard_summary` query with profile-scoped SQL aggregates; it avoids loading all candidate rows and shows AI review counts separately from human labels. Dashboard state is updated on profile/tab changes and at most every 15 seconds while visible; this avoids a per-second whole-DB refresh.
+- Added `tests/test_beginner_dashboard.py` (3/3 PASS) for same-account multi-channel grouping, separate-account/profile-scoped counts, missing profile behavior and absence of credential fields. Extended Tkinter smoke for account hierarchy, profile selection, active-work switch protection, and mechanical geometry checks at Tk scaling 100/125/150/200% plus Return/Escape bindings. GUI smoke PASS. `compileall` and `git diff --check` PASS.
+- Scoped regression run: dashboard 3/3, OAuth management 16/16, scheduler 18/18, resource lifecycle 7/7, browser 7 PASS / 1 opt-in integration SKIP. **51 PASS, 1 SKIP, 0 FAIL**, plus GUI smoke PASS. These are scoped suites, not final cross-version QA.
+- One initial dashboard fixture used a title that the strict Jazz rule correctly excluded; fixture corrected to valid Jazz metadata. One initial channel status test expected lower-case display, while UI intentionally preserves the account's original email capitalization; comparison corrected to case-insensitive. No product defect remained from these test-fixture issues.
+- Mechanical Tk scaling and widget checks are not visual DPI verification. No screenshot/independent visual evidence was produced, and Windows display scaling 100/125/150/200% is not claimed visually verified. No real APIs, OAuth, user DB, DPAPI store, installed EXE or V4.5.9 files were accessed or changed. The lifecycle test emitted one brief host sample (system CPU 2.20%, available RAM 11,623,055,360 bytes, system memory load 65%, test Python RSS 36,089,856 bytes, process CPU 0.0%); this is an incidental point sample, not a dashboard benchmark. Its 12 virtual six-hour cycles showed RSS +229,376 bytes, tracemalloc peak 73,886 bytes, threads 1→1 and Windows handles 114→114. Existing resource policy/status display is reused.
+- Current branch remains `feature/v4.5-ai-research-manager`, base HEAD `99ddfb63134c536c6805d04da38390cafad97720` before this task's local changes. No commit or push has yet been performed. Earlier GitHub auth issue remains unverified in this turn. V4.5.9 installation unchanged; V46-03 real browser gate remains open.
+- Next: review staged source/tests/docs for secrets/data and commit the V46-04 changes locally; do not push unless GitHub auth is valid.
