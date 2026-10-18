@@ -136,6 +136,8 @@ class ResearchReview:
     warning: str = "제목·설명 메타데이터 검토이며 실제 음원 판정이 아닙니다."
 
 
+    ai_source: str = "rules_only"
+
 class ReviewProvider(Protocol):
     name: str
     model: str
@@ -513,12 +515,14 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
     digest = hashlib.sha256((candidate.title[:MAX_TITLE] + "\0" + candidate.description[:MAX_DESCRIPTION]).encode("utf-8")).hexdigest()
     provider = provider or DisabledProvider()
     opinion = None
+    ai_source = "rules_only"
     final = rule.decision
     provenance = "기존 규칙 엔진"
     # AI reviews only uncertain cases. A rule exclusion remains excluded; AI can never approve.
     if rule.decision == genres.REVIEW and not isinstance(provider, DisabledProvider):
         cached = store.get_ai_review(profile_id, candidate.video_id, digest, profile["genre"], provider.name, provider.model, path, cache_scope) if use_cache else None
         if cached:
+            ai_source = "cache"
             opinion = AIOpinion(cached["ai_verdict"], tuple(json.loads(cached["positive_signals"])),
                                 tuple(json.loads(cached["conflict_signals"])), tuple(json.loads(cached["evidence"])),
                                 cached["uncertainty"], cached["human_check"])
@@ -526,10 +530,12 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
             started = time.monotonic()
             cacheable = True
             if getattr(provider, "circuit_open", False):
+                ai_source = "failure"
                 opinion = AIOpinion(genres.REVIEW, (), (), (), "AI 공급자 이전 요청 실패로 이번 세션의 추가 호출을 중단했습니다.",
                                     "규칙 판정을 유지하고 직접 확인하세요.")
                 cacheable = False
             else:
+                dispatched = False
                 try:
                     if provider.name in ("openai", "gemini") and not allow_paid_external:
                         raise ProviderFailure("consent")
@@ -537,8 +543,10 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
                         allowed = store.reserve_ai_usage(profile_id, provider.name, provider.model, session_id,
                             cost_estimate=cost_estimate_usd, cost_limit=cost_limit_usd, path=path)
                         if not allowed:
+                            ai_source = "budget_blocked"
                             code = "consent" if provider.name in ("openai", "gemini") and (cost_estimate_usd is None or cost_limit_usd is None) else "budget"
                             raise ProviderFailure(code)
+                    dispatched = True
                     try:
                         supports_related = "related_genres" in inspect.signature(provider.review).parameters
                     except (TypeError, ValueError):
@@ -548,10 +556,12 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
                     else:
                         opinion = provider.review(candidate, profile["genre"])
                     opinion = _validated_opinion(opinion, candidate)
+                    ai_source = "success"
                 except Exception as exc:
                     # Do not persist exception text: providers may include endpoint details.
                     if getattr(provider, "stop_after_failure", False):
                         provider.circuit_open = True
+                    ai_source = "failure" if dispatched else ("budget_blocked" if isinstance(exc, ProviderFailure) else "failure")
                     opinion = AIOpinion(genres.REVIEW, (), (), (), "AI 검토 실패: " + _friendly_provider_error(exc),
                                         "규칙 판정을 유지하고 직접 확인하세요.")
                     cacheable = False
@@ -568,7 +578,7 @@ def review_candidate(profile_id: str, candidate: Candidate, provider: ReviewProv
         provenance = "규칙 엔진; AI 호출 생략"
     return ResearchReview(profile_id, candidate.video_id, rule.decision, rule.score, rule.reason,
                           final, opinion, provider.name if opinion else "disabled", provider.model if opinion else "none",
-                          digest, provenance)
+                          digest, provenance, ai_source=ai_source)
 
 
 def _friendly_provider_error(exc: Exception) -> str:
@@ -840,7 +850,7 @@ def _review_to_payload(review: ResearchReview) -> dict:
                            if review.ai_opinion else None),
             "provider": review.provider, "model": review.model,
             "metadata_hash": review.metadata_hash, "provenance": review.provenance,
-            "warning": review.warning}
+            "warning": review.warning, "ai_source": review.ai_source}
 
 
 def _review_from_payload(value: dict) -> ResearchReview:
@@ -849,11 +859,14 @@ def _review_from_payload(value: dict) -> ResearchReview:
         opinion = AIOpinion(opinion["verdict"], tuple(opinion["positive_signals"]),
             tuple(opinion["conflict_signals"]), tuple(opinion["evidence_from_metadata"]),
             opinion["uncertainty"], opinion["recommended_human_check"])
-    return ResearchReview(value["profile_id"], value["video_id"], value["rule_verdict"],
+    review = ResearchReview(value["profile_id"], value["video_id"], value["rule_verdict"],
         int(value["rule_score"]), value["rule_reason"], value["final_verdict"], opinion,
         value["provider"], value["model"], value["metadata_hash"], value["provenance"],
         value.get("warning", "제목·설명 메타데이터 검토이며 실제 음원 판정이 아닙니다."))
 
+
+    object.__setattr__(review, "ai_source", value.get("ai_source", "rules_only"))
+    return review
 
 def persist_review_decisions(profile_id, reviews, candidates, path=None):
     """Persist AI proposals separately from rule decisions and human truth labels."""

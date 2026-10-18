@@ -123,9 +123,12 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.5.8 · AI Autopilot 안전 조사")
-        self.geometry("1320x840")
-        self.minsize(1060,710)
+        self.title("ZISU Research Studio V4.5.9 · 자동 복구와 쉬운 조사")
+        screen_w=max(800,self.winfo_screenwidth()-80)
+        screen_h=max(560,self.winfo_screenheight()-120)
+        initial_w=min(1320,screen_w);initial_h=min(840,screen_h)
+        self.geometry(f"{initial_w}x{initial_h}")
+        self.minsize(min(900,initial_w),min(560,initial_h))
         self.configure(background=BG)
         style=ttk.Style(self)
         style.theme_use("clam")
@@ -163,6 +166,9 @@ class Studio(tk.Tk):
         self.oauth_status=tk.StringVar(value="계정 상태 확인 중...")
         self.oauth_busy=False
         self.search_inflight=False
+        self._ui_state=(store.load_ui_state() or {}).get("state",{})
+        self._ui_save_after=None
+        self._restoring_ui=False
         self.scheduler_enabled=tk.BooleanVar(value=False)
         self.scheduler_fired=set()
         self.terms_seen=0
@@ -182,8 +188,20 @@ class Studio(tk.Tk):
         self._help_ui(self.frames[5])
         self._ai_research_ui(self.frames[6])
         self._autopilot_ui(self.frames[7])
+        self.filter.trace_add("write",lambda *_:self._save_ui_state())
+        self.decision_filter.trace_add("write",lambda *_:self._save_ui_state())
+        self.ai_target.trace_add("write",lambda *_:self._save_ui_state())
+        self.ai_max_calls.trace_add("write",lambda *_:self._save_ui_state())
+        easy = ttk.Frame(self.tabs, padding=22)
+        self.tabs.insert(0, easy, text="쉬운 시작")
+        self._easy_ui(easy)
         ttk.Label(self,textvariable=self.footer).pack(anchor="w",padx=24,pady=(0,9))
         self.reload_profiles()
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.report_callback_exception = self._report_ui_exception
+        self._install_thread_exception_handler()
+        self.bind_all("<Control-s>", lambda _e: self._save_ui_state())
+        self._restore_ui_state()
         if first_run and not smoke_report:
             self.after(150, self.start_onboarding)
         self.after(1000,self._tick)
@@ -197,8 +215,8 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.5.8",
-            "gui_initialized": len(self.frames) == 8 and bool(self.winfo_exists()),
+            "app_version": "4.5.9",
+            "gui_initialized": len(self.frames) == 8 and len(self.tabs.tabs()) == 9 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
             "python_executable": Path(sys.executable).name,
@@ -257,6 +275,238 @@ class Studio(tk.Tk):
         self.profile_description=tk.StringVar()
         ttk.Label(bar,textvariable=self.profile_description).pack(side="left",padx=12)
 
+    def _easy_ui(self, tab):
+        tab.columnconfigure(0, weight=1)
+        ttk.Label(tab, text="처음 오셨나요? 한 단계씩 같이 진행해요", font=("Malgun Gothic", 20, "bold")).grid(row=0,column=0,sticky="w",pady=(10,12))
+        self.easy_progress = tk.StringVar(value="먼저 조사 채널을 만들거나 기존 채널을 선택하세요.")
+        ttk.Label(tab,textvariable=self.easy_progress,wraplength=900,font=("Malgun Gothic",13)).grid(row=1,column=0,sticky="w",pady=8)
+        self.easy_next = ttk.Button(tab,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
+        self.easy_next.grid(row=2,column=0,sticky="ew",ipady=12,pady=12)
+        row=ttk.Frame(tab); row.grid(row=3,column=0,sticky="w",pady=6)
+        ttk.Button(row,text="Google 연결 도우미",command=self.open_google_wizard).pack(side="left",padx=4)
+        ttk.Button(row,text="이전 작업 복원",command=self._offer_recovery).pack(side="left",padx=4)
+        ttk.Button(row,text="도움말",command=lambda:self.tabs.select(self.frames[5])).pack(side="left",padx=4)
+        ttk.Label(tab,text="Google 로그인과 영상 확인은 직접 하며, ZISU는 읽기 전용으로 조사합니다.",wraplength=900).grid(row=4,column=0,sticky="w",pady=12)
+        tab.bind_all("<Return>", self._easy_enter, add="+")
+
+    def _easy_enter(self, _event=None):
+        if self.tabs.select() == str(self.tabs.tabs()[0]):
+            self.easy_next.invoke()
+            return "break"
+
+    def _refresh_easy_step(self):
+        if not hasattr(self,"easy_progress"):
+            return
+        profile=self.current_profile()
+        if not profile:
+            self.easy_progress.set("1단계: 조사 채널을 만들거나 기존 채널을 선택하세요.")
+            self.easy_next.configure(text="내 조사 채널 만들기",command=self.add_profile)
+            return
+        try:
+            count=len(store.list_candidates(profile["id"]))
+        except Exception:
+            count=0
+        if not oauth.is_connected(profile["id"]):
+            self.easy_progress.set(f"현재 채널: {profile['name']}\n2단계: 공개 영상 검색을 위해 API 키를 등록하거나 Google 읽기 전용 연결을 진행하세요.")
+            self.easy_next.configure(text="Google 연결하기",command=lambda:self.tabs.select(self.frames[0]))
+        elif count <= 0:
+            self.easy_progress.set(f"현재 채널: {profile['name']}\n3단계: 연결이 준비됐어요. 장르별 영상 검색을 시작하세요.")
+            self.easy_next.configure(text="영상 검색 시작",command=lambda:self.tabs.select(self.frames[1]))
+        else:
+            self.easy_progress.set(f"현재 채널: {profile['name']} · 저장된 후보 {count}개\n다음 단계: AI 추천을 확인하거나 자동 조사를 시작하세요. 실제 청취 정답은 별도로 기록됩니다.")
+            self.easy_next.configure(text="AI 자동 조사 열기",command=lambda:self.tabs.select(self.frames[7]))
+
+    def _safe_diagnostic(self, code):
+        try:
+            target=store.data_dir()/"logs"/"ui_diagnostics.log"
+            target.parent.mkdir(parents=True,exist_ok=True)
+            with target.open("a",encoding="utf-8") as handle:
+                handle.write(f"{datetime.now().astimezone().isoformat()} {code[:60]}\n")
+        except OSError:
+            pass
+
+    def _report_ui_exception(self, exc_type, _value, _tb):
+        # Deliberately omit exception text and traceback: providers may include secrets.
+        self._safe_diagnostic(f"ui_callback_exception:{getattr(exc_type,'__name__','unknown')}")
+        try:
+            messagebox.showerror("화면에서 문제가 생겼어요", "작업 내용은 자동 저장했어요. 프로그램을 다시 열고 이전 작업 복원을 선택해 주세요. 자세한 진단은 로그에 안전하게 기록했습니다.", parent=self)
+        except tk.TclError:
+            pass
+
+    def _install_thread_exception_handler(self):
+        if not hasattr(threading,"excepthook"):
+            return
+        def safe_hook(args):
+            self._safe_diagnostic(f"background_exception:{getattr(args.exc_type,'__name__','unknown')}")
+        threading.excepthook=safe_hook
+
+    def _ui_state_snapshot(self):
+        try: tab_index=self.tabs.index(self.tabs.select())
+        except (tk.TclError,ValueError): tab_index=0
+        selected=()
+        if hasattr(self,"candidates"):
+            selected=self.candidates.selection()
+        search_term=""
+        if hasattr(self,"keyword_list"):
+            search_term="\n".join(self.keyword_list.get(index) for index in self.keyword_list.curselection())
+        report=getattr(self,"autopilot_saved_report",None) or {}
+        return {"profile_id":self.active_id,"tab_index":tab_index,
+                "selected_video_id":selected[0] if selected else None,
+                "search_term":search_term,
+                "filter":self.filter.get(),"decision_filter":self.decision_filter.get(),
+                "sort":json.dumps(getattr(self,"_sort_state",{}).get("candidate"),ensure_ascii=False),
+                "ai_target":self.ai_target.get() if hasattr(self,"ai_target") else "10",
+                "ai_max_calls":self.ai_max_calls.get() if hasattr(self,"ai_max_calls") else "3",
+                "ai_provider":self.ai_provider_choice.get() if hasattr(self,"ai_provider_choice") else "",
+                "ai_cost_estimate":self.ai_cost_estimate.get() if hasattr(self,"ai_cost_estimate") else "",
+                "ai_cost_limit":self.ai_cost_limit.get() if hasattr(self,"ai_cost_limit") else "",
+                "last_report_session":report.get("session_id")}
+
+    def _save_ui_state(self):
+        if getattr(self,"_restoring_ui",False): return
+        if self._ui_save_after:
+            try:self.after_cancel(self._ui_save_after)
+            except tk.TclError:pass
+        self._ui_save_after=self.after(350,self._write_ui_state)
+
+    def _write_ui_state(self):
+        self._ui_save_after=None
+        try:store.save_ui_state(self._ui_state_snapshot())
+        except (OSError,sqlite3.Error,ValueError):self._safe_diagnostic("ui_state_save_failed")
+
+    def _on_tab_changed(self,_event=None):
+        self._save_ui_state(); self._refresh_easy_step()
+        try: index=self.tabs.index(self.tabs.select())
+        except (tk.TclError,ValueError): return
+        if index==3:self.reload_candidates()
+        elif index==7:self._ai_refresh_saved_results()
+        elif index==8:self._autopilot_refresh_profile()
+
+    def _restore_ui_state(self):
+        state=getattr(self,"_ui_state",{})
+        if not state:return
+        self._restoring_ui=True
+        try:
+            profile_id=state.get("profile_id")
+            if profile_id and any(p["id"]==profile_id for p in self.profiles):
+                self.reload_profiles(profile_id)
+            self.filter.set(str(state.get("filter", "")))
+            self.decision_filter.set(str(state.get("decision_filter", "전체")))
+            if hasattr(self,"ai_target"):
+                self.ai_target.set(str(state.get("ai_target","10")))
+                self.ai_max_calls.set(str(state.get("ai_max_calls","3")))
+                self.ai_cost_estimate.set(str(state.get("ai_cost_estimate",self.ai_cost_estimate.get())))
+                self.ai_cost_limit.set(str(state.get("ai_cost_limit",self.ai_cost_limit.get())))
+                provider=state.get("ai_provider")
+                if provider in self.ai_provider_ids:self.ai_provider_choice.set(provider)
+            if state.get("search_term") and hasattr(self,"keyword_list"):
+                wanted=set(str(state["search_term"]).splitlines())
+                for index in range(self.keyword_list.size()):
+                    if self.keyword_list.get(index) in wanted:self.keyword_list.selection_set(index)
+            try:
+                index=max(0,min(int(state.get("tab_index",0)),len(self.tabs.tabs())-1))
+                self.tabs.select(self.tabs.tabs()[index])
+            except (ValueError,tk.TclError):pass
+            self.reload_candidates()
+            video_id=state.get("selected_video_id")
+            if video_id and hasattr(self,"candidates") and self.candidates.exists(video_id):
+                self.candidates.selection_set(video_id); self.candidates.see(video_id)
+        finally:self._restoring_ui=False
+        self._refresh_easy_step()
+        self.after(500,self._offer_recovery)
+
+    def _offer_recovery(self):
+        profile=self.current_profile()
+        if not profile:return
+        sessions=store.list_resumable_sessions(profile["id"])
+        if not sessions:return
+        session=sessions[0]
+        details=(f"저장 시각: {session.get('updated_at','확인 불가')}\n프로필: {profile['name']}\n"
+                 f"조사 단계: {session.get('state','보류')} · 검색 {session.get('calls_used',0)}회\n"
+                 "외부 검색은 자동으로 재시작하지 않으며, 이어가기를 누를 때만 다시 시작합니다.")
+        win=tk.Toplevel(self);win.title("이전 작업이 발견되었습니다");win.transient(self);win.grab_set()
+        win.geometry("520x290")
+        ttk.Label(win,text="이전 작업이 발견되었습니다",font=("Malgun Gothic",16,"bold")).pack(anchor="w",padx=20,pady=(18,8))
+        ttk.Label(win,text=details,wraplength=480,justify="left").pack(anchor="w",padx=20,pady=8)
+        actions=ttk.Frame(win);actions.pack(fill="x",padx=14,pady=16)
+        def continue_work():
+            win.destroy();self.tabs.select(self.frames[7])
+            if store.get_autopilot_settings(profile["id"],session["id"]):self._autopilot_resume()
+            else:self._ai_resume_latest()
+        def view_only():
+            win.destroy();self.reload_candidates();self.tabs.select(self.frames[2])
+        def new_search():
+            win.destroy();self.tabs.select(self.frames[7])
+            self.autopilot_stage_text.set("새 조사는 준비 화면만 열었습니다. 시작 버튼을 눌러야 외부 검색이 시작됩니다.")
+        ttk.Button(actions,text="이어서 작업하기",command=continue_work,style="Accent.TButton").pack(side="left",padx=3)
+        ttk.Button(actions,text="저장된 결과만 보기",command=view_only).pack(side="left",padx=3)
+        ttk.Button(actions,text="새 조사 시작",command=new_search).pack(side="left",padx=3)
+
+    def _sort_tree(self, tree, col, reverse, key_name):
+        rows=[]
+        for iid in tree.get_children(""):
+            values=tree.item(iid,"values")
+            try:index=list(tree["columns"]).index(col); value=values[index]
+            except (ValueError,IndexError):value=""
+            rows.append((value,iid))
+        def sort_key(pair):
+            value=pair[0]
+            try:return (0,float(value))
+            except (TypeError,ValueError):return (1,str(value).casefold())
+        for pos,(_,iid) in enumerate(sorted(rows,key=sort_key,reverse=reverse)):
+            tree.move(iid,"",pos)
+        self._sort_state=getattr(self,"_sort_state",{})
+        self._sort_state[key_name]=(col,reverse)
+        for column in tree["columns"]:
+            text=tree.heading(column,"text").rstrip(" ↑↓")
+            tree.heading(column,text=text+(" ↓" if column==col and reverse else " ↑" if column==col else ""))
+        self._save_ui_state()
+
+    def _sort_tree_click(self, tree, col, key_name):
+        previous=getattr(self,"_sort_state",{}).get(key_name)
+        reverse=(not previous[1]) if previous and previous[0]==col else False
+        self._sort_tree(tree,col,reverse,key_name)
+
+    def open_google_wizard(self):
+        steps=[("Google 계정 준비","연결할 Google 계정으로 로그인 준비를 합니다."),
+               ("Cloud 프로젝트 선택/생성","보통 기존 ZISU 프로젝트 하나를 여러 Google 계정에서 재사용할 수 있어요."),
+               ("YouTube Data API v3 활성화","Cloud Console에서 API 및 서비스 > 라이브러리에서 YouTube Data API v3를 사용 설정합니다."),
+               ("인증 플랫폼 설정","Google Auth Platform에서 앱 이름과 사용자 유형을 확인합니다."),
+               ("테스트 사용자 등록","앱이 테스트 중이면 Audience > Test users에 연결 계정을 추가해야 할 수 있어요."),
+               ("데스크톱 OAuth 클라이언트 확인/생성","OAuth 클라이언트 유형은 데스크톱 앱이어야 합니다."),
+               ("OAuth JSON 다운로드","클라이언트 JSON은 비밀정보예요. 다른 사람과 공유하지 마세요."),
+               ("ZISU에 JSON 등록","파일 선택으로 등록합니다. 이미 등록된 클라이언트는 다시 추가할 필요가 없습니다."),
+               ("브라우저에서 Google 로그인","직접 계정을 선택하고 읽기 전용 권한을 승인합니다."),
+               ("계정/채널 확인","표시된 이메일과 채널이 연결하려던 계정인지 직접 확인합니다. 채널 없는 조사 계정도 가능합니다.")]
+        links=["https://accounts.google.com/","https://console.cloud.google.com/","https://console.cloud.google.com/apis/library/youtube.googleapis.com",
+               "https://console.cloud.google.com/auth/overview","https://console.cloud.google.com/auth/audience",
+               "https://console.cloud.google.com/auth/clients","https://console.cloud.google.com/auth/clients"]
+        win=tk.Toplevel(self);win.title("Google 연결 도우미");win.geometry("650x340");win.transient(self)
+        index=tk.IntVar(value=0); title=tk.StringVar(); body=tk.StringVar()
+        ttk.Label(win,textvariable=title,font=("Malgun Gothic",16,"bold")).pack(anchor="w",padx=20,pady=(20,8))
+        ttk.Label(win,textvariable=body,wraplength=590).pack(anchor="w",padx=20,pady=8)
+        ttk.Label(win,text="직접 완료했을 때만 다음 단계로 이동하세요. ZISU는 Google Cloud를 대신 설정하지 않습니다.",wraplength=590).pack(anchor="w",padx=20,pady=8)
+        controls=ttk.Frame(win);controls.pack(fill="x",side="bottom",padx=16,pady=16)
+        def show():
+            i=index.get();title.set(f"단계 {i+1}/10 · {steps[i][0]}");body.set(steps[i][1])
+        def prev():index.set(max(0,index.get()-1));show()
+        def nxt():
+            if index.get()<7:index.set(index.get()+1);show()
+            elif index.get()==7:
+                self.choose_client_file();index.set(8);show()
+            elif index.get()==8:
+                if messagebox.askyesno("Google 연결", "브라우저에서 계정을 선택하고 읽기 전용 승인을 진행할까요?",parent=win):self.connect_google()
+                index.set(9);show()
+            else:
+                self.refresh_account_status();win.destroy()
+        ttk.Button(controls,text="이전",command=prev).pack(side="left")
+        if links:
+            ttk.Button(controls,text="공식 설정 페이지 열기",command=lambda:webbrowser.open(links[min(index.get(),len(links)-1)])).pack(side="left",padx=8)
+        ttk.Button(controls,text="다음",command=nxt,style="Accent.TButton").pack(side="right")
+        win.bind("<Escape>",lambda _e:win.destroy())
+        win.bind("<Return>",lambda _e:nxt())
+        show()
+
     def reload_profiles(self,select_id=None):
         self.profiles=store.list_profiles()
         values=[f'{x["name"]}  |  {x["market"]}  |  {GENRES[x["genre"]].title}' for x in self.profiles]
@@ -278,6 +528,7 @@ class Studio(tk.Tk):
         i=self.profile_combo.current()
         if i<0 or i>=len(self.profiles): return
         profile=self.profiles[i]
+        if getattr(self,"comment_video",None):self._autosave_comment()
         self.active_id=profile["id"]
         if hasattr(self,"ai_tree") and getattr(self,"ai_expected_profile",None) != self.active_id:
             self.ai_tree.delete(*self.ai_tree.get_children())
@@ -302,6 +553,8 @@ class Studio(tk.Tk):
         self.reload_metrics()
         self.schedule_text.set(profile["schedule"])
         self._autopilot_refresh_profile()
+        self._save_ui_state()
+        self._refresh_easy_step()
         self.footer.set("채널을 전환했습니다. 다른 채널의 검색 후보와 성과는 분리됩니다.")
 
     def add_profile(self):
@@ -311,6 +564,7 @@ class Studio(tk.Tk):
                 name,market,genre,related=dialog.result
                 ident=store.create_profile(name,market,genre,related_genres=related)
                 self.reload_profiles(ident)
+                self.tabs.select(self.frames[0])
             except Exception as exc: messagebox.showerror("채널 추가 실패",str(exc))
 
     def start_onboarding(self):
@@ -340,6 +594,7 @@ class Studio(tk.Tk):
 
     def _account_ui(self, tab):
         tab.columnconfigure(0,weight=1)
+        ttk.Button(tab,text="Google 연결 도우미 · 10단계",command=self.open_google_wizard,style="Accent.TButton").grid(row=0,column=1,sticky="e",pady=8)
         ttk.Label(tab,text="첫 단계: 내 YouTube 채널을 안전하게 연결하세요.",
                   font=("Malgun Gothic",16,"bold")).grid(row=0,column=0,sticky="w",pady=(6,10))
         ttk.Label(tab,text="Google OAuth 로그인 · 조회 전용 권한 · 비밀번호 입력/댓글 게시/구독 실행 권한 없음").grid(row=1,column=0,sticky="w",pady=4)
@@ -567,6 +822,7 @@ class Studio(tk.Tk):
         self.keyword_list=tk.Listbox(left,selectmode=tk.EXTENDED,exportselection=False,
                                      activestyle="dotbox",font=("Malgun Gothic",11),bg="white",height=18)
         self.keyword_list.pack(fill="both",expand=True,padx=(0,12))
+        self.keyword_list.bind("<<ListboxSelect>>",lambda _e:self._save_ui_state())
         ttk.Button(left,text="1. 유튜브 검색 열기",command=self.open_youtube).pack(fill="x",pady=6,padx=(0,12))
         ttk.Button(left,text="2. API로 후보 자동 수집",command=self.api_search,style="Accent.TButton").pack(fill="x",padx=(0,12))
         ttk.Label(right,textvariable=self.search_status,wraplength=650).pack(anchor="w",pady=8)
@@ -655,7 +911,7 @@ class Studio(tk.Tk):
         ttk.Button(head,text="+ 영상 수동 등록",command=self.manual_add).pack(side="right")
         self.candidates=ttk.Treeview(tab,columns=("channel","title","verdict","score","status"),show="headings")
         for col,title,w in (("channel","채널",190),("title","영상 제목",410),("verdict","장르",100),("score","점수",75),("status","메모상태",90)):
-            self.candidates.heading(col,text=title)
+            self.candidates.heading(col,text=title,command=lambda c=col:self._sort_tree_click(self.candidates,c,"candidate"))
             self.candidates.column(col,width=w,stretch=col=="title")
         self.candidates.grid(row=1,column=0,sticky="nsew",pady=10)
         self.candidates.bind("<<TreeviewSelect>>",lambda e:self.selected_candidate())
@@ -666,6 +922,7 @@ class Studio(tk.Tk):
         ttk.Label(detail,textvariable=self.genre_reason).grid(row=0,column=0,columnspan=2,sticky="w",pady=(0,6))
         self.notes=tk.Text(detail,height=4,wrap="word",font=("Malgun Gothic",10))
         self.notes.grid(row=1,column=0,columnspan=2,sticky="ew",pady=4)
+        self.notes.bind("<KeyRelease>",lambda _e:self._schedule_note_save())
         actions=ttk.Frame(detail)
         actions.grid(row=2,column=0,columnspan=2,sticky="ew",pady=6)
         self.item_status=tk.StringVar(value="미확인")
@@ -679,10 +936,14 @@ class Studio(tk.Tk):
 
     def reload_candidates(self):
         if not hasattr(self,"candidates") or not self.active_id:return
+        selected=self.candidates.selection()
+        selected_id=selected[0] if selected else getattr(self,"selected_video",None)
         rows=store.list_candidates(self.active_id,self.filter.get(),self.decision_filter.get())
         self.candidates.delete(*self.candidates.get_children())
         for item in rows:
             self.candidates.insert("","end",iid=item["video_id"],values=(item["channel_title"],item["video_title"],item["genre_decision"],item["genre_score"],item["status"]))
+        if selected_id and self.candidates.exists(selected_id):
+            self.candidates.selection_set(selected_id)
         self.genre_reason.set(f"현재 채널 후보 {len(rows)}개 · 제외 판정은 정확도 검증 화면에 보존")
 
     def open_genre_audit(self):
@@ -697,9 +958,9 @@ class Studio(tk.Tk):
         tree=ttk.Treeview(window,columns=("title","predicted","score","ai","proposal","human","reason"),show="headings")
         for col,title,width in (("title","영상 제목",360),("predicted","자동 판정",90),("score","점수",60),
                                 ("human","사람 정답",90),("reason","판정 이유",400)):
-            tree.heading(col,text=title); tree.column(col,width=width,stretch=col in ("title","reason"))
+            tree.heading(col,text=title,command=lambda c=col,t=tree:self._sort_tree_click(t,c,"audit")); tree.column(col,width=width,stretch=col in ("title","reason"))
         for col,title,width in (("ai","AI 의견",80),("proposal","추천 구분",120)):
-            tree.heading(col,text=title); tree.column(col,width=width,stretch=False)
+            tree.heading(col,text=title,command=lambda c=col,t=tree:self._sort_tree_click(t,c,"audit")); tree.column(col,width=width,stretch=False)
         tree.pack(fill="both",expand=True,padx=12,pady=8)
         notes=tk.Text(window,height=4,wrap="word",font=("Malgun Gothic",10)); notes.pack(fill="x",padx=12,pady=6)
         def reload_audit():
@@ -751,6 +1012,8 @@ class Studio(tk.Tk):
             +(f" · 유사 신호: {', '.join(related_signals)}" if related_signals else "")
             +( " · 제목/설명만으로 불명확: 직접 청취 확인 필요" if related_info["human_listening_required"] else ""))
 
+        self._save_ui_state()
+
     def manual_add(self):
         url=simpledialog.askstring("영상 URL","YouTube 영상 주소를 붙여넣으세요.",parent=self)
         if not url:return
@@ -774,7 +1037,7 @@ class Studio(tk.Tk):
     def open_candidate(self):
         if self.selected_video:
             item=store.get_candidate(self.active_id,self.selected_video)
-            if item:webbrowser.open(item["video_url"],new=2)
+            if item:webbrowser.open(item.get("video_url") or f"https://www.youtube.com/watch?v={self.selected_video}",new=2)
 
     def save_candidate(self):
         if not self.selected_video:return
@@ -783,6 +1046,19 @@ class Studio(tk.Tk):
         self.reload_candidates()
         self.candidates.selection_set(self.selected_video)
         self.footer.set("선택 채널의 메모만 저장했습니다.")
+
+    def _schedule_note_save(self):
+        if not getattr(self,"selected_video",None):return
+        if getattr(self,"_note_save_after",None):
+            try:self.after_cancel(self._note_save_after)
+            except tk.TclError:pass
+        self._note_save_after=self.after(900,self._autosave_note)
+
+    def _autosave_note(self):
+        self._note_save_after=None
+        if getattr(self,"selected_video",None):
+            try:self.save_candidate()
+            except (sqlite3.Error,OSError):self._safe_diagnostic("candidate_note_autosave_failed")
 
     def approve_candidate(self):
         if not self.selected_video:return
@@ -833,6 +1109,8 @@ class Studio(tk.Tk):
         ttk.Label(tab,text="수정 가능한 댓글 초안").grid(row=5,column=0,sticky="w",pady=(15,5))
         self.draft=tk.Text(tab,height=7,font=("Malgun Gothic",11),wrap="word")
         self.draft.grid(row=6,column=0,sticky="ew")
+        self.observation.bind("<KeyRelease>",lambda _e:self._schedule_comment_save())
+        self.draft.bind("<KeyRelease>",lambda _e:self._schedule_comment_save())
         persona_frame=ttk.Frame(tab); persona_frame.grid(row=7,column=0,sticky="w",pady=5)
         ttk.Label(persona_frame,text="채널별 댓글 페르소나").pack(side="left")
         self.comment_persona_choice=tk.StringVar(value=comments.PERSONAS["jp_morning_chill"]["name"])
@@ -857,6 +1135,7 @@ class Studio(tk.Tk):
 
     def go_comment(self):
         if not self.selected_video:return
+        if getattr(self,"comment_video",None):self._autosave_comment()
         self.comment_video=(self.active_id,self.selected_video)
         item=store.get_candidate(*self.comment_video)
         if hasattr(self,"comment_persona_combo"):
@@ -872,9 +1151,31 @@ class Studio(tk.Tk):
             self.comment_length.set(persona["length"])
         self.comment_label.set(item["channel_title"]+" · "+item["video_title"][:70])
         self.observation.delete("1.0",tk.END)
+        self.observation.insert("1.0",item.get("notes", ""))
         self.draft.delete("1.0",tk.END)
         self.draft.insert("1.0",item["draft"])
         self.tabs.select(self.frames[3])
+
+    def _schedule_comment_save(self):
+        if not getattr(self,"comment_video",None):return
+        if getattr(self,"_comment_save_after",None):
+            try:self.after_cancel(self._comment_save_after)
+            except tk.TclError:pass
+        self._comment_save_after=self.after(900,self._autosave_comment)
+
+    def _autosave_comment(self):
+        if getattr(self,"_comment_save_after",None):
+            try:self.after_cancel(self._comment_save_after)
+            except tk.TclError:pass
+            self._comment_save_after=None
+        target=getattr(self,"comment_video",None)
+        if not target or not hasattr(self,"observation") or not hasattr(self,"draft"):return
+        try:
+            item=store.get_candidate(*target)
+            if item:
+                store.update_candidate(*target,item["status"],self.observation.get("1.0",tk.END).strip(),
+                                       self.draft.get("1.0",tk.END).strip())
+        except (sqlite3.Error,OSError):self._safe_diagnostic("comment_draft_autosave_failed")
 
     def _save_comment_persona(self):
         if not self.comment_video:
@@ -1115,9 +1416,16 @@ class Studio(tk.Tk):
         results=ttk.Frame(body)
         detail=ttk.Frame(body)
         body.add(results,weight=2); body.add(detail,weight=3)
+        self.ai_result_filter=tk.StringVar(value="전체")
+        quick=ttk.Frame(results);quick.pack(fill="x",pady=(0,4))
+        ttk.Label(quick,text="빠른 보기").pack(side="left")
+        ttk.Combobox(quick,textvariable=self.ai_result_filter,
+            values=("전체","추천 적합","교차 장르","근거 부족","AI 실패","사람 확인 필요"),
+            state="readonly",width=15).pack(side="left",padx=5)
+        self.ai_result_filter.trace_add("write",lambda *_:self._ai_apply_filter())
         self.ai_tree=ttk.Treeview(results,columns=("decision","rule","ai","title"),show="headings",height=11)
         for col,label,width in (("decision","추천 결과",85),("rule","규칙",70),("ai","AI 의견",75),("title","후보 제목",300)):
-            self.ai_tree.heading(col,text=label); self.ai_tree.column(col,width=width,stretch=col=="title")
+            self.ai_tree.heading(col,text=label,command=lambda c=col:self._sort_tree_click(self.ai_tree,c,"ai")); self.ai_tree.column(col,width=width,stretch=col=="title")
         self.ai_tree.pack(fill="both",expand=True)
         self.ai_tree.bind("<<TreeviewSelect>>",self._ai_show_detail)
         self.ai_listen=tk.BooleanVar(value=False)
@@ -1157,6 +1465,8 @@ class Studio(tk.Tk):
         ttk.Label(tab,textvariable=self.autopilot_stage_text,wraplength=1050).grid(row=5,column=0,sticky="w",pady=4)
         self.autopilot_counts_text=tk.StringVar(value="검색 0회 · 후보 0 · 중복 0 · 추천 적합 0/10 · AI 0 · 사람 확인 0 · 잔여 예산 확인 전")
         ttk.Label(tab,textvariable=self.autopilot_counts_text,wraplength=1050).grid(row=6,column=0,sticky="new",pady=4)
+        self.autopilot_ai_stats=tk.StringVar(value="AI 요청 통계는 조사 완료 후 실제 요청·성공·실패·캐시·예산 차단을 구분해 표시합니다.")
+        ttk.Label(tab,textvariable=self.autopilot_ai_stats,wraplength=1050).grid(row=6,column=0,sticky="sew",pady=(30,4))
         detail=ttk.LabelFrame(tab,text="상세 설정 (필요할 때만 열기)")
         detail.grid(row=7,column=0,sticky="ew",pady=4)
         self.autopilot_detail_panel=ttk.Frame(detail)
@@ -1388,11 +1698,14 @@ class Studio(tk.Tk):
         if self.autopilot_controller.running or not self.autopilot_events.empty():
             self.after(100,self._autopilot_poll)
         elif self.autopilot_close_pending:
+            self._prepare_close()
             self.destroy()
 
     def _autopilot_render_result(self,result):
         report=result.report
         self.autopilot_saved_report=report
+        self.autopilot_ai_stats.set(
+            f"Gemini/AI 실제 요청 {report.get('ai_requests_used',0)} · 성공 {report.get('ai_request_success',0)} · 실패 {report.get('ai_request_failed',0)} · 캐시 재사용 {report.get('ai_cache_reused',0)} · 예산 차단 {report.get('ai_budget_blocked',0)} · 규칙만 처리 {report.get('rules_only_candidates',0)}")
         self.autopilot_progress.configure(value=100 if result.state=="complete" else self.autopilot_progress["value"])
         self.autopilot_stage_text.set(f"조사 {result.state} · 목표 {report.get('target_fits',0)}개 / 확보 {report.get('counts',{}).get('ai_recommended_fit',0)}개 / 부족 {report.get('shortfall',0)}개")
         self.autopilot_counts_text.set(f"검색 {report.get('search_calls_used',0)}회 / 잔여 {report.get('search_calls_remaining',0)} · 후보 {report.get('candidate_total',0)} · 중복 {report.get('duplicate_removed',0)} · 추천 적합 {report.get('counts',{}).get('ai_recommended_fit',0)}/{report.get('target_fits',0)} · AI 요청 {report.get('ai_requests_used',0)}/10 · 사람 확인 {report.get('counts',{}).get('human_verified',0)}")
@@ -1409,6 +1722,7 @@ class Studio(tk.Tk):
                 proposal=ai_research.proposed_verdict(store.get_profile(result.profile_id),item,row)
                 self.ai_tree.insert("","end",iid=item.video_id,values=(ai_research.PROPOSED_VERDICT_LABELS[proposal],item.rule_verdict,
                     item.ai_opinion.verdict if item.ai_opinion else "미호출",row.get("video_title",item.video_id)))
+        self._ai_apply_filter()
         self._autopilot_refresh_profile()
 
     def _autopilot_pause(self):
@@ -1447,7 +1761,16 @@ class Studio(tk.Tk):
             self.autopilot_stage_text.set("앱 종료 대기 · 현재 요청 완료 후 세션을 일시 정지 저장합니다.")
             self.after(100,self._autopilot_poll)
         else:
+            self._prepare_close()
             self.destroy()
+
+    def _prepare_close(self):
+        if getattr(self,"comment_video",None):self._autosave_comment()
+        if getattr(self,"_note_save_after",None) and getattr(self,"selected_video",None):
+            try:self.after_cancel(self._note_save_after)
+            except tk.TclError:pass
+            self._autosave_note()
+        self._write_ui_state()
 
     def _ai_refresh_credential_status(self):
         try:
@@ -1741,6 +2064,7 @@ class Studio(tk.Tk):
         self.ai_status.set(f"Demo 완료: {len(result)}개 가상 사례 · 네트워크/OAuth/API 호출 0 · DB 변경 0 · 모든 분류는 사람 승인 전까지 제안입니다.")
         children=self.ai_tree.get_children()
         if children: self.ai_tree.selection_set(children[0]); self._ai_show_detail()
+        self._ai_apply_filter()
 
     def _ai_cancel(self):
         if self.ai_cancel_event:
@@ -1887,14 +2211,62 @@ class Studio(tk.Tk):
                    f"불확실성: {opinion.uncertainty or '남아 있을 수 있음'}\n"
                    f"사람이 확인할 점: {opinion.recommended_human_check}\n")
         url=candidate.get("video_url") or candidate.get("url","")
+        if not url and re.fullmatch(r"[\w-]{11}",review.video_id):
+            url=f"https://www.youtube.com/watch?v={review.video_id}"
         text+=f"\n영상 URL: {url or 'Demo 가상 표본'}\n직접 영상을 듣고 최종 분류·승인을 판단하세요. 감상 체크는 자동 저장되지 않습니다."
         self.ai_detail.configure(state="normal"); self.ai_detail.delete("1.0","end"); self.ai_detail.insert("1.0",text); self.ai_detail.configure(state="disabled")
+
+    def _ai_refresh_saved_results(self):
+        if not self.active_id or not hasattr(self,"ai_tree"):return
+        selected=self.ai_tree.selection();selected_id=selected[0] if selected else None
+        try:
+            with store.connect() as db:
+                row=db.execute("SELECT reviews_json,candidates_json FROM research_sessions WHERE profile_id=? ORDER BY updated_at DESC LIMIT 1",(self.active_id,)).fetchone()
+            payload_reviews=json.loads(row[0]) if row else []
+            payload_candidates=json.loads(row[1]) if row else []
+            reviews=[ai_research._review_from_payload(item) for item in payload_reviews]
+        except (sqlite3.Error,ValueError,KeyError,TypeError):
+            self._safe_diagnostic("ai_saved_result_reload_failed");return
+        self.ai_tree.delete(*self.ai_tree.get_children())
+        self.ai_reviews={item.video_id:item for item in reviews}
+        self.ai_candidate_rows={str(item.get("video_id")):item for item in payload_candidates}
+        profile=store.get_profile(self.active_id)
+        for review in reviews:
+            candidate=self.ai_candidate_rows.get(review.video_id,{})
+            proposal=ai_research.proposed_verdict(profile,review,candidate)
+            ai_label=review.ai_opinion.verdict if review.ai_opinion else "미사용"
+            self.ai_tree.insert("","end",iid=review.video_id,values=(ai_research.PROPOSED_VERDICT_LABELS[proposal],review.rule_verdict,ai_label,candidate.get("video_title",review.video_id)))
+        if selected_id and self.ai_tree.exists(selected_id):self.ai_tree.selection_set(selected_id)
+        elif reviews:self.ai_tree.selection_set(reviews[0].video_id)
+        if self.ai_tree.selection():self._ai_show_detail()
+        self._ai_apply_filter()
+        self._autopilot_refresh_profile()
+
+    def _ai_apply_filter(self):
+        if not hasattr(self,"ai_tree"):return
+        choice=self.ai_result_filter.get()
+        for video_id,review in getattr(self,"ai_reviews",{}).items():
+            if not self.ai_tree.exists(video_id):continue
+            candidate=getattr(self,"ai_candidate_rows",{}).get(video_id,{})
+            proposal=ai_research.proposed_verdict(store.get_profile(review.profile_id),review,candidate)
+            opinion=review.ai_opinion
+            if choice=="전체":show=True
+            elif choice=="추천 적합":show=proposal=="auto_fit"
+            elif choice=="교차 장르":show=proposal in {"cross_genre_review","related_reference"}
+            elif choice=="근거 부족":show=not opinion or not opinion.evidence_from_metadata or bool(opinion.uncertainty)
+            elif choice=="AI 실패":show=review.ai_source=="failure"
+            else:show=review.rule_verdict=="검토" or (opinion is not None and opinion.recommended_human_check not in ("", "없음"))
+            parent=self.ai_tree.parent(video_id)
+            if show and not parent:self.ai_tree.move(video_id,"","end")
+            elif not show and parent=="":self.ai_tree.detach(video_id)
 
     def _ai_open_selected(self):
         selected=self.ai_tree.selection()
         if not selected: return
         candidate=getattr(self,"ai_candidate_rows",{}).get(selected[0],{})
         url=candidate.get("video_url") or candidate.get("url")
+        if not url and re.fullmatch(r"[\w-]{11}",selected[0]):
+            url=f"https://www.youtube.com/watch?v={selected[0]}"
         if url: webbrowser.open(url,new=2)
 
     def _ai_export_report(self):

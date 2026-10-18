@@ -14,6 +14,10 @@ with WorkspaceTemp() as temp:
     assert len(app.profiles)>=1
     assert app.active_id
     assert len(app.frames)==8
+    assert len(app.tabs.tabs())==9
+    assert app.tabs.tab(app.tabs.tabs()[0],"text")=="쉬운 시작"
+    assert callable(app.open_google_wizard)
+    assert callable(app._offer_recovery)
     assert hasattr(app,"autopilot_start_button")
     assert hasattr(app,"autopilot_exception_tree")
     assert hasattr(app,"autopilot_controller")

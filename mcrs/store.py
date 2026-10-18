@@ -49,6 +49,40 @@ def data_dir() -> Path:
 def db_path() -> Path:
     return data_dir()/"zisu_v2.db"
 
+def save_ui_state(state, path=None):
+    """Persist allow-listed, non-secret presentation state independently of research rows."""
+    allowed = {"profile_id", "tab_index", "selected_video_id", "search_term", "filter",
+               "decision_filter", "sort", "ai_target", "ai_max_calls", "ai_provider",
+               "ai_cost_estimate", "ai_cost_limit", "last_report_session"}
+    if not isinstance(state, dict) or set(state) - allowed:
+        raise ValueError("Invalid UI state fields.")
+    clean = {}
+    for key, value in state.items():
+        if value is None:
+            clean[key] = None
+        elif isinstance(value, (str, int, float, bool)):
+            clean[key] = str(value)[:500] if isinstance(value, str) else value
+        else:
+            raise ValueError("UI state must contain simple values only.")
+    payload = json.dumps(clean, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    with connect(path) as db:
+        db.execute("INSERT INTO ui_state(state_key,state_json) VALUES('main',?) "
+                   "ON CONFLICT(state_key) DO UPDATE SET state_json=excluded.state_json,updated_at=CURRENT_TIMESTAMP",
+                   (payload,))
+
+def load_ui_state(path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT state_json,updated_at FROM ui_state WHERE state_key='main'").fetchone()
+    if not row:
+        return None
+    try:
+        value = json.loads(row["state_json"])
+        if not isinstance(value, dict):
+            return None
+        return {"state": value, "updated_at": row["updated_at"]}
+    except (TypeError, json.JSONDecodeError):
+        return None
+
 @contextmanager
 def connect(path=None):
     target = Path(path or db_path())
@@ -161,6 +195,9 @@ def initialize(path=None):
           drafts_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id,session_id),
           FOREIGN KEY(profile_id,video_id) REFERENCES candidates(profile_id,video_id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS ui_state (
+          state_key TEXT PRIMARY KEY, state_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
           ON candidates(profile_id,genre_decision,status);
         """)

@@ -339,6 +339,8 @@ class AutopilotController:
             ai_usage = store.ai_usage_for_session(config.profile_id, run.session_id, self.path)
         else:
             ai_usage = {"requests": 0, "estimated_cost_usd": 0.0}
+        ai_sources = {key: sum(1 for item in run.reviews if item.ai_source == key)
+                      for key in ("success", "failure", "cache", "budget_blocked", "rules_only")}
         report = {
             "schema": 1, "generated_at": datetime.now(timezone.utc).isoformat(),
             "profile_id": config.profile_id, "profile_name": profile["name"],
@@ -354,6 +356,11 @@ class AutopilotController:
             "search_calls_remaining": max(0, config.max_search_calls - run.calls_used),
             "search_calls_approved": config.max_search_calls,
             "ai_reviewed_candidates": run.ai_review_count,
+            "ai_request_success": ai_sources["success"],
+            "ai_request_failed": ai_sources["failure"],
+            "ai_cache_reused": ai_sources["cache"],
+            "ai_budget_blocked": ai_sources["budget_blocked"],
+            "rules_only_candidates": ai_sources["rules_only"],
             "ai_requests_used": int(ai_usage["requests"]),
             "ai_request_limit": 10,
             "ai_requests_remaining": max(0, 10 - int(ai_usage["requests"])),
