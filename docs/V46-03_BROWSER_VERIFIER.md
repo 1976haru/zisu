@@ -6,24 +6,25 @@
 
 1. 전달받은 `ZISU_V46-03_Browser_Verifier.exe`를 Windows PC에 저장합니다.
 2. 파일을 더블클릭합니다. PowerShell 입력이나 관리자 권한은 필요하지 않습니다.
-3. Edge 또는 Chrome을 선택한 뒤 `브라우저 열기 테스트`를 누릅니다.
-4. 로컬 확인 페이지가 전용 창에 열리면 `같은 창 재사용 테스트`를 누릅니다.
-5. 브라우저 창의 X를 눌러 닫은 뒤 `브라우저 열기 테스트`를 다시 누릅니다. 화면이 사라졌지만 전용 Chromium 프로세스가 살아 있으면 같은 격리 프로필로 새 창을 요청하고, 프로세스가 완전히 끝났으면 새 격리 프로필을 만듭니다. 소유권을 확인할 수 없으면 새 창 생성을 보류하고 안내합니다.
-6. `전용 브라우저 닫기`를 눌러 정상 종료와 기존 브라우저 보존을 확인한 뒤, 다시 `브라우저 열기 테스트`를 눌러 재실행을 확인합니다.
-7. 위 열기/닫기 과정을 5회 반복하고 `결과 보고서 저장`을 누릅니다.
+3. Edge 또는 Chrome을 고른 다음 반복 횟수 `5회` 또는 `20회`를 선택합니다.
+4. `전체 자동 테스트 시작`을 한 번 누릅니다. 프로그램이 로컬 페이지 열기, 같은 격리 창 재사용, 해당 창에만 WM_CLOSE 전송(X 버튼 동작과 동일), 닫힘 확인, 같은 프로필로 재실행을 순서대로 수행합니다.
+5. 마지막 반복 후 전용 창과 소유 자식 프로세스를 정상 종료하고, 테스트 전 일반 Chrome/Edge PID가 유지됐는지 확인합니다. 실패나 소유권 불확실성이 생기면 추가 반복을 중지하고 실패 원인을 기록합니다.
+6. 완료 화면에서 총 회수, 성공/실패, 잔류 프로세스, 최대 전용 브라우저 메모리, 최종 판정과 저장 경로를 확인합니다. 보고서는 자동 저장되며 필요하면 `결과 보고서 저장`으로 다시 저장할 수 있습니다.
 
 보고서는 `%LOCALAPPDATA%\ZisuSignalLab\BrowserVerification\<실행 ID>\browser-verification-report.json`에 저장됩니다. 실패하거나 테스트를 끝내기 전에 보고서를 저장하면 PASS가 아니라 미완료/실패로 기록됩니다.
 
-이 프로그램은 임의의 브라우저 프로필을 복사하지 않으며 보안 정책을 바꾸거나 `--no-sandbox`를 사용하지 않습니다. 닫기 검증은 도구가 직접 시작해 소유권을 확인한 테스트 프로세스만 대상으로 합니다. X 닫기 이후의 재실행은 창이 실제로 닫힌 것을 확인한 후 진행합니다. 사용자의 일반 브라우저를 일괄 종료하지 않습니다. 테스트 중 Windows 보안 경고를 우회하지 마세요.
+이 프로그램은 임의의 브라우저 프로필을 복사하지 않으며 보안 정책을 바꾸거나 `--no-sandbox`를 사용하지 않습니다. 닫기 검증은 도구가 직접 시작해 실행 경로와 격리 프로필을 확인한 테스트 프로세스의 창에만 요청합니다. X 닫기 이후 재실행은 창이 안정적으로 사라진 것을 확인한 후 진행합니다. 사용자의 일반 브라우저를 일괄 종료하지 않습니다. 테스트 중 Windows 보안 경고를 우회하지 마세요.
 
-Codex에서 실행하지 못한 것은 일반 Windows 데스크톱의 실패를 의미하지 않습니다. 보고서를 전달하면 실제 브라우저 창 검증 게이트를 판정할 수 있습니다. 브라우저가 실행되지 않으면 저장된 FAIL 보고서와 종료 코드만 공유하면 되며, 사용자명이나 비밀정보는 포함되지 않습니다.
+판정은 로컬 HTTP 요청 수신과 전용 프로필 소유 창 개수의 안정 구간을 각각 사용합니다. 브라우저 호출이 시간 초과되어도 실제 로컬 페이지가 도착했고, 동일 격리 프로필의 소유 창 1개가 안정적으로 관찰되면 그 증거를 함께 기록해 일시적인 메트릭 지연과 실제 실패를 구분합니다. 페이지 도달만으로는 통과시키지 않습니다.
+
+Codex에서 실행하지 못한 것은 일반 Windows 데스크톱의 실패를 의미하지 않습니다. 현재 제한된 Codex Windows 세션의 Chrome 자동 실행은 로컬 페이지 요청 전에 종료 코드 `4294930433`으로 실패했습니다. 이는 자동화 코드의 Mock 통과나 실제 GUI 시작과 별개인 브라우저 실행 결과이며, 실제 사용자 데스크톱 5회 PASS는 아직 검증되지 않았습니다. 보고서를 전달하면 실제 브라우저 창 검증 게이트를 판정할 수 있습니다. 브라우저가 실행되지 않으면 저장된 FAIL 보고서와 종료 코드만 공유하면 되며, 사용자명이나 비밀정보는 포함되지 않습니다.
 ## Lifecycle diagnostics update (2026-10-18)
 
 The verifier now records lifecycle states `STARTING`, `OPEN`, `USER_CLOSED`, `BACKGROUND_PROCESS_ONLY`, `CLOSING`, `CLOSED`, and `ERROR`. A normal exit code 0 is recorded as a clean close, not a crash. A missing window with a still-running owned Chromium process is reported separately.
 
-Latest build (Windows 10 22H2 build 19045, Python 3.10.11 build environment, PyInstaller 6.14.2): `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_XCloseRecovery_20261018_1610\dist\ZISU_V46-03_Browser_Verifier\ZISU_V46-03_Browser_Verifier.exe`. SHA-256: `8135370d5ff6627f459e3789649cfe2bb8e41d28b3f9652eaf5d1a2522450f07`. ZIP: `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_XCloseRecovery_20261018_1610\dist\ZISU_V46-03_Browser_Verifier.zip` (SHA-256 `51ff7d74f2f7c79b1065533ee8af661aefb657edb2c13ddd4174e4bb426a5dfe`). The bundle is onedir: extract the complete ZIP and keep `_internal` beside the EXE.
+Latest build is an onedir Windows package; extract the complete ZIP and keep `_internal` beside the EXE. Use the current handoff path and SHA-256 from the release report, not historical artifact paths recorded in older status notes.
 
-For the five-cycle check, open the test window, close it with its X button, then use **X 닫기 확인 후 다시 열기**. Repeat this sequence five times. The report records each attempt, the user-confirmed close, whether the manager saw zero windows, local-page load, window/process count, verified PIDs, exit code, close reason, and CPU/RAM samples. User-confirmed intent is kept separate from process-observed evidence.
+For the automated check, choose `5회` (recommended) or `20회` and click **전체 자동 테스트 시작** once. The report records every lifecycle stage and actual pass/fail, timestamp, local-page request, window/process count, owned PIDs, exit code, close reason, CPU/RAM, owned-process RSS/handle count, and whether baseline browser PIDs remained. A failure stops further cycles and is never converted into a pass.
 
 PID recovery is accepted only when the process executable matches the selected Edge/Chrome binary and its parsed `--user-data-dir` argument exactly matches the isolated verifier profile. Stale PID identities are discarded before process-tree expansion. No process is selected or terminated by image name alone.
 

@@ -162,6 +162,24 @@ class ResearchBrowserManager:
     def recovery_available(self) -> bool:
         return bool(self._recovery_record)
 
+    def request_close_owned_windows(self) -> tuple[int, ...]:
+        """Ask only this session's verified browser windows to close normally.
+
+        This is the non-forcing equivalent of a user clicking the window's X.
+        It never searches for or closes browser processes by image name.
+        """
+        with self._lock:
+            if not self.session:
+                return ()
+            self._refresh_owned_processes(self.session)
+            metrics = self.metrics()
+            pids = set(metrics.child_process_ids)
+            if metrics.root_pid:
+                pids.add(metrics.root_pid)
+            _close_owned_windows(pids)
+            self.session.last_close_reason = "verifier_requested_wm_close"
+            return tuple(sorted(pids))
+
     def open_selected(self, url: str, *, user_approved: bool = False) -> BrowserMetrics:
         if not user_approved:
             raise BrowserError("연구용 인터넷 창을 열려면 사용자가 먼저 승인해야 합니다.")
