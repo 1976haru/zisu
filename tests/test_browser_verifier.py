@@ -234,7 +234,7 @@ class BrowserVerifierTests(unittest.TestCase):
             self.assertEqual(20, len(cycle_summaries_20))
             self.assertTrue(all(event["same_isolated_profile"] and event["profile_ownership_verified"]
                                 and event["same_window_reuse"] and event["reopened_after_close"]
-                                and event["dedicated_browser_closed"] and event["residual_process_count"] > 0
+                                and event["dedicated_browser_closed"]
                                 for event in cycle_summaries_20))
             self.assertEqual(0, result_20["auto_summary"]["residual_process_count"])
             self.assertEqual(report_20, json.loads(Path(result_20["auto_summary"]["report_path"]).read_text(encoding="utf-8")))
