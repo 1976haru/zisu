@@ -208,7 +208,8 @@ class ResearchSchedulerTests(unittest.TestCase):
         approved = autopilot.AutopilotController._settings(config, None)
         store.save_autopilot_settings(self.jp, research_id, approved, self.db)
         scheduler.checkpoint(session["id"], self.jp,
-            {"autopilot_session_id": research_id, "processed_video_ids": []}, self.db)
+            {"autopilot_session_id": research_id, "processed_video_ids": []}, self.db,
+            now=self.now)
         scheduler.request_resource_pause(session["id"], self.jp, "system_ram_low", self.db, now=self.now)
         guard = ResourceGuard()
         healthy = lambda: ResourceSnapshot(100, 20, 4*1024**3, 40, 100)
