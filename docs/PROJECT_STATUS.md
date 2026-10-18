@@ -4,7 +4,7 @@ Last checked: 2026-10-18 11:47 KST (V46-02 account/channel mapping and scoped re
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Latest V4.6.0 code before this work: `476cdae9a15031e6178eb59fce314db0d3d18161`; V46-02 changes are being committed locally (not pushed)
+Latest V4.6.0 code commit: `f0eeac760cc16e391ab8ebd0089bf13ad7b0ce3b` (local, not pushed; parent before V46-02: `476cdae9a15031e6178eb59fce314db0d3d18161`)
 Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
