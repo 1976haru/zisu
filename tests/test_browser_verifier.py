@@ -192,6 +192,9 @@ class BrowserVerifierTests(unittest.TestCase):
             report_path = Path(result["auto_summary"]["report_path"])
             payload = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["final_verdict"], "PASS")
+            self.assertEqual(payload["run_id"], result["auto_summary"]["run_id"])
+            self.assertTrue(all(item.get("run_id") == payload["run_id"] for item in payload["events"]))
+            self.assertEqual(payload, app._last_committed_auto_report)
             self.assertTrue(any(event["event_stage"] == "D_REOPEN_AFTER_CLOSE"
                                 for event in payload["events"]))
             self.assertEqual(app._manager.open_count, 15)
@@ -204,6 +207,14 @@ class BrowserVerifierTests(unittest.TestCase):
             self.assertTrue(all(event["same_isolated_profile"] and event["profile_ownership_verified"]
                                 for event in cycles))
             self.assertTrue(all(event["profile_path"] for event in cycles))
+            # Simulate the GUI queue not yet copying worker-local results when Save is invoked.
+            class Detail:
+                def set(self, _value): pass
+            app.detail_var = Detail()
+            app.events = []
+            app._auto_summary = None
+            app._save_report()
+            self.assertEqual(json.loads(report_path.read_text(encoding="utf-8")), payload)
             class Root:
                 destroyed = False
                 def destroy(self): self.destroyed = True
@@ -447,6 +458,35 @@ class BrowserVerifierTests(unittest.TestCase):
             import shutil
             if app.test_root.exists(): shutil.rmtree(app.test_root)
 
+    def test_late_close_request_does_not_replace_completed_auto_report_with_cancelled_state(self):
+        import threading, queue, time
+        from mcrs.browser_verifier import BrowserVerifierApp
+        class Widget:
+            def configure(self, **kwargs): pass
+            def set(self, _value): pass
+            def get(self): return "Google Chrome"
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._busy = False; app._closing = False; app._cancel_event = threading.Event()
+        app._buttons = []; app._cancel_button = Widget(); app.status_var = Widget()
+        app.browser_var = Widget()
+        app.messages = queue.Queue(); app._event_lock = threading.RLock()
+        started, release = threading.Event(), threading.Event()
+        def finished_operation():
+            started.set(); release.wait(2)
+            return {"state": "PASS", "final_verdict": "PASS",
+                "auto_summary": {"run_id": "run-final", "report_state": "FINAL",
+                                 "final_verdict": "PASS"}}
+        app._run_async("automatic test", finished_operation)
+        self.assertTrue(started.wait(1))
+        app._cancel_event.set()  # Simulate X arriving just before the worker publishes its result.
+        release.set()
+        deadline = time.monotonic() + 2
+        while app._worker_thread.is_alive() and time.monotonic() < deadline:
+            app._worker_thread.join(0.02)
+        result = app.messages.get(timeout=1)
+        self.assertTrue(result[0])
+        self.assertNotIn("cancelled", result[2])
+
     def test_close_before_check_and_after_browser_failure_does_not_block(self):
         from mcrs.browser_verifier import BrowserVerifierApp
 
@@ -507,6 +547,85 @@ class BrowserVerifierTests(unittest.TestCase):
         payload = build_report([], "Google Chrome", {"final_verdict": "CANCELLED", "completed_cycles": 1})
         self.assertEqual("CANCELLED", payload["result"])
         self.assertEqual("CANCELLED", payload["final_verdict"])
+        self.assertEqual("automatic_test_report_has_no_events", payload["diagnostic_error"])
+
+    def test_empty_automatic_run_is_never_reported_as_pass(self):
+        payload = build_report([], "Google Chrome", {"final_verdict": "PASS", "completed_cycles": 0})
+        self.assertEqual("INCOMPLETE_OR_FAIL", payload["result"])
+        self.assertEqual("automatic_test_report_has_no_events", payload["diagnostic_error"])
+
+    def test_preflight_failure_has_zero_completed_and_cycle_failure_counts(self):
+        import queue, threading
+        from mcrs.browser_verifier import BrowserVerifierApp
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app.test_root = Path(".test_tmp") / f"auto-preflight-{uuid.uuid4().hex}"
+        app._selected_browser = "Google Chrome"; app._manager_for_selected = lambda: (_ for _ in ()).throw(RuntimeError("safe mock"))
+        app.events = []; app.messages = queue.Queue(); app._event_lock = threading.RLock()
+        app._active_events = []; app._active_summary = None
+        try:
+            result = app._run_full_auto_test(5)
+            summary = result["auto_summary"]
+            self.assertEqual(0, summary["completed_cycles"])
+            self.assertEqual(0, summary["success_count"] + summary["failure_count"])
+            self.assertEqual(1, summary["stage_failure_count"])
+            report = json.loads(Path(summary["report_path"]).read_text(encoding="utf-8"))
+            self.assertTrue(report["events"])
+            self.assertEqual(summary["run_id"], report["run_id"])
+        finally:
+            import shutil
+            if app.test_root.exists(): shutil.rmtree(app.test_root)
+
+    def test_five_failed_rounds_are_saved_and_do_not_stop_after_ordinary_failure(self):
+        import queue
+        from mcrs.browser_verifier import BrowserVerifierApp
+
+        class FakeManager:
+            def __init__(self, profile):
+                self.profile_dir = Path(profile); self.profile_dir.mkdir(parents=True)
+                self.session = None
+            def metrics(self):
+                return BrowserMetrics(bool(self.session), 701 if self.session else None,
+                    1 if self.session else 0, 100, 1 if self.session else 0,
+                    (702,) if self.session else (), lifecycle_state="OPEN" if self.session else "CLOSED")
+            def profile_ownership_evidence(self):
+                if self.session is None:
+                    return {"verified": False, "profile_path": None, "owned_pids": []}
+                return {"verified": True, "profile_path": str(self.profile_dir), "owned_pids": [701]}
+            def open_selected(self, *_args, **_kwargs):
+                self.session = SimpleNamespace(profile_dir=str(self.profile_dir))
+                return self.metrics()
+            def close_owned(self, **_kwargs):
+                self.session = None
+                return SimpleNamespace(closed=True, forced_process_ids=(), residual_process_ids=(),
+                    rss_before_bytes=100, rss_after_bytes=0)
+
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._selected_browser = "Google Chrome"; app._server = app._server_thread = None
+        app.test_root = Path(".test_tmp") / f"auto-all-fail-{uuid.uuid4().hex}"
+        app.events = []; app.messages = queue.Queue(); app._baseline_processes = set()
+        app._event_lock = __import__("threading").RLock(); app._active_events = []
+        manager = FakeManager(app.test_root / "profile")
+        app._manager = manager; app._manager_for_selected = lambda: manager
+        app._await_page = lambda *_args, **_kwargs: False
+        try:
+            with patch("mcrs.browser_verifier.browser_processes", return_value=set()), \
+                    patch("mcrs.browser_verifier.wait_for_window_state", return_value=None):
+                result = app._run_full_auto_test(5)
+            self.assertEqual("INCOMPLETE_OR_FAIL", result["final_verdict"])
+            self.assertEqual(5, result["auto_summary"]["requested_cycles"])
+            self.assertEqual(5, result["auto_summary"]["completed_cycles"])
+            self.assertEqual(0, result["auto_summary"]["success_count"])
+            self.assertEqual(5, result["auto_summary"]["failure_count"])
+            report = json.loads(Path(result["auto_summary"]["report_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(result["auto_summary"]["run_id"], report["run_id"])
+            cycle_events = [event for event in report["events"] if event.get("event_stage") == "CYCLE_SUMMARY"]
+            self.assertEqual(5, len(cycle_events))
+            self.assertTrue(all(event["state"] == "FAIL" for event in cycle_events))
+            self.assertEqual(report["events"], json.loads(Path(result["auto_summary"]["report_path"]).read_text(encoding="utf-8"))["events"])
+        finally:
+            app._stop_server()
+            import shutil
+            if app.test_root.exists(): shutil.rmtree(app.test_root)
 
     def test_gui_destroy_never_waits_for_local_server_shutdown(self):
         import threading, time
