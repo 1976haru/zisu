@@ -4,7 +4,7 @@ Last checked: 2026-10-18 (V46-03 dedicated browser lifecycle implementation and 
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Latest V4.6.0 baseline before V46-03 changes: `5853f2ca78490d886f947b72967d0f596cd9d8ba` (current browser work is uncommitted pending scoped verification)
+V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implementation is committed on the requested feature branch (see current Git HEAD).
 Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
@@ -73,7 +73,7 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
 ## Immediate constraints and next order
 
-No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Next backlog item is V46-03 dedicated browser lifecycle; V46-RESOURCE-01 long-run validation and V46-04 dashboard/DPI work remain. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
+No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Next: diagnose why installed Chrome/Edge exited before creating a visible isolated window; then continue V46-04 dashboard/DPI work. V46-RESOURCE-01 long-run validation remains. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
 
 ### V46-RESOURCE-01 continuation (2026-10-18)
 
