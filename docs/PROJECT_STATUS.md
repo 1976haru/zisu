@@ -1,13 +1,13 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-03 automatic-report persistence fix; 49 scoped checks: 48 PASS and 1 opt-in browser SKIP; rebuilt verifier GUI/package checks PASS)
+Last checked: 2026-10-18 (V46-04 dashboard refresh-state preservation; focused regressions PASS; V46-03 user Chrome gate unchanged)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
 V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implementation is committed on the requested feature branch (see current Git HEAD).
 Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
-Latest estimates under the existing backlog method: overall ZISU **85%**, V4.5.9 stabilization **91%**, V4.6.0 **76%**, V46-03 **91%**. These are estimates; current verified test results and artifact hashes are in the latest V46-03 report-persistence section below.
+Latest estimates recomputed from the fixed backlog weights: overall ZISU **86.18%**; V4.5.9 stabilization/release scope **90.83%** across STAB-01/02/REL-01; V4.6.0 **79.20%** across its eight weighted rows; V46-03 **91%**; P0 V46-01/V46-02/V46-RESOURCE-01 **81.11%**. These are weighted implementation-maturity estimates, not test pass rates. The value changed because the current backlog row values supersede the stale 85%/76% summary; no external/real-world gate is being counted as passed.
 
 ## Progress
 
@@ -247,3 +247,11 @@ Next in backlog order after this task: implement V46-06 safe-stop handling for n
 - Code and tests were committed locally on `feature/v4.5-ai-research-manager` as `173d7e653e567694f4c1961cfbd4d4f684b91e7c`; no push, PR update, or CI run was attempted.
 - Final onedir verifier artifact (not installed over V4.5.9): `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_ProfileFix_Release_20261018_165939\dist\ZISU_V46-03_Browser_Verifier\ZISU_V46-03_Browser_Verifier.exe`; EXE SHA-256 `5f9d8b4271fef8d9822151fbe7364af35a09e5ac88c3253b1af008c040f0162a`; ZIP SHA-256 `d10da0c67a65b59c327a2b4de886dd5a4cc34aced662408c16f2dc73699af7b5`. The final packaged GUI displayed its title, stayed alive 10 seconds and closed normally with exit 0, with isolated LOCALAPPDATA and no PYTHONPATH/PYTHONHOME.
 - Actual isolated Chrome automatic run: **5 requested / 5 completed / 0 successful / 5 failed**, all before loopback page load with exit `4294930433`; zero residual owned processes. The safe report is at `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_ProfileFix_20261018_165240\isolated-browser-localappdata\ZisuSignalLab\BrowserVerification\actual-codex-5-cycle\browser-verification-report.json`. This Codex session cannot validate normal-user Chrome behavior, so the user's desktop profile-verdict retest remains necessary. No user browser/profile, V4.5.9 install, DB, OAuth, or DPAPI store was changed; no external YouTube/Gemini request was made.
+
+### V4.6.0 acceleration batch: dashboard refresh state and backlog recalculation (2026-10-18)
+
+- Implemented `mcrs/dashboard_tree_state.py` and wired it into `Studio._dashboard_refresh()`. The timed refresh now preserves expanded/collapsed account/channel rows, current Treeview selection, keyboard focus and vertical scroll. If a previously selected row no longer exists, it safely falls back to the active profile. This fixes a UI-state reset in the existing 15-second refresh; it does not change active-profile data or persist credentials.
+- Added `tests/test_dashboard_tree_state.py` for state restoration and stale-item fallback. Existing dashboard, discovery-diversity, and network/quota code paths were reviewed and retained rather than duplicated. No new browser code or EXE build was performed.
+- Weighted recalculation using the fixed MASTER_BACKLOG weights: overall **86.18%**; V4.5.9/release **90.83%**; V4.6.0 **79.20%**; core V4.6 P0 (V46-01/02/RESOURCE-01) **81.11%**; V46-03 **91% estimated**. These are estimates from row maturity values; user-environment gates remain separate.
+- Focused validation: dashboard-tree **2**, dashboard data **3**, candidate diversity **6**, network/quota **9** = **20/20 PASS**; `python -m compileall -q mcrs tests` PASS; `python tests/smoke_gui.py` returned `GUI_SMOKE_PASS`; `git diff --check` PASS. This does not constitute the deferred full regression/final QA. The mechanical 100/125/150/200% Tk scaling check is present in GUI smoke; no visual/screenshot DPI validation was captured.
+- V46-03 implementation remains unchanged at 91%; user's Chrome 5-cycle verification is still an external gate. V46-05 live Japanese search/human quality and V46-06 actual shared-project quota/auth remain unverified. No YouTube/Gemini/OAuth requests, user DB/DPAPI access, V4.5.9 installation changes, browser process actions, push, CI or install occurred. GitHub auth remains previously blocked in Codex; no remote status was refreshed.

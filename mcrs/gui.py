@@ -34,6 +34,7 @@ from .analytics import (AnalyticsClient, AnalyticsCredentialManager, AnalyticsEr
                         AnalyticsRepository, dashboard_view, project_scope_hash,
                         begin_analytics_consent)
 from .branding import DISPLAY_NAME, KOREAN_NAME, SLOGAN, apply_window_branding
+from .dashboard_tree_state import snapshot as snapshot_dashboard_tree, restore as restore_dashboard_tree
 from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
@@ -430,6 +431,7 @@ class Studio(tk.Tk):
 
     def _dashboard_refresh(self):
         if not hasattr(self,"dashboard_channels"):return
+        tree_state=snapshot_dashboard_tree(self.dashboard_channels)
         self.dashboard_channels.delete(*self.dashboard_channels.get_children())
         self._dashboard_tree_profiles={}
         accounts=store.list_google_accounts()
@@ -458,8 +460,8 @@ class Studio(tk.Tk):
         if unlinked:
             self.dashboard_channels.insert("","end",iid="unlinked",text="Google 미연결 프로필",values=("","","연결 전"),open=True)
             for profile in unlinked:self._dashboard_insert_profile("unlinked",profile)
-        if self.active_id and self.dashboard_channels.exists("profile:"+self.active_id):
-            node="profile:"+self.active_id;self.dashboard_channels.selection_set(node);self.dashboard_channels.focus(node)
+        fallback="profile:"+self.active_id if self.active_id else ""
+        restore_dashboard_tree(self.dashboard_channels,tree_state,fallback)
         profile=store.dashboard_summary(self.active_id) if self.active_id else None
         if not profile:
             self._refresh_analytics_panel(None)
