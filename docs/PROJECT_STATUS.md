@@ -104,6 +104,7 @@ No data-loss or credential issue was found; prior tasks did not open or modify t
 - No actual Google OAuth, YouTube Analytics/Reporting API or Gemini call was made. No real user DB, OAuth token or existing Gemini DPAPI key was read or changed. No Windows EXE build/install or live Analytics dashboard visual check was performed. A fake protector tests the new Analytics DPAPI-vault boundary; it does not prove the current Windows user's real DPAPI round trip.
 - Official contract checked: Analytics channel reports/query parameters and channel IDs/scopes; read-only scope is `https://www.googleapis.com/auth/yt-analytics.readonly`. Thumbnail impressions/CTR appear in the separate Reporting API Reach report (`channel_reach_basic_a1`), not the integrated query reports. See linked official API references in the handoff report.
 - Next gates remain V46-03 actual page navigation/clean close, V46-04 visual DPI, V46-05 human/live discovery quality, V46-06 real project quota/auth reconciliation, V46-07 authorized live consent/data validation, V46-RESOURCE-01 real long run, V46-BRAND-01 and final Windows/package QA. Do not interpret the offline implementation as a live feature verification.
+- Local commit: `43f847a9f6a3db77c5ddb4202b9242073295e728` (`feat: add read-only YouTube Analytics reporting`); tree clean after commit. No push/CI refresh or EXE build/install was performed. Git still reports permission-denied enumeration for three pre-existing temporary directories; they were left untouched.
 
 ### V46-RESOURCE-01 continuation (2026-10-18)
 
