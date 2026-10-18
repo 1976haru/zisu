@@ -32,7 +32,7 @@ class NetworkQuotaSafetyTests(unittest.TestCase):
     def test_http_statuses_are_normalized_without_provider_body(self):
         cases = [(401, "", "auth_required"), (403, "quotaExceeded", "quota_exhausted"),
                  (403, "forbidden", "permission_denied"), (429, "", "rate_limited"),
-                 (503, "", "server_error")]
+                 (500, "", "server_error"), (503, "", "server_error")]
         for status, reason, expected in cases:
             with self.subTest(status=status, reason=reason), patch.object(
                     youtube_api, "urlopen", side_effect=self._http_error(status, reason)):

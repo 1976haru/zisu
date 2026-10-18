@@ -111,6 +111,8 @@ class AnalyticsTests(unittest.TestCase):
         self.assertEqual(2,view["metrics"]["views_change"])
         self.assertEqual(1,view["metrics"]["subscriber_change"])
         self.assertEqual("video-one",view["top_videos"][0]["video"])
+        self.assertEqual("JP",view["countries"][0]["country"])
+        self.assertEqual("RELATED_VIDEO",view["traffic_sources"][0]["insightTrafficSourceType"])
 
     def test_missing_scope_and_wrong_account_never_send_request(self):
         calls=[]
