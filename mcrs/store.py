@@ -250,6 +250,9 @@ def initialize(path=None):
         _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
         _add_column(db, "research_schedules", "pause_reason TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "research_schedules", "research_extension_cycle INTEGER NOT NULL DEFAULT -1")
+        _add_column(db, "research_schedules", "research_extension_seconds INTEGER NOT NULL DEFAULT 0")
+        _add_column(db, "research_schedules", "research_extension_used INTEGER NOT NULL DEFAULT 0")
         _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
         _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
         for definition in (

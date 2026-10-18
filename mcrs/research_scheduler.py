@@ -71,6 +71,30 @@ def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(timezone.utc)
 
 
+def _phase_at(item: dict, elapsed: int) -> tuple[str, int]:
+    """Return phase and time remaining in phase, accounting for one saved extension."""
+    research = int(item["research_minutes"]) * 60
+    rest = int(item["break_minutes"]) * 60
+    cycle = research + rest
+    extension = int(item.get("research_extension_seconds", 0) or 0)
+    raw_extension_cycle = item.get("research_extension_cycle", -1)
+    extension_cycle = int(-1 if raw_extension_cycle is None else raw_extension_cycle)
+    if extension > 0 and extension_cycle >= 0:
+        start = extension_cycle * cycle
+        research_end = start + research + extension
+        break_end = research_end + rest
+        if elapsed < start:
+            remaining = elapsed % cycle
+            return ("research", research - remaining) if remaining < research else ("break", cycle - remaining)
+        if elapsed < research_end:
+            return "research", research_end - elapsed
+        if elapsed < break_end:
+            return "break", break_end - elapsed
+        elapsed -= extension
+    offset = elapsed % cycle
+    return ("research", research - offset) if offset < research else ("break", cycle - offset)
+
+
 def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) -> dict:
     """Persist a schedule with immutable profile/genre/channel scope."""
     config.validate()
@@ -125,6 +149,7 @@ def get(session_id: str, profile_id: str, path=None, *, now: datetime | None = N
                 item["phase"] = "waiting"
                 item["elapsed_seconds"] = 0
                 item["remaining_seconds"] = max(0, int((start - current).total_seconds()))
+                item["phase_remaining_seconds"] = item["remaining_seconds"]
                 return item
             state = "running"
             elapsed = 0
@@ -133,17 +158,21 @@ def get(session_id: str, profile_id: str, path=None, *, now: datetime | None = N
             elapsed += max(0, int((current - _parse(running_since)).total_seconds()))
         elif state == "running" and old_state == "scheduled":
             elapsed = max(0, int((current - _parse(running_since)).total_seconds()))
-        total = int(item["total_minutes"]) * 60
+        phase_remaining = 0
+        extension = int(item.get("research_extension_seconds", 0) or 0)
+        total = int(item["total_minutes"]) * 60 + extension
         elapsed = min(elapsed, total)
         if elapsed >= total:
             state, phase = "completed", "complete"
             elapsed = total
             running_since = ""
         elif state == "running":
-            cycle = (int(item["research_minutes"]) + int(item["break_minutes"])) * 60
-            phase = "research" if elapsed % cycle < int(item["research_minutes"]) * 60 else "break"
+            phase, phase_remaining = _phase_at(item, elapsed)
+        else:
+            phase_remaining = 0
         item.update(state=state, phase=phase, elapsed_seconds=elapsed,
                     remaining_seconds=max(0, total - elapsed),
+                    phase_remaining_seconds=phase_remaining,
                     search_calls_remaining=max(0, int(item["approved_search_calls"]) - int(item["search_calls_used"])))
         if state != old_state or phase != old_phase:
             # Re-anchor the monotonic wall-clock accounting at phase changes;
@@ -183,12 +212,38 @@ def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None 
         raise ValueError("Only a paused research session can be resumed.")
     if item["search_in_flight"]:
         raise UnresolvedSearchCall("A search may have reached YouTube; it must be reconciled before resuming.")
-    cycle = (int(item["research_minutes"]) + int(item["break_minutes"])) * 60
-    phase = "research" if item["elapsed_seconds"] % cycle < int(item["research_minutes"]) * 60 else "break"
+    phase, _ = _phase_at(item, item["elapsed_seconds"])
     with store.connect(path) as db:
         db.execute("UPDATE research_schedules SET state='running',phase=?,pause_reason='',running_since_utc=?,"
                    "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND state='paused'",
                    (phase, _stamp(current), session_id, profile_id))
+    return get(session_id, profile_id, path, now=current)
+
+
+def extend_current_research(session_id: str, profile_id: str, path=None, *,
+                            extension_seconds: int = 600, now: datetime | None = None) -> dict:
+    """Persist one user-approved ten-minute extension before a research block ends."""
+    if isinstance(extension_seconds, bool) or extension_seconds != 600:
+        raise ValueError("A single research extension is fixed to ten minutes.")
+    current = _utc(now)
+    item = get(session_id, profile_id, path, now=current)
+    if not item or item["state"] != "running" or item["phase"] != "research":
+        raise ValueError("Only an active research phase can be extended.")
+    if item.get("research_extension_used"):
+        raise ValueError("This schedule has already used its one-time extension.")
+    if int(item.get("phase_remaining_seconds", 0)) > 60:
+        raise ValueError("A research phase can only be extended during its final minute.")
+    if item.get("search_in_flight"):
+        raise UnresolvedSearchCall("Wait for the active search to finish before extending.")
+    cycle = (int(item["research_minutes"]) + int(item["break_minutes"])) * 60
+    cycle_index = int(item["elapsed_seconds"]) // cycle
+    with store.connect(path) as db:
+        changed = db.execute("UPDATE research_schedules SET research_extension_cycle=?,"
+            "research_extension_seconds=600,research_extension_used=1,updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND profile_id=? AND research_extension_used=0 AND state='running'",
+            (cycle_index, session_id, profile_id)).rowcount
+        if changed != 1:
+            raise ValueError("The schedule changed before the extension was saved.")
     return get(session_id, profile_id, path, now=current)
 
 

@@ -25,6 +25,8 @@ from . import timers
 from . import autopilot
 from . import research_scheduler
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
+from .research_browser import (ResearchBrowserManager, BrowserError, BrowserResourceDeferred,
+                               BrowserOwnershipUncertain)
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .startup_probe import write_stage as _write_smoke_stage
@@ -206,6 +208,12 @@ class Studio(tk.Tk):
         self._restore_ui_state()
         if first_run and not smoke_report:
             self.after(150, self.start_onboarding)
+        self._check_research_browser_schedule()
+        now=time.monotonic()
+        if now-getattr(self,"_browser_metrics_checked_at",0)>=15 and getattr(self,"research_browser",None):
+            self._browser_metrics_checked_at=now
+            try:self._research_browser_show_metrics(self.research_browser.metrics())
+            except Exception:pass
         self.after(1000,self._tick)
         self.after(14000,self._scheduled_tick)
         if smoke_report:
@@ -289,6 +297,9 @@ class Studio(tk.Tk):
         ttk.Button(row,text="이전 작업 복원",command=self._offer_recovery).pack(side="left",padx=4)
         ttk.Button(row,text="도움말",command=lambda:self.tabs.select(self.frames[5])).pack(side="left",padx=4)
         ttk.Label(tab,text="Google 로그인과 영상 확인은 직접 하며, ZISU는 읽기 전용으로 조사합니다.",wraplength=900).grid(row=4,column=0,sticky="w",pady=12)
+        browser_row=ttk.Frame(tab); browser_row.grid(row=5,column=0,sticky="ew",pady=4)
+        ttk.Button(browser_row,text="연구 시간 설정",command=lambda:self.tabs.select(self.frames[7])).pack(side="left",padx=4)
+        ttk.Button(browser_row,text="현재 영상 보기",command=self._research_browser_open).pack(side="left",padx=4)
         tab.bind_all("<Return>", self._easy_enter, add="+")
 
     def _easy_enter(self, _event=None):
@@ -1460,7 +1471,7 @@ class Studio(tk.Tk):
 
     def _autopilot_ui(self,tab):
         tab.columnconfigure(0,weight=1)
-        tab.rowconfigure(14,weight=1)
+        tab.rowconfigure(15,weight=1)
         ttk.Label(tab,text="AI 자동 조사 · Autopilot",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(2,8))
         self.autopilot_profile_text=tk.StringVar(value="작업 프로필을 선택하세요.")
         ttk.Label(tab,textvariable=self.autopilot_profile_text,wraplength=1050).grid(row=1,column=0,sticky="w",pady=3)
@@ -1536,6 +1547,11 @@ class Studio(tk.Tk):
         self.autopilot_stop_button.pack(side="left",padx=3)
         self.resource_low_load_var=tk.BooleanVar(value=True)
         self.resource_guard=ResourceGuard()
+        self.research_browser=ResearchBrowserManager(resource_guard=self.resource_guard)
+        self.research_browser_status=tk.StringVar(value="전용 인터넷 창: 닫힘 · 연구 시간에만 열 수 있어요")
+        self._browser_alerted_schedules=set()
+        self._browser_metrics_checked_at=0.0
+        self._browser_schedule_checked_at=0.0
         self.resource_status_text=tk.StringVar(value="컴퓨터 여유 있음 · 저부하 모드 권장")
         self._resource_was_waiting=False
         ttk.Checkbutton(actions,text="저부하 모드 · 권장",variable=self.resource_low_load_var).pack(side="left",padx=5)
@@ -1553,6 +1569,21 @@ class Studio(tk.Tk):
         self.autopilot_report.grid(row=14,column=0,sticky="nsew",pady=3)
         self.autopilot_report.insert("1.0","보고서는 프로필별로 저장됩니다. AI 판정은 사람의 실제 청취 정답과 분리되며 댓글은 게시되지 않습니다.")
         self.autopilot_report.configure(state="disabled")
+        browser_panel=ttk.LabelFrame(tab,text="연구용 전용 인터넷 창 · 자동 재생/참여 기능 없음")
+        browser_panel.grid(row=11,column=0,sticky="ew",pady=4)
+        browser_buttons=ttk.Frame(browser_panel); browser_buttons.pack(fill="x",padx=4,pady=3)
+        ttk.Button(browser_buttons,text="연구용 인터넷 창 열기",command=self._research_browser_open).pack(side="left",padx=3)
+        ttk.Button(browser_buttons,text="인터넷 창 닫기",command=self._research_browser_close).pack(side="left",padx=3)
+        if self.research_browser.recovery_available:
+            ttk.Button(browser_buttons,text="이전 연구 창 확인/닫기",command=self._research_browser_recover).pack(side="left",padx=3)
+        ttk.Label(browser_panel,textvariable=self.research_browser_status,wraplength=1000).pack(anchor="w",padx=8,pady=3)
+        for child in tab.grid_slaves():
+            if child is browser_panel:
+                continue
+            row_index=int(child.grid_info().get("row",0))
+            if row_index>=11:
+                child.grid_configure(row=row_index+1)
+        tab.rowconfigure(16,weight=1)
         self.autopilot_controller=autopilot.AutopilotController()
         self.autopilot_events=queue.Queue()
         self.autopilot_result=None
@@ -1825,12 +1856,14 @@ class Studio(tk.Tk):
         settings=autopilot.AutopilotController._settings(config,provider)
         while True:
             if self.autopilot_schedule_shutdown_event.is_set():
+                self._research_browser_boundary_close("shutdown")
                 item=research_scheduler.get(schedule_id,profile_id)
                 if item and item["state"]=="running" and not item["search_in_flight"]:
                     research_scheduler.pause(schedule_id,profile_id)
                 self.autopilot_events.put({"stage":"schedule","message":"앱을 닫기 전에 예약 체크포인트를 저장했습니다. 다음 실행에서 이어하기를 선택하세요."})
                 break
             if self.autopilot_schedule_stop_event.is_set():
+                self._research_browser_boundary_close("stop")
                 item=research_scheduler.get(schedule_id,profile_id)
                 if item and item["state"] in {"running","scheduled","paused"} and not item["search_in_flight"]:
                     research_scheduler.cancel(schedule_id,profile_id)
@@ -1841,6 +1874,7 @@ class Studio(tk.Tk):
                 break
             self.autopilot_events.put({"stage":"schedule_status","item":item})
             if self.autopilot_schedule_pause_event.is_set():
+                self._research_browser_boundary_close("pause")
                 if item["state"]=="running":
                     research_scheduler.pause(schedule_id,profile_id)
                 self.autopilot_events.put({"stage":"schedule","message":"연구를 잠시 멈췄습니다. 이어하기를 누르면 저장된 범위 안에서 계속합니다."})
@@ -1864,6 +1898,7 @@ class Studio(tk.Tk):
                 self.autopilot_schedule_pause_event.clear()
                 continue
             if item["state"]=="paused":
+                self._research_browser_boundary_close("paused")
                 if item.get("pause_reason","").startswith(("system_","process_")) and low_load_enabled:
                     try:
                         research_scheduler.resume_after_resource_recovery(schedule_id,profile_id,
@@ -1887,6 +1922,7 @@ class Studio(tk.Tk):
                 self.autopilot_schedule_resume_event.clear()
                 continue
             if item["phase"]=="break":
+                self._research_browser_boundary_close("break")
                 self.autopilot_events.put({"stage":"schedule","message":f"휴식 중 · 새 검색과 AI 요청 없이 {item['remaining_seconds']//60}분 남았습니다."})
                 self.autopilot_schedule_resume_event.wait(min(15,max(1,item["remaining_seconds"])))
                 self.autopilot_schedule_resume_event.clear()
@@ -1904,6 +1940,7 @@ class Studio(tk.Tk):
                 self.autopilot_controller,resumed_config,collector,provider=provider,
                 on_event=self.autopilot_events.put,resource_guard=self.resource_guard if low_load_enabled else None)
             if last_result.state=="complete":
+                self._research_browser_boundary_close("complete")
                 research_scheduler.complete(schedule_id,profile_id)
                 break
             if self.autopilot_schedule_stop_event.is_set():
@@ -1920,6 +1957,7 @@ class Studio(tk.Tk):
                 self.autopilot_events.put({"stage":"schedule","message":"조사가 일시 정지되었습니다. 결과와 대기함을 확인한 뒤 이어가세요."})
                 break
             config.session_id=last_result.session_id
+        self._research_browser_boundary_close("worker_exit")
         final=research_scheduler.get(schedule_id,profile_id)
         self.autopilot_events.put({"stage":"schedule_status","item":final})
         return last_result or autopilot.AutopilotResult(profile_id,"","paused",{},(),None)
@@ -1944,6 +1982,30 @@ class Studio(tk.Tk):
                     self.autopilot_stop_button.configure(state="disabled")
                     self._autopilot_show_exception(event["exception"])
                     self.autopilot_stage_text.set(event["exception"]["impact"]+" "+event["exception"]["recommended_action"])
+                elif stage=="browser":
+                    self._browser_operation_running=False
+                    error=event.get("error")
+                    if error:
+                        messages={"resource":"컴퓨터가 바빠 새 연구 창을 열지 않았습니다.",
+                            "ownership":"창 소유권을 확인하지 못해 다른 브라우저는 건드리지 않았습니다.",
+                            "unavailable":"Edge/Chrome 연구 창을 사용할 수 없습니다. 설치 상태를 확인하세요.",
+                            "unknown":"연구 창을 안전하게 처리하지 못했습니다. 다른 창은 종료하지 않았습니다."}
+                        self.research_browser_status.set(messages.get(error,"연구 창 상태를 확인할 수 없습니다."))
+                    elif event.get("operation")=="open":
+                        self._research_browser_show_metrics(event["result"])
+                    else:
+                        result=event["result"]
+                        self.research_browser_status.set(
+                            f"전용 창 {'정상 종료' if result.closed else '종료 확인 필요'} · "
+                            f"닫기 전 프로세스 메모리 {result.rss_before_bytes/(1024**2):.0f} MB · "
+                            f"남은 프로세스 {len(result.residual_process_ids)}개 · "
+                            f"현재 할 일: 휴식 또는 다음 연구 구간을 기다리세요.")
+                elif stage=="browser_boundary":
+                    result=event.get("result")
+                    if result:
+                        self.research_browser_status.set(
+                            f"연구 구간 종료 · 전용 창 {'정리 완료' if result.closed else '잔류 확인 필요'} · "
+                            f"남은 프로세스 {len(result.residual_process_ids)}개 · 새 창은 휴식 중 열리지 않습니다.")
                 elif stage=="resource_status":
                     self.resource_status_text.set(event.get("status","리소스 상태를 확인할 수 없습니다"))
                     if not event.get("allow",True):
@@ -2093,6 +2155,119 @@ class Studio(tk.Tk):
                 self.autopilot_stage_text.set("프로필 전용 조사 보고서를 JSON으로 내보냈습니다.")
             except OSError:
                 self._autopilot_show_exception({"type":"report_export","impact":"보고서 파일을 쓸 수 없습니다.","recommended_action":"다른 저장 경로와 폴더 쓰기 권한을 확인하세요.","retry_allowed":True})
+
+    def _research_browser_open(self):
+        profile=self.current_profile()
+        if not profile or not self.selected_video:
+            messagebox.showinfo("영상 선택 필요","후보 영상 하나를 먼저 선택한 다음 연구 창을 열어 주세요.",parent=self)
+            return
+        schedule_id=getattr(self,"autopilot_schedule_id",None)
+        if not schedule_id:
+            messagebox.showinfo("연구 시간 필요","먼저 연구 시간을 설정하고 연구를 시작해 주세요.",parent=self)
+            return
+        schedule=research_scheduler.get(schedule_id,profile["id"])
+        if not schedule or schedule["state"]!="running" or schedule["phase"]!="research":
+            messagebox.showinfo("휴식 중","전용 인터넷 창은 연구 구간에만 열 수 있어요. 다음 연구 구간에 이용해 주세요.",parent=self)
+            return
+        candidate=store.get_candidate(profile["id"],self.selected_video)
+        video_id=extract_video_id((candidate or {}).get("video_url") or self.selected_video)
+        if not video_id:
+            messagebox.showwarning("영상 주소 확인","선택한 후보의 YouTube 영상 주소를 확인할 수 없습니다.",parent=self)
+            return
+        if not messagebox.askyesno("연구용 인터넷 창 열기",
+                "선택한 영상만 별도 연구 창에서 엽니다. 재생·좋아요·댓글·구독은 자동으로 하지 않습니다.\n\n"
+                "브라우저 로그인 정보나 쿠키는 복사되지 않습니다. 계속할까요?",parent=self):
+            return
+        url=f"https://www.youtube.com/watch?v={video_id}"
+        self.research_browser_status.set("전용 연구 창을 준비하고 있어요…")
+        self._browser_operation("open",url)
+
+    def _research_browser_close(self):
+        self._browser_operation("close")
+
+    def _research_browser_recover(self):
+        try:
+            metrics=self.research_browser.recover_owned_session()
+        except BrowserOwnershipUncertain:
+            self.research_browser_status.set("이전 창의 소유권을 확인하지 못해 어떤 창도 닫지 않았어요.")
+            return
+        except BrowserError:
+            self.research_browser_status.set("이전에 남은 전용 연구 창이 없습니다.")
+            return
+        if metrics.running and messagebox.askyesno("이전 연구 창 확인",
+                f"ZISU가 실행한 브라우저 창을 확인했습니다. PID {metrics.root_pid}, 창 {metrics.window_count}개입니다.\n"
+                "이 전용 연구 창만 닫을까요?",parent=self):
+            self._research_browser_close()
+        else:
+            self._research_browser_show_metrics(metrics)
+
+    def _browser_operation(self, operation, url=None):
+        if getattr(self,"_browser_operation_running",False):
+            return
+        self._browser_operation_running=True
+        def work():
+            try:
+                result=(self.research_browser.open_selected(url,user_approved=True) if operation=="open"
+                        else self.research_browser.close_owned())
+                self.autopilot_events.put({"stage":"browser","operation":operation,"result":result})
+            except BrowserResourceDeferred:
+                self.autopilot_events.put({"stage":"browser","error":"resource"})
+            except BrowserOwnershipUncertain:
+                self.autopilot_events.put({"stage":"browser","error":"ownership"})
+            except BrowserError:
+                self.autopilot_events.put({"stage":"browser","error":"unavailable"})
+            except Exception:
+                self.autopilot_events.put({"stage":"browser","error":"unknown"})
+            finally:
+                self._browser_operation_running=False
+        threading.Thread(target=work,name="zisu-research-browser",daemon=True).start()
+
+    def _research_browser_show_metrics(self, metrics):
+        self.research_browser_status.set(
+            f"전용 창 {'실행 중' if metrics.running else '닫힘'} · 창 {metrics.window_count}개 · "
+            f"ZISU 소유 프로세스 {metrics.owned_process_count}개 · 메모리 {metrics.owned_rss_bytes/(1024**2):.0f} MB · "
+            f"연구 구간 변화 {metrics.rss_change_bytes/(1024**2):+.0f} MB · "
+            f"현재 할 일: 후보 영상을 선택해 직접 확인하거나 연구 구간을 마치세요.")
+
+    def _research_browser_boundary_close(self, reason):
+        if not self.research_browser.session:
+            return
+        try:
+            result=self.research_browser.close_owned()
+            self.autopilot_events.put({"stage":"browser_boundary","reason":reason,"result":result})
+        except Exception:
+            self.autopilot_events.put({"stage":"browser_boundary","reason":reason,"error":True})
+
+    def _check_research_browser_schedule(self):
+        if not self.autopilot_schedule_running or not self.autopilot_schedule_id or not self.active_id:
+            return
+        now=time.monotonic()
+        if now-self._browser_schedule_checked_at<10:
+            return
+        self._browser_schedule_checked_at=now
+        try:
+            item=research_scheduler.get(self.autopilot_schedule_id,self.active_id)
+        except Exception:
+            return
+        if not item or item["phase"]!="research":
+            return
+        if (item["state"]=="running" and 0<int(item.get("phase_remaining_seconds",0))<=60
+                and not item.get("research_extension_used")
+                and self.autopilot_schedule_id not in self._browser_alerted_schedules):
+            self._browser_alerted_schedules.add(self.autopilot_schedule_id)
+            extend=messagebox.askyesno("연구 시간이 곧 끝나요",
+                "1회에 한해 연구 구간을 10분 연장할까요? 연장은 이 일정에서 한 번만 사용할 수 있습니다.\n\n"
+                "연장하지 않으면 연구용 창을 닫고 휴식 시간으로 전환합니다. YouTube 웹페이지의 미게시 입력은 보존되지 않을 수 있어요.",
+                parent=self)
+            if extend:
+                try:
+                    research_scheduler.extend_current_research(self.autopilot_schedule_id,self.active_id)
+                    self.autopilot_events.put({"stage":"schedule","message":"연구 구간을 10분 연장했습니다. 다음 휴식 전까지 1회만 사용할 수 있어요."})
+                except Exception:
+                    self.autopilot_events.put({"stage":"schedule","message":"연장을 저장하지 못했습니다. 체크포인트를 보존하고 예정된 휴식으로 전환합니다."})
+                    self._browser_operation("close")
+            else:
+                self._browser_operation("close")
 
     def _autopilot_window_close(self):
         if self.autopilot_schedule_running:

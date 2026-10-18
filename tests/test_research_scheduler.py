@@ -34,6 +34,27 @@ class ResearchSchedulerTests(unittest.TestCase):
         self.assertEqual(("completed", "complete", 0),
                          (done["state"], done["phase"], done["remaining_seconds"]))
 
+    def test_user_approved_one_time_research_extension_is_persisted_and_shifts_rest(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, total_hours=2,
+            research_minutes=30, break_minutes=15), self.db, now=self.now)
+        final_minute = self.now + timedelta(minutes=29)
+        before = scheduler.get(session["id"], self.jp, self.db, now=final_minute)
+        self.assertEqual(("research", 60, 0),
+            (before["phase"], before["phase_remaining_seconds"], before["research_extension_used"]))
+        extended = scheduler.extend_current_research(session["id"], self.jp, self.db, now=final_minute)
+        self.assertEqual(("research", 660, 1, 600),
+            (extended["phase"], extended["phase_remaining_seconds"],
+             extended["research_extension_used"], extended["research_extension_seconds"]))
+        at_original_boundary = scheduler.get(session["id"], self.jp, self.db,
+            now=self.now + timedelta(minutes=30))
+        self.assertEqual(("research", 600),
+            (at_original_boundary["phase"], at_original_boundary["phase_remaining_seconds"]))
+        at_extended_boundary = scheduler.get(session["id"], self.jp, self.db,
+            now=self.now + timedelta(minutes=40))
+        self.assertEqual("break", at_extended_boundary["phase"])
+        with self.assertRaises(ValueError):
+            scheduler.extend_current_research(session["id"], self.jp, self.db, now=final_minute)
+
     def test_pause_resume_freezes_elapsed_time_and_reanchors_without_double_count(self):
         session = scheduler.create(scheduler.ScheduleConfig(self.jp), self.db, now=self.now)
         t25 = self.now + timedelta(minutes=25)

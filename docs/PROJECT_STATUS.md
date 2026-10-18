@@ -1,20 +1,21 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-RESOURCE-01 resource admission/lifecycle implementation and scoped regression)
+Last checked: 2026-10-18 (V46-03 dedicated browser lifecycle implementation and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Latest V4.6.0 code commit: `f0eeac760cc16e391ab8ebd0089bf13ad7b0ce3b` (local, not pushed; parent before V46-02: `476cdae9a15031e6178eb59fce314db0d3d18161`)
+Latest V4.6.0 baseline before V46-03 changes: `5853f2ca78490d886f947b72967d0f596cd9d8ba` (current browser work is uncommitted pending scoped verification)
 Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 78% estimated (77.95 weighted points using the existing backlog scoring; this includes remaining V4.6 scope and is not a test-pass percentage).
+- **Overall ZISU:** 81% estimated (81.35 weighted points using the existing backlog scoring; this includes remaining V4.6 scope and is not a test-pass percentage).
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 59% estimated (58.6% weighted across its backlog). Schedule state, offline account/channel registry, resource sampling/admission and widget-level schedule UI are present; browser lifecycle, expanded dashboard and actual APIs remain incomplete.
-- **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 80% estimated (21.5/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth, browser lifecycle and wall-clock EXE runtime remain.
+- **V4.6.0:** 67% estimated (67.1% weighted across its backlog). Schedule state, offline account/channel registry, resource sampling/admission, widget-level schedule UI and browser lifecycle control are present; visible browser launch, expanded dashboard and actual APIs remain incomplete.
+- **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 81% estimated (21.9/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth and wall-clock EXE runtime remain.
+- **Current V46-03:** 60% estimated. Implementation and mocked lifecycle tests are present, but this host did not successfully create a visible Chrome/Edge window.
 
 ## Verified and unverified state
 
@@ -84,3 +85,14 @@ No data-loss or credential issue was found; this task did not open or modify the
 - Isolated virtual stability experiment: 12 simulated six-hour sessions and 12 pause/resume cycles; RSS milestones 34,959,360 → 35,319,808 → 35,323,904 → 35,328,000 bytes (net +368,640 bytes during this bounded test); `tracemalloc` current 56,031 bytes / peak 74,532 bytes; thread count 1→1; Windows process handles 114→114. These virtual-clock cycles do not represent 72 hours of wall-clock operation or a built EXE. The final process CPU field was unavailable on one sampled cycle, so no sustained CPU average is claimed.
 - Deferred: full regression suite/final QA, real six-hour Windows EXE operation, high-load contention on a user workstation, GUI visual/DPI verification, and browser lifecycle. V4.5.9 install/user DB/OAuth/DPAPI stores remain untouched; no external APIs were called.
 - GitHub `gh auth status` was checked during this continuation and reports the stored credential invalid. Push/CI were not attempted; local source remains on the requested feature branch.
+
+### V46-03 dedicated research browser (2026-10-18)
+
+- Compared Playwright-managed Chromium with installed Edge/Chrome launched as an independent process. Chose installed Edge/Chrome with a fresh per-session ZISU profile: avoids downloading/bundling a second browser runtime and keeps existing browser profiles/cookies separate. No cookies, credentials, or user profile data are copied. Browser opens only after explicit user approval and a resource-admission check; only HTTPS YouTube watch/short URLs are accepted in normal mode. Local HTTP is enabled solely for explicit local integration tests.
+- Added `mcrs/research_browser.py`: single owned session, isolated profile, same-profile reuse, PID + process creation-time + executable ownership checks, startup recovery manifest, process-tree/RSS/window metrics, graceful `WM_CLOSE` followed by identity-revalidated owned-tree cleanup, and residual-process reporting. Existing user Chrome/Edge windows are never targeted. Browser profiles are not deleted after close.
+- Wired browser open/close/recovery into the Autopilot tab and scheduler lifecycle. The selected video and active research phase are required; pause, rest, stop, completion and app shutdown close only the owned browser session. Added a one-time user-approved 10-minute extension option in the final minute; ZISU notes are checkpointed and it does not claim to preserve unpublished YouTube page input.
+- Added six deterministic browser lifecycle tests plus one opt-in installed-browser local-page test (skipped in the normal suite). Targeted run: browser, scheduler, Autopilot and resource lifecycle suites **43 total, 42 PASS, 1 skipped, 0 failures**. `compileall`, `tests/smoke_gui.py` (`GUI_SMOKE_PASS`) and `git diff --check` pass. This is scoped verification, not final QA.
+- Attempted the opt-in local-page launch against installed Chrome and Edge without contacting YouTube. Both native browser processes exited before a visible window appeared (Chrome exit code `4294930433`; Edge `2147483651`). Actual visible GUI/browser process-tree lifecycle therefore **FAIL / unverified on this host**; the reason is not established. Existing user browser windows were not touched. The isolated generated browser profiles were retained.
+- Latest test-process resource observation: system CPU 11.57%, available RAM 9,852,387,328 bytes, system memory load 71%, Python process RSS 35,504,128 bytes, process CPU 0.0%. In the same bounded virtual stability run, 12 simulated six-hour sessions/12 pause-resume cycles ended with RSS +184,320 bytes, tracemalloc current 57,090 / peak 76,178 bytes, threads 1→1 and handles 114→114; this is not a real six-hour browser/EXE run or a sustained CPU benchmark.
+- No full suite, final QA, EXE build/install, user DB access, OAuth/Gemini/YouTube request, or write to the V4.5.9 installation was performed. `gh auth status` remains invalid in this Codex process; no push/CI attempt was made. Three inaccessible temporary directories still cause harmless Git status enumeration warnings and were not modified.
+- Next work remains in the backlog sequence: resolve/characterize native browser launch failure in a supported isolated Windows session, then complete V46-04 dashboard/DPI work. Keep V4.5.9 install and all credentials/data untouched.
