@@ -1,11 +1,11 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 11:26 KST (offline implementation, isolated tests and resource sampling)
+Last checked: 2026-10-18 11:27 KST (offline implementation, isolated tests, resource sampling and local commit)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Current HEAD: `5a7b4168d9e2d06d735bea600e4c0448772c72b1`
-Remote status: not refreshed; Codex `gh auth status` failed. No commit or push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
+Current HEAD: `a5eb644381d46e76b8848832515da48defe68104`
+Remote status: not refreshed; Codex `gh auth status` failed (exit 1), so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
 
@@ -32,7 +32,7 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 - `scripts/zisu_release_oneclick.ps1` defaults to offline Dry Run and uses opt-in gates for release writes/install. It checks branch, secret/data paths, tests, package and matching ZIP/EXE hashes, then performs an isolated Windows EXE smoke. It never calls Google/YouTube/Gemini or merges a PR.
 - Latest report: `D:\03 zisu\.test_tmp\history_audit\_local_backups\ZisuReleaseRuns\20261018_111136_1d585c5a\release-report.json`, result `DRY_RUN_PASS`; V4.5.9 ZIP/EXE hashes match and the 150-test suite plus isolated EXE smoke passed. The script detected process proxy variables pointing to `127.0.0.1:9`; Dry Run did not alter them. Its GitHub child-command wrapper temporarily scopes proxy clearing only when a release is explicitly opted in.
 - GitHub auth and remote CI/artifact retrieval are not validated in this Codex process. `gh auth status` returned nonzero; no identity/token detail was emitted. No commit/push/install was attempted.
-- Local worktree contains uncommitted changes for the release script/docs/tests, scheduler engine/schema/tests, and status/backlog docs. These are not reported as merged or remotely available.
+- Release automation, scheduler/resource guard, tests and unified status/backlog documentation were committed locally as `a5eb644381d46e76b8848832515da48defe68104`. The commit is not reported as pushed or remotely available.
 
 ### V4.6.0 schedule engine
 
