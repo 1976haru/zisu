@@ -4,8 +4,8 @@ Last checked: 2026-10-18 11:40 KST (offline schedule GUI integration, recovery a
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Current base HEAD before this task's local commit: `c319cdf37e8de61c42f67e61d5bbdeca6858bf57`
-Remote status: not refreshed; Codex `gh auth status` failed (exit 1), so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
+Latest V4.6.0 scheduler/resource code commit: `bdb20b678e7dcde71389a50f057fbd24ac7b1c16` (local, not pushed)
+Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
 
