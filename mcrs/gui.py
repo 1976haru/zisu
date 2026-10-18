@@ -33,6 +33,7 @@ from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .analytics import (AnalyticsClient, AnalyticsCredentialManager, AnalyticsError,
                         AnalyticsRepository, dashboard_view, project_scope_hash,
                         begin_analytics_consent)
+from .branding import DISPLAY_NAME, KOREAN_NAME, SLOGAN, apply_window_branding
 from .startup_probe import write_stage as _write_smoke_stage
 
 BG = "#F5F7FA"
@@ -135,7 +136,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("database_initialized")
         first_run = not store.list_profiles()
         smoke_report = os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip()
-        self.title("ZISU Research Studio V4.5.9 · 자동 복구와 쉬운 조사")
+        apply_window_branding(self)
         screen_w=max(800,self.winfo_screenwidth()-80)
         screen_h=max(560,self.winfo_screenheight()-120)
         initial_w=min(1320,screen_w);initial_h=min(840,screen_h)
@@ -283,7 +284,17 @@ class Studio(tk.Tk):
     def _header(self):
         top=ttk.Frame(self,padding=(18,14))
         top.pack(fill="x")
-        ttk.Label(top,text="ZISU  |  Genre-Safe Research",font=("Malgun Gothic",17,"bold")).pack(side="left")
+        identity=ttk.Frame(top)
+        identity.pack(side="left",anchor="w")
+        brand_icon=getattr(self,"_zisu_signal_lab_icon",None)
+        if brand_icon is not None:
+            self._brand_header_icon=brand_icon
+            ttk.Label(identity,image=brand_icon).pack(side="left",padx=(0,10))
+        brand_text=ttk.Frame(identity)
+        brand_text.pack(side="left",anchor="w")
+        ttk.Label(brand_text,text=f"{DISPLAY_NAME} · {KOREAN_NAME}",
+                  font=("Malgun Gothic",17,"bold")).pack(anchor="w")
+        ttk.Label(brand_text,text=SLOGAN,font=("Malgun Gothic",9)).pack(anchor="w")
         bar=ttk.Frame(self,padding=(18,0))
         bar.pack(fill="x",pady=(0,9))
         ttk.Label(bar,text="작업 채널").pack(side="left")
@@ -307,8 +318,8 @@ class Studio(tk.Tk):
         content.bind("<Configure>",lambda _e:canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>",lambda event:canvas.itemconfigure(self._easy_canvas_window,width=event.width))
         content.columnconfigure(0,weight=1); content.columnconfigure(1,weight=1)
-        ttk.Label(content,text="내 조사 대시보드",font=("Malgun Gothic",20,"bold")).grid(row=0,column=0,sticky="w",pady=(3,8))
-        ttk.Label(content,text="Google 계정과 채널은 목록에서 구분됩니다. 채널별 조사 기록과 인증은 서로 섞이지 않습니다.",
+        ttk.Label(content,text=f"{DISPLAY_NAME} · {KOREAN_NAME}",font=("Malgun Gothic",20,"bold")).grid(row=0,column=0,sticky="w",pady=(3,4))
+        ttk.Label(content,text=f"{SLOGAN}  Google 계정과 채널은 구분되며, 채널별 조사 기록과 인증은 서로 섞이지 않습니다.",
                   wraplength=1000).grid(row=1,column=0,columnspan=2,sticky="w",pady=(0,8))
         self.easy_progress=tk.StringVar(value="먼저 조사 채널을 만들거나 기존 채널을 선택하세요.")
         ttk.Label(content,textvariable=self.easy_progress,wraplength=1000,font=("Malgun Gothic",13,"bold")).grid(row=2,column=0,columnspan=2,sticky="ew",pady=5)

@@ -1,4 +1,8 @@
-# ZISU Research Studio V4.5.9 — 자동 복구와 쉬운 조사
+# ZISU SIGNAL LAB · 지수 시그널 랩
+
+### 채널 성장의 신호를 발견하다.
+
+V4.5.9 기반 Windows 배포 및 V4.6.0 개발 브랜치
 
 V4 기능 브랜치는 첫 실행 시작 마법사, 프로필별 Google 읽기 전용 OAuth,
 KR/JP 독립 검색어, 6개 장르의 `적합 / 검토 / 제외` 보수 판정과 V2 SQLite
