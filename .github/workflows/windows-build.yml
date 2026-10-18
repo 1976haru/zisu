@@ -20,6 +20,8 @@ jobs:
         run: python tests/stress_v43.py
       - name: Run Tkinter GUI assistant workflow smoke
         run: python tests/smoke_gui.py
+      - name: Run V4.6 isolated acceptance matrix (Mock only)
+        run: python scripts/v46_offline_acceptance.py --output dist/v46-offline-acceptance.json
       - name: Compile Python sources
         run: python -m compileall -q mcrs tests main.py
       - name: Generate ZISU SIGNAL LAB Windows icon
@@ -144,4 +146,5 @@ jobs:
             검증하기.cmd
             WindowsSandbox_검증하기.cmd
             dist/startup-comparison.json
+            dist/v46-offline-acceptance.json
           if-no-files-found: error
