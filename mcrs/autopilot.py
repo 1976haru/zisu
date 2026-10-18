@@ -33,17 +33,24 @@ class FailClosedProvider:
         self.model = provider.model
         self.circuit_open = False
 
-    def review(self, candidate, genre_id, related_genres=()):
+    def review(self, candidate, genre_id, related_genres=(), genre_context=None):
         if self.circuit_open:
             raise ai_research.ProviderFailure("unknown")
         try:
-            supports_related = "related_genres" in inspect.signature(self._provider.review).parameters
+            parameters = inspect.signature(self._provider.review).parameters
+            supports_kwargs = any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values())
+            supports_related = "related_genres" in parameters or supports_kwargs
         except (TypeError, ValueError):
             supports_related = False
+            parameters = {}
+            supports_kwargs = False
         try:
+            kwargs = {}
             if supports_related:
-                return self._provider.review(candidate, genre_id, related_genres=related_genres)
-            return self._provider.review(candidate, genre_id)
+                kwargs["related_genres"] = related_genres
+            if "genre_context" in parameters or supports_kwargs:
+                kwargs["genre_context"] = genre_context
+            return self._provider.review(candidate, genre_id, **kwargs)
         except Exception:
             self.circuit_open = True
             raise
@@ -332,7 +339,9 @@ class AutopilotController:
                 "report_version": 1}
 
     def _build_report(self, config, profile, run, queries):
-        related = store.normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]"))
+        genre_config = store.profile_genre_config(profile)
+        related = store.normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]"),
+                                                 genre_config["custom_genres"])
         candidate_by_id = {str(row.get("video_id")): row for row in run.candidates}
         proposals = {}
         evidence = []

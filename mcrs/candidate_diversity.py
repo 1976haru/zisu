@@ -27,15 +27,28 @@ def classify_search_category(term: str, profile: dict, path=None) -> str:
         pass
     if term in saved:
         return USER_CORE
-    if term in genres.search_terms(profile["genre"], profile["market"]):
+    config = store.profile_genre_config(profile)
+    custom_genres = config["custom_genres"]
+    languages = config["search_languages"] or [profile["market"]]
+    core_terms = set()
+    for language in languages:
+        try:
+            core_terms.update(genres.search_terms(profile["genre"], profile["market"], custom_genres, language))
+        except ValueError:
+            continue
+    if term in core_terms or any(term.startswith(base + " ") for base in core_terms):
         return CORE
     related = set()
     try:
-        for genre_id in store.normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]")):
-            related.update(genres.search_terms(genre_id, profile["market"]))
-    except (KeyError, ValueError):
+        for genre_id in store.normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]"), custom_genres):
+            for language in languages:
+                try:
+                    related.update(genres.search_terms(genre_id, profile["market"], custom_genres, language))
+                except ValueError:
+                    continue
+    except ValueError:
         pass
-    return RELATED if term in related else CORE
+    return RELATED if term in related or any(term.startswith(base + " ") for base in related) else CORE
 
 
 def _published_timestamp(value) -> float:
@@ -50,7 +63,7 @@ def _published_timestamp(value) -> float:
         return 0.0
 
 
-def diversify_page(rows, *, genre_id: str, exposure_counts=None, seed=""):
+def diversify_page(rows, *, genre_id: str, exposure_counts=None, seed="", custom_genres=None):
     """Deduplicate and fairly order one search page; returns (rows, page_duplicates).
 
     Core genre rule results remain the primary tier. Within each tier, the
@@ -76,7 +89,7 @@ def diversify_page(rows, *, genre_id: str, exposure_counts=None, seed=""):
     tie = {str(row["video_id"]): rng.random() for row in unique}
     tiers = {genres.FIT: 2, genres.REVIEW: 1, genres.EXCLUDE: 0}
     verdict_tier = {str(row["video_id"]):tiers.get(
-        genres.assess(genre_id,row.get("video_title",""),row.get("description","")).decision,0)
+        genres.assess(genre_id,row.get("video_title",""),row.get("description",""),custom_genres).decision,0)
         for row in unique}
     local_channel_exposures = {}
     ordered = []

@@ -106,8 +106,9 @@ def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) ->
     start = _utc(config.start_at or now_utc)
     if (start - now_utc).total_seconds() < -60:
         raise ValueError("Start time cannot be more than one minute in the past.")
+    genre_config = store.profile_genre_config(profile)
     related = store.normalize_related_genres(
-        profile["genre"], profile.get("related_genres_json", "[]"))
+        profile["genre"], profile.get("related_genres_json", "[]"), genre_config["custom_genres"])
     session_id = uuid.uuid4().hex
     active = start <= now_utc
     with store.connect(path) as db:
@@ -117,12 +118,13 @@ def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) ->
                       (config.profile_id,)).fetchone():
             raise ScheduleBusy("This profile already has an unfinished research schedule.")
         db.execute("""INSERT INTO research_schedules(
-          id,profile_id,market,core_genre,related_genres_json,channel_id,start_at_utc,
+          id,profile_id,market,core_genre,related_genres_json,genre_config_snapshot_json,channel_id,start_at_utc,
           total_minutes,research_minutes,break_minutes,approved_search_calls,state,phase,
           running_since_utc)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
           (session_id, config.profile_id, profile["market"], profile["genre"],
-           json.dumps(related, ensure_ascii=False), profile.get("youtube_channel_id", ""),
+           json.dumps(related, ensure_ascii=False), json.dumps(genre_config,ensure_ascii=False,sort_keys=True),
+           profile.get("youtube_channel_id", ""),
            _stamp(start), config.total_hours * 60, config.research_minutes,
            config.break_minutes, config.approved_search_calls,
            "running" if active else "scheduled", "research" if active else "waiting",
@@ -217,6 +219,18 @@ def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None 
                             "quota_local_limit", "rate_limited"}
     if item.get("pause_reason") in confirmation_reasons and not external_recovery_confirmed:
         raise ValueError("External authentication or quota state must be confirmed before resume.")
+    profile = store.get_profile(profile_id, path)
+    if not profile:
+        raise ValueError("The scheduled profile no longer exists.")
+    saved_config = store._normalize_genre_config(item.get("genre_config_snapshot_json") or "{}")
+    current_config = store.profile_genre_config(profile)
+    saved_related = store.normalize_related_genres(item["core_genre"], item.get("related_genres_json", "[]"),
+                                                   saved_config["custom_genres"])
+    current_related = store.normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]"),
+                                                     current_config["custom_genres"])
+    if (item["market"], item["core_genre"], saved_related, saved_config) != (
+            profile["market"], profile["genre"], current_related, current_config):
+        raise ValueError("Saved research scope differs from current profile genre settings; review or start a new session.")
     phase, _ = _phase_at(item, item["elapsed_seconds"])
     with store.connect(path) as db:
         db.execute("UPDATE research_schedules SET state='running',phase=?,pause_reason='',running_since_utc=?,"

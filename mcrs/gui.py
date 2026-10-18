@@ -17,6 +17,7 @@ from datetime import datetime, date
 from urllib.parse import urlencode, urlparse, parse_qs
 from . import store
 from .genres import GENRES, search_terms, assess, related_classification
+from . import genres as genre_engine
 from .youtube_api import lookup_videos, APIError, quota_project_identity
 from . import oauth
 from . import quota_ledger
@@ -42,6 +43,11 @@ BG = "#F5F7FA"
 ACCENT = "#20635A"
 
 
+def _genre_title_for_profile(profile, genre_id=None):
+    config = store.profile_genre_config(profile or {})
+    return genre_engine.genre_title(genre_id or (profile or {}).get("genre", ""), config["custom_genres"])
+
+
 def extract_video_id(value: str):
     try:
         value = value.strip()
@@ -60,69 +66,200 @@ def extract_video_id(value: str):
         return ""
 
 
+class CustomGenreDialog(tk.Toplevel):
+    """Small editor for channel-local user genre rules and localized queries."""
+    def __init__(self, root, initial=None):
+        super().__init__(root)
+        self.title("사용자 장르 등록 / 수정")
+        self.result = None
+        self.transient(root); self.grab_set(); self.geometry("640x610"); self.resizable(True, True)
+        initial = initial or {}
+        self._id = initial.get("id") or ""
+        fields = (
+            ("name", "장르 이름 (예: Dream Pop)"), ("aliases", "별칭"),
+            ("include_terms", "포함 신호 (장르 판정에 사용할 핵심 표현)"),
+            ("exclude_terms", "제외 신호"), ("jp_queries", "일본어 검색어"),
+            ("kr_queries", "한국어 검색어"), ("en_queries", "영어 검색어"),
+            ("localized_queries", "추가 언어 검색어 (예: FR: chanson, chanson douce)"),
+        )
+        self.widgets = {}
+        body = ttk.Frame(self, padding=16); body.pack(fill="both", expand=True)
+        canvas = tk.Canvas(body, highlightthickness=0)
+        bar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        self.form = ttk.Frame(canvas)
+        self.form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.form, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True); bar.pack(side="right", fill="y")
+        for row, (key, label) in enumerate(fields):
+            ttk.Label(self.form, text=label).grid(row=row*2, column=0, sticky="w", pady=(7, 2))
+            value = initial.get(key, "")
+            if isinstance(value, (list, tuple)):
+                value = ", ".join(value)
+            elif key == "localized_queries" and isinstance(value, dict):
+                value = "\n".join(f"{lang}: {', '.join(terms)}" for lang, terms in value.items())
+            widget = tk.Text(self.form, height=2 if key not in ("include_terms", "exclude_terms") else 3,
+                             wrap="word", font=("Malgun Gothic", 10))
+            widget.insert("1.0", str(value)); widget.grid(row=row*2+1, column=0, sticky="ew")
+            self.widgets[key] = widget
+        self.form.columnconfigure(0, weight=1)
+        buttons = ttk.Frame(self, padding=(16, 0, 16, 14)); buttons.pack(fill="x")
+        ttk.Button(buttons, text="취소", command=self.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(buttons, text="장르 저장", command=self._save).pack(side="right")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.wait_window()
+
+    def _save(self):
+        def values(key):
+            raw = self.widgets[key].get("1.0", "end-1c").strip()
+            return [item.strip() for item in raw.replace("\n", ",").split(",") if item.strip()]
+        localized = {}
+        for line in self.widgets["localized_queries"].get("1.0", "end-1c").splitlines():
+            if not line.strip():
+                continue
+            language, separator, terms = line.partition(":")
+            if not separator:
+                messagebox.showwarning("추가 언어 형식", "언어별 검색어는 FR: terme, terme 형식으로 적어 주세요.", parent=self)
+                return
+            localized[language.strip().upper()] = [item.strip() for item in terms.split(",") if item.strip()]
+        definition = {"id": self._id, "name": self.widgets["name"].get("1.0", "end-1c").strip(),
+            "aliases": values("aliases"), "include_terms": values("include_terms"),
+            "exclude_terms": values("exclude_terms"), "jp_queries": values("jp_queries"),
+            "kr_queries": values("kr_queries"), "en_queries": values("en_queries"),
+            "localized_queries": localized}
+        try:
+            self.result = genre_engine.validate_custom_genres([definition])[0]
+        except ValueError as exc:
+            messagebox.showwarning("장르 설정 확인", str(exc), parent=self)
+            return
+        self.destroy()
+
+
 class ProfileDialog(tk.Toplevel):
     def __init__(self,root,initial=None):
         super().__init__(root)
         self.title("작업 채널 또는 조사 계정 추가")
         self.result = None
-        self.transient(root)
-        self.grab_set()
-        self.resizable(False,False)
-        self.geometry("600x590")
-        self.configure(padx=22,pady=14)
+        self.transient(root); self.grab_set(); self.resizable(True,True); self.geometry("720x720")
         initial=initial or {}
+        config = store.profile_genre_config(initial) if initial else _empty_genre_config()
+        self.custom_genres = list(config["custom_genres"])
+        self.subgenres = list(config["subgenres"])
+        self.facets = dict(config["facets"])
+        self.search_languages = list(config["search_languages"])
         self.name=tk.StringVar(value=initial.get("name",""))
         self.market=tk.StringVar(value=initial.get("market","JP"))
         self.genre=tk.StringVar(value=initial.get("genre","MORNING_CHILL_RAP"))
-        ttk.Label(self,text="1단계 · 알아보기 쉬운 작업 프로필 이름").pack(anchor="w",pady=(0,5))
-        ttk.Entry(self,textvariable=self.name,width=56).pack(anchor="w",fill="x")
-        ttk.Label(self,text="2단계 · 조사 국가 (한국 KR / 일본 JP)").pack(anchor="w",pady=(16,3))
-        ttk.Combobox(self,textvariable=self.market,values=["JP","KR"],state="readonly",width=12).pack(anchor="w")
-        ttk.Label(self,text="3단계 · 핵심 음악 장르 (프로필마다 하나)").pack(anchor="w",pady=(16,3))
-        self.genre_keys=list(GENRES)
-        self.genre_names=[GENRES[k].title for k in self.genre_keys]
-        self.genre_display=tk.StringVar(value=GENRES[self.genre.get()].title)
-        self.genre_combo=ttk.Combobox(self,textvariable=self.genre_display,values=self.genre_names,state="readonly",width=45)
+        body=ttk.Frame(self,padding=18); body.pack(fill="both",expand=True)
+        ttk.Label(body,text="1단계 · 알아보기 쉬운 작업 프로필 이름").pack(anchor="w",pady=(0,5))
+        ttk.Entry(body,textvariable=self.name,width=56).pack(anchor="w",fill="x")
+        ttk.Label(body,text="2단계 · 조사 국가 / 검색 시장").pack(anchor="w",pady=(12,3))
+        ttk.Combobox(body,textvariable=self.market,values=["JP","KR"],state="readonly",width=12).pack(anchor="w")
+        ttk.Label(body,text="3단계 · 핵심 장르 (새 프리셋 또는 이 프로필의 사용자 장르)").pack(anchor="w",pady=(12,3))
+        self.genre_keys=[]; self.genre_names=[]
+        self.genre_display=tk.StringVar()
+        self.genre_combo=ttk.Combobox(body,textvariable=self.genre_display,state="readonly",width=55)
         self.genre_combo.pack(anchor="w")
-        ttk.Label(self,text="4단계 · 유사 장르 (선택 사항, 최대 5개)").pack(anchor="w",pady=(12,3))
-        current_related=store.normalize_related_genres(self.genre.get(),initial.get("related_genres_json","[]"))
-        if not initial and self.market.get()=="JP" and self.genre.get()=="MORNING_CHILL_RAP":
-            current_related=[key for key in ("CHILL_RAP","RNB_HIPHOP","CAFE_CHILL") if key!=self.genre.get()]
-        self.related_vars={key:tk.BooleanVar(value=key in current_related) for key in self.genre_keys}
-        related_frame=ttk.Frame(self); related_frame.pack(anchor="w",fill="x")
-        for index,key in enumerate(self.genre_keys):
-            ttk.Checkbutton(related_frame,text=GENRES[key].title,variable=self.related_vars[key],
-                command=self._update_related_summary).grid(row=index//2,column=index%2,sticky="w",padx=(0,18),pady=2)
-        self.related_summary=tk.StringVar()
-        ttk.Label(self,textvariable=self.related_summary,wraplength=550).pack(anchor="w",pady=5)
         self.genre_combo.bind("<<ComboboxSelected>>",self._core_genre_changed)
-        self._update_related_summary()
-        ttk.Button(self,text="저장하고 Google 연결로 이동",command=self._save).pack(anchor="e",pady=16)
+        ttk.Label(body,text="4단계 · 유사 장르 (선택 사항, 최대 5개)").pack(anchor="w",pady=(12,3))
+        self.related_frame=ttk.Frame(body); self.related_frame.pack(anchor="w",fill="x")
+        self.related_summary=tk.StringVar()
+        ttk.Label(body,textvariable=self.related_summary,wraplength=660).pack(anchor="w",pady=5)
+        ttk.Button(body,text="사용자 장르 추가 / 수정",command=self._manage_custom_genre).pack(anchor="w",pady=(0,8))
+        ttk.Label(body,text="5단계 · 세부 장르 (최대 12개, 쉼표로 구분)").pack(anchor="w",pady=(4,2))
+        self.subgenre_var=tk.StringVar(value=", ".join(self.subgenres))
+        ttk.Entry(body,textvariable=self.subgenre_var).pack(fill="x")
+        ttk.Label(body,text="장르와 별도로 지정하는 연구 문맥 (쉼표로 구분)").pack(anchor="w",pady=(8,2))
+        self.facet_vars={key:tk.StringVar(value=", ".join(self.facets.get(key,[]))) for key in ("moods","eras","audiences","languages")}
+        facet_labels={"moods":"분위기","eras":"시대","audiences":"청취 대상","languages":"콘텐츠 언어"}
+        for key,label in facet_labels.items():
+            row=ttk.Frame(body); row.pack(fill="x",pady=2)
+            ttk.Label(row,text=label,width=16).pack(side="left")
+            ttk.Entry(row,textvariable=self.facet_vars[key]).pack(side="left",fill="x",expand=True)
+        ttk.Label(body,text="검색어에 사용할 언어 코드 (예: JP, EN, FR)").pack(anchor="w",pady=(8,2))
+        self.search_languages_var=tk.StringVar(value=", ".join(self.search_languages or [self.market.get()]))
+        ttk.Entry(body,textvariable=self.search_languages_var).pack(fill="x")
+        ttk.Button(body,text="저장하고 Google 연결로 이동",command=self._save).pack(anchor="e",pady=14)
+        self._refresh_genre_controls(initial)
         self.bind("<Escape>",lambda _e:self.destroy())
         self.wait_window()
 
+    def _catalog(self):
+        return {**GENRES, **genre_engine.custom_catalog(self.custom_genres)}
+
+    def _refresh_genre_controls(self, initial=None):
+        catalog=self._catalog(); old_id=self.genre.get()
+        self.genre_keys=list(catalog); self.genre_names=[catalog[key].title for key in self.genre_keys]
+        if old_id not in catalog:
+            old_id="MORNING_CHILL_RAP"
+        self.genre.set(old_id); self.genre_combo.configure(values=self.genre_names)
+        self.genre_display.set(catalog[old_id].title)
+        for widget in self.related_frame.winfo_children(): widget.destroy()
+        current=store.normalize_related_genres(old_id, (initial or {}).get("related_genres_json","[]"), self.custom_genres) if initial else []
+        if not initial and self.market.get()=="JP" and old_id=="MORNING_CHILL_RAP":
+            current=[key for key in ("CHILL_RAP","RNB_HIPHOP","CAFE_CHILL") if key in catalog]
+        self.related_vars={key:tk.BooleanVar(value=key in current) for key in self.genre_keys}
+        for index,key in enumerate(self.genre_keys):
+            ttk.Checkbutton(self.related_frame,text=catalog[key].title,variable=self.related_vars[key],
+                command=self._update_related_summary).grid(row=index//3,column=index%3,sticky="w",padx=(0,14),pady=2)
+        self._update_related_summary()
+
+    def _manage_custom_genre(self):
+        if self.custom_genres:
+            choice=simpledialog.askstring("사용자 장르", "수정할 장르 이름을 입력하세요. 비우면 새 장르를 등록합니다.\n\n"+
+                "\n".join(item["name"] for item in self.custom_genres), parent=self)
+            if choice is None: return
+            existing=next((item for item in self.custom_genres if item["name"].casefold()==choice.strip().casefold()),None)
+        else:
+            existing=None
+        dialog=CustomGenreDialog(self,existing)
+        if dialog.result:
+            if existing:
+                self.custom_genres=[dialog.result if item["id"]==existing["id"] else item for item in self.custom_genres]
+                if dialog.result["id"] != existing["id"]:
+                    self.custom_genres=[item for item in self.custom_genres if item["id"]!=existing["id"]]
+            else:
+                self.custom_genres.append(dialog.result)
+            current=self.genre.get()
+            self._refresh_genre_controls({"genre":current,"related_genres_json":json.dumps(
+                [key for key,var in getattr(self,"related_vars",{}).items() if var.get()])})
+
     def _core_genre_changed(self, _event=None):
-        key=self.genre_keys[self.genre_names.index(self.genre_display.get())]
-        self.related_vars[key].set(False)
+        selected=self.genre_names.index(self.genre_display.get())
+        self.genre.set(self.genre_keys[selected])
+        self.related_vars[self.genre.get()].set(False)
         self._update_related_summary()
 
     def _update_related_summary(self):
-        key=self.genre_keys[self.genre_names.index(self.genre_display.get())]
+        catalog=self._catalog(); key=self.genre.get()
+        if key not in catalog:
+            key=self.genre_keys[self.genre_names.index(self.genre_display.get())]
+            self.genre.set(key)
         selected=[item for item in self.genre_keys if item!=key and self.related_vars[item].get()]
         if len(selected)>5:
-            self.related_vars[selected[-1]].set(False)
-            selected=selected[:-1]
-        self.related_summary.set("선택한 유사 장르: "+(", ".join(GENRES[item].title for item in selected) if selected else "없음"))
+            self.related_vars[selected[-1]].set(False); selected=selected[:-1]
+        self.related_summary.set("선택한 유사 장르: "+(", ".join(catalog[item].title for item in selected) if selected else "없음"))
 
     def _save(self):
         name=self.name.get().strip()
         if not 2<=len(name)<=70:
-            messagebox.showwarning("이름 확인","채널 이름을 2~70자로 입력해 주세요.",parent=self)
-            return
+            messagebox.showwarning("이름 확인","채널 이름을 2~70자로 입력해 주세요.",parent=self); return
         genre=self.genre_keys[self.genre_names.index(self.genre_display.get())]
         related=[key for key in self.genre_keys if self.related_vars[key].get() and key!=genre]
-        self.result=(name,self.market.get(),genre,related)
+        facets={key:[item.strip() for item in value.get().split(",") if item.strip()]
+                for key,value in self.facet_vars.items()}
+        languages=[item.strip().upper() for item in self.search_languages_var.get().split(",") if item.strip()]
+        config={"custom_genres":self.custom_genres,"subgenres":[item.strip() for item in self.subgenre_var.get().split(",") if item.strip()],
+                "facets":facets,"search_languages":languages}
+        try: config=store._normalize_genre_config(config)
+        except ValueError as exc:
+            messagebox.showwarning("장르 설정 확인",str(exc),parent=self); return
+        self.result=(name,self.market.get(),genre,related,config)
         self.destroy()
+
+
+def _empty_genre_config():
+    return {"custom_genres":[],"subgenres":[],"facets":{"moods":[],"eras":[],"audiences":[],"languages":[]},"search_languages":[]}
 
 
 class Studio(tk.Tk):
@@ -476,8 +613,7 @@ class Studio(tk.Tk):
             self.dashboard_browser_text.set("연구용 창: 전용 모드 또는 직접 여는 수동 모드를 선택할 수 있어요")
             return
         connected="연결됨" if oauth.is_connected(profile["id"]) else "연결 전"
-        genre=GENRES.get(profile["genre"])
-        self.dashboard_selected_text.set(f"현재 선택: {profile['name']} · {profile['market']} · {genre.title if genre else profile['genre']} · {profile['account_email'] or 'Google 미연결'} · {profile['youtube_channel_title'] or 'YouTube 채널 정보 없음'} ({connected})")
+        self.dashboard_selected_text.set(f"현재 선택: {profile['name']} · {profile['market']} · {_genre_title_for_profile(profile)} · {profile['account_email'] or 'Google 미연결'} · {profile['youtube_channel_title'] or 'YouTube 채널 정보 없음'} ({connected})")
         schedule=profile.get("schedule_state")
         if schedule and schedule.get("state") in {"running","scheduled"}:
             try: profile["schedule_state"]=research_scheduler.get(schedule["id"],profile["id"])
@@ -497,10 +633,10 @@ class Studio(tk.Tk):
 
     def _dashboard_insert_profile(self,parent,profile):
         profile_id=profile["id"];node="profile:"+profile_id
-        genre=GENRES.get(profile.get("genre"))
+        genre_title=_genre_title_for_profile(profile)
         linked=oauth.is_connected(profile_id)
         self.dashboard_channels.insert(parent,"end",iid=node,text=profile.get("name",profile_id),
-            values=(profile.get("market",""),genre.title if genre else profile.get("genre",""),"연결됨" if linked else "연결 전"))
+            values=(profile.get("market",""),genre_title,"연결됨" if linked else "연결 전"))
         self._dashboard_tree_profiles[node]=profile_id
 
     def _dashboard_schedule_label(self,profile):
@@ -839,7 +975,7 @@ class Studio(tk.Tk):
 
     def reload_profiles(self,select_id=None):
         self.profiles=store.list_profiles()
-        values=[f'{x["name"]}  |  {x["market"]}  |  {GENRES[x["genre"]].title}' for x in self.profiles]
+        values=[f'{x["name"]}  |  {x["market"]}  |  {_genre_title_for_profile(x)}' for x in self.profiles]
         self.profile_combo["values"]=values
         ids=[x["id"] for x in self.profiles]
         if not ids:
@@ -870,13 +1006,17 @@ class Studio(tk.Tk):
         self.comment_video=None
         self.comment_label.set("영상 선택 없음")
         state = "Google 연결됨" if oauth.is_connected(self.active_id) else "연결 전"
-        related=store.normalize_related_genres(profile["genre"],profile.get("related_genres_json","[]"))
-        related_text=", ".join(GENRES[key].title for key in related) if related else "없음"
-        self.profile_description.set(f'{profile["market"]} · 핵심 {GENRES[profile["genre"]].title} · 유사 {related_text} · {state}')
+        config=store.profile_genre_config(profile)
+        related=store.normalize_related_genres(profile["genre"],profile.get("related_genres_json","[]"),config["custom_genres"])
+        related_text=", ".join(genre_engine.genre_title(key,config["custom_genres"]) for key in related) if related else "없음"
+        core_title=_genre_title_for_profile(profile)
+        config=store.profile_genre_config(profile)
+        subgenre_text=", ".join(config["subgenres"]) if config["subgenres"] else "없음"
+        self.profile_description.set(f'{profile["market"]} · 핵심 {core_title} · 세부 {subgenre_text} · 유사 {related_text} · {state}')
         account = profile.get("connected_email") or "Google 미연결"
         channel = profile.get("youtube_channel_title") or "채널 정보 없음"
         self.active_account_banner.set(
-            f"현재 작업: {profile['name']} | {profile['market']} | 핵심 {GENRES[profile['genre']].title} | 유사 {related_text} | {account} | {channel}")
+            f"현재 작업: {profile['name']} | {profile['market']} | 핵심 {core_title} | 유사 {related_text} | {account} | {channel}")
         self.refresh_account_status()
         self._reload_terms()
         self.reload_candidates()
@@ -891,8 +1031,8 @@ class Studio(tk.Tk):
         dialog=ProfileDialog(self)
         if dialog.result:
             try:
-                name,market,genre,related=dialog.result
-                ident=store.create_profile(name,market,genre,related_genres=related)
+                name,market,genre,related,genre_config=dialog.result
+                ident=store.create_profile(name,market,genre,related_genres=related,genre_config=genre_config)
                 self.reload_profiles(ident)
                 self.tabs.select(self.frames[0])
             except Exception as exc: messagebox.showerror("채널 추가 실패",str(exc))
@@ -917,8 +1057,8 @@ class Studio(tk.Tk):
         dialog=ProfileDialog(self,old)
         if dialog.result:
             try:
-                name,market,genre,related=dialog.result
-                store.update_profile(old["id"],name=name,market=market,genre=genre,related_genres=related)
+                name,market,genre,related,genre_config=dialog.result
+                store.update_profile(old["id"],name=name,market=market,genre=genre,related_genres=related,genre_config=genre_config)
                 self.reload_profiles(old["id"])
             except Exception as exc: messagebox.showerror("채널 수정 실패",str(exc))
 
@@ -1021,7 +1161,7 @@ class Studio(tk.Tk):
                 + "  |  대상: " + profile['market'] + "  |  조회 전용")
         else:
             self.oauth_status.set("미연결: " + profile['name'] + " · " + profile['market']
-                + " · " + GENRES[profile['genre']].title)
+                + " · " + _genre_title_for_profile(profile))
         accounts=[]
         for account_row in store.list_google_accounts():
             connected_profiles=[row for row in account_row["profiles"] if oauth.is_connected(row["id"])]
@@ -1181,7 +1321,7 @@ class Studio(tk.Tk):
         for item in terms:self.keyword_list.insert(tk.END,item)
         self.keyword_list.select_set(0)
         self.search_tree.delete(*self.search_tree.get_children())
-        self.search_status.set(f"{profile['market']} / 핵심 {GENRES[profile['genre']].title} 검색어 {core_count}개 + 유사 장르 검색어 {related_count}개 준비됨")
+        self.search_status.set(f"{profile['market']} / 핵심 {_genre_title_for_profile(profile)} 검색어 {core_count}개 + 유사 장르 검색어 {related_count}개 준비됨")
 
     def selected_terms(self):
         ids=self.keyword_list.curselection()
@@ -1224,7 +1364,8 @@ class Studio(tk.Tk):
                 if self.active_id==profile["id"]:
                     self.search_tree.delete(*self.search_tree.get_children())
                     for row in unique.values():
-                        decision=assess(profile["genre"],row.get("video_title",""),row.get("description",""))
+                        config=store.profile_genre_config(profile)
+                        decision=assess(profile["genre"],row.get("video_title",""),row.get("description",""),config["custom_genres"])
                         if decision.decision=="제외":continue
                         self.search_tree.insert("","end",iid=row["video_id"],values=(row.get("channel_title",""),row.get("video_title",""),
                             f"{decision.decision} {decision.score}",row.get("country") or "미공개"))
@@ -1339,13 +1480,18 @@ class Studio(tk.Tk):
         item=store.get_candidate(self.active_id,self.selected_video)
         if not item:return
         profile=self.current_profile()
+        try:
+            candidate_config=store._normalize_genre_config(item.get("genre_config_snapshot_json") or profile.get("genre_config_json", "{}"))
+        except ValueError:
+            candidate_config=store.profile_genre_config(profile)
+        custom_genres=candidate_config["custom_genres"]
         related_info=related_classification(
             item.get("classified_genre") or profile["genre"],
-            store.normalize_related_genres(item.get("classified_genre") or profile["genre"],item.get("related_genres_json","[]")),
-            item["video_title"],item.get("description",""))
+            store.normalize_related_genres(item.get("classified_genre") or profile["genre"],item.get("related_genres_json","[]"),custom_genres),
+            item["video_title"],item.get("description",""),custom_genres)
         labels={"core_fit":"핵심 적합","cross_genre_review":"교차 장르 검토",
                 "related_reference":"유사 장르 참고 후보","review":"검토","exclude":"제외"}
-        related_signals=[GENRES[key].title for key in related_info["related_evidence"]]
+        related_signals=[genre_engine.genre_title(key,custom_genres) for key in related_info["related_evidence"]]
         self.item_status.set(item["status"])
         self.notes.delete("1.0",tk.END)
         self.notes.insert("1.0",item["notes"])
@@ -2010,7 +2156,7 @@ class Studio(tk.Tk):
             return
         connected=oauth.is_connected(profile["id"])
         account=profile.get("connected_email") or ("Google 읽기 전용 연결됨" if connected else "Google 연결 전")
-        self.autopilot_profile_text.set(f"프로필: {profile['name']} · {profile['market']} · {GENRES[profile['genre']].title} · 계정: {account}")
+        self.autopilot_profile_text.set(f"프로필: {profile['name']} · {profile['market']} · {_genre_title_for_profile(profile)} · 계정: {account}")
         provider_id=self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
         model=self.ai_gemini_model.get() if provider_id=="gemini" else ("로컬 모델" if provider_id=="ollama" else provider_id)
         self.autopilot_scope_text.set(f"추천 적합 목표 {self.ai_target.get()}개 · AI {model} · 검색 호출 최대 {self.ai_max_calls.get()}회 · 사람 승인/실청취 라벨은 별도")
@@ -2078,7 +2224,7 @@ class Studio(tk.Tk):
                           else ai_research.OpenAIProvider())
             elif provider_id=="ollama":
                 provider=ai_research.OllamaProvider()
-            summary=(f"프로필 {profile['name']} ({profile['market']} / {GENRES[profile['genre']].title})\n"
+            summary=(f"프로필 {profile['name']} ({profile['market']} / {_genre_title_for_profile(profile)})\n"
                      f"목표 적합 {target}개 · YouTube 검색 호출 최대 {max_calls}회 · 검색어 {len(plan['search_terms'])}개\n"
                      f"연구 일정 {self.schedule_hours.get()}시간 · 연구 {self.schedule_research_minutes.get()}분 / 휴식 {self.schedule_break_minutes.get()}분 · 시작 {self.schedule_start_time.get().strip() or '지금'} (PC 현지 시각) · 저부하 {'켜짐' if self.resource_low_load_var.get() else '꺼짐'}\n"
                      f"AI: {provider_id} / {getattr(provider,'model','none')} · AI 호출은 최대 10회/작업이며 검색 한도와 별도입니다.\n"
@@ -2988,7 +3134,7 @@ class Studio(tk.Tk):
         provider_label=self.ai_provider_choice.get()
         usage=store.ai_usage_summary(self.active_id).get(plan["provider_id"],{"requests":0,"unknown_cost":0})
         budget="비용 없음 (규칙만)" if provider_label=="규칙만" else ("로컬 Ollama; 기기 자원 사용" if provider_label.startswith("Ollama") else "현재 모델 요금 확인이 필요해 비용을 추정하지 않음")
-        self.ai_status.set(f"미리보기: {plan['profile_name']} · {plan['market']} / {GENRES[plan['genre']].title} · 목표 {plan['target_candidates']}개 · 검색어 호출 최대 {plan['max_search_calls']}회 · AI {provider_label} · {budget}\n"
+        self.ai_status.set(f"미리보기: {plan['profile_name']} · {plan['market']} / {plan['genre_title']} · 목표 {plan['target_candidates']}개 · 검색어 호출 최대 {plan['max_search_calls']}회 · AI {provider_label} · {budget}\n"
                            f"공급자 오늘 사용 {usage['requests']}/30회 · 이 작업 AI 최대 10회 · 비용 미확정 {usage['unknown_cost']}회. YouTube 검색 호출과 AI 호출/비용은 별도 집계합니다.\n"
                            f"검색어 예시:\n{terms}\n미리보기 중 API/AI 호출 0회. Demo는 오프라인이며, 실제 조사 버튼은 확인 후 YouTube 읽기 전용 검색을 수행합니다.")
 
@@ -2997,7 +3143,7 @@ class Studio(tk.Tk):
         if not plan or plan.get("profile_id") != self.active_id:
             messagebox.showinfo("계획 먼저 보기","조사 프로필을 선택한 뒤 계획을 다시 미리보기 하세요.",parent=self); return
         if not messagebox.askyesno("Demo 계획 확인",
-             f"{plan['profile_name']} ({plan['market']} / {GENRES[plan['genre']].title})의 가상 데이터 3건을 검사합니다.\n\n"
+             f"{plan['profile_name']} ({plan['market']} / {plan['genre_title']})의 가상 데이터 3건을 검사합니다.\n\n"
              "실제 검색·외부 AI 호출·DB 저장은 하지 않습니다. 진행할까요?",parent=self): return
         if self.ai_running: return
         profile_id=self.active_id
@@ -3077,7 +3223,7 @@ class Studio(tk.Tk):
                 messagebox.showwarning("비용 상한 필요","유료 AI는 공급자의 현재 가격을 직접 확인하고, 안전 여유를 포함한 1회 추정 비용과 1일 상한(USD)을 입력해야 합니다. 가격을 확인할 수 없으면 규칙 전용 또는 Ollama를 사용하세요.",parent=self); return
         ai_privacy=("선택한 공급자에 검토 후보 제목·설명을 보낼 수 있습니다. 이메일, OAuth 토큰, 개인 메모는 보내지 않습니다."
                     if provider_id in ("ollama","openai","gemini") and not provider_note else "AI 외부 전송은 하지 않고 기존 규칙 엔진만 사용합니다.")
-        consent_text=(f"{plan['profile_name']} · {plan['market']} · {GENRES[plan['genre']].title}\n"
+        consent_text=(f"{plan['profile_name']} · {plan['market']} · {plan['genre_title']}\n"
                       f"목표 {plan['target_candidates']}개 / 검색어 호출 최대 {plan['max_search_calls']}회\n\n"
                       f"YouTube 읽기 전용 검색을 실행하고 후보를 이 프로필에 저장합니다. {ai_privacy} 취소해도 수집된 결과는 이 프로필에만 남습니다.\n\n계속할까요?")
         if not messagebox.askyesno("실제 조사 실행 확인",consent_text,parent=self): return
@@ -3279,7 +3425,9 @@ class Studio(tk.Tk):
                 stamp_key=(p["id"],stamp)
                 if hhmm in p["schedule"].split(",") and stamp_key not in self.scheduler_fired and (self.api_key.get().strip() or oauth.is_connected(p["id"])):
                     self.scheduler_fired.add(stamp_key)
-                    terms=search_terms(p["genre"],p["market"])
+                    terms,_,_=ai_research._profile_query_plan(p,12)
+                    if not terms:
+                        continue
                     pos=(now.toordinal()+now.hour)%len(terms)
                     self.api_search(scheduled=True,profile_id=p["id"],keywords=[terms[pos]])
                     break

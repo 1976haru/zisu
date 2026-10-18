@@ -1,5 +1,6 @@
 """Conservative, explainable KR/JP music-genre classification."""
 from dataclasses import dataclass
+import hashlib
 import re
 
 FIT, REVIEW, EXCLUDE, MANUAL_APPROVAL = "적합", "검토", "제외", "수동 승인"
@@ -13,6 +14,10 @@ class Genre:
     kr_queries: tuple[str, ...]
     required_context: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    en_queries: tuple[str, ...] = ()
+    is_custom: bool = False
+    localized_queries: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 COMMON_NON_MUSIC = ("asmr", "먹방", "朗読", "環境音", "백색소음", "white noise")
 SLEEP_STUDY = ("수면", "숙면", "공부", "집중", "作業用", "睡眠用", "勉強用", "lofi beats to study")
@@ -52,6 +57,130 @@ GENRES = {
   ("재즈 라운지 플레이리스트", "스무스 재즈", "라운지 재즈", "Jazz Lounge Korea", "밤 재즈 라운지", "호텔 라운지 재즈", "성인 재즈 라운지", "카페 재즈 라운지", "보사노바 재즈 라운지", "도시 재즈 라운지", "재즈 라운지 믹스", "편안한 재즈 라운지"), conflicts=("CAFE_CHILL",)),
 }
 
+# Existing V2/V3 IDs remain a stable compatibility boundary.
+LEGACY_GENRE_IDS = tuple(GENRES)
+
+# Additional conservative built-in presets. Existing six IDs and definitions
+# above remain stable for persisted V2/V3 profiles and audit rows.
+_PRESETS = {
+ "JAZZ_SMOOTH": ("Jazz / Smooth Jazz", ("smooth jazz", "jazz", "스무스 재즈", "재즈", "スムースジャズ", "ジャズ"),
+   ("asmr", "sleep music", "no vocals", "ambient only"), ("スムースジャズ", "ジャズラウンジ", "朝 ジャズ"), ("스무스 재즈", "재즈 라운지", "아침 재즈"), ("smooth jazz playlist", "jazz lounge")),
+ "INDIE_POP": ("Indie / Indie Pop", ("indie pop", "indie", "인디 팝", "인디 음악", "インディーポップ", "インディーズ"),
+   ("asmr", "karaoke", "instrumental only"), ("インディーポップ", "日本 インディー", "インディーズ 音楽"), ("인디 팝", "한국 인디 음악", "인디 플레이리스트"), ("indie pop playlist", "independent music")),
+ "LOFI": ("Lo-fi", ("lo-fi", "lofi", "lo fi"), ("asmr", "white noise", "rain sounds only"),
+   ("lofi hip hop", "ローファイ 音楽", "作業用 lo-fi"), ("로파이 음악", "lofi 힙합", "공부 로파이"), ("lo-fi playlist", "lofi beats")),
+ "MELODIC_HIPHOP": ("Melodic Hip-Hop", ("melodic hip-hop", "melodic hip hop", "멜로딕 힙합", "멜로딕 랩", "メロディックヒップホップ", "メロディックラップ"),
+   ("asmr", "sleep music", "no vocals"), ("メロディックラップ", "メロディックヒップホップ"), ("멜로딕 랩", "멜로딕 힙합"), ("melodic hip-hop playlist", "melodic rap")),
+ "CAFE_POP": ("Cafe Pop", ("cafe pop", "카페 팝", "카페 음악", "カフェポップ", "カフェミュージック"),
+   ("asmr", "sleep music", "no music"), ("カフェポップ", "カフェミュージック", "喫茶店 音楽"), ("카페 팝", "카페 플레이리스트", "카페 음악"), ("cafe pop playlist", "cafe music")),
+ "CAFE_JAZZ": ("Cafe Jazz", ("cafe jazz", "카페 재즈", "카페 재즈 음악", "カフェジャズ", "カフェ ボサノバ"),
+   ("asmr", "sleep music", "no music"), ("カフェジャズ", "喫茶店 ジャズ"), ("카페 재즈", "카페 재즈 플레이리스트"), ("cafe jazz playlist", "cafe bossa nova")),
+ "SENIOR_OLDIES": ("Senior Oldies", ("senior oldies", "oldies", "시니어 올드팝", "추억의 팝송", "懐メロ", "オールディーズ"),
+   ("asmr", "karaoke only"), ("懐メロ 洋楽", "オールディーズ", "シニア ポップス"), ("시니어 올드팝", "추억의 팝송", "7080 올드팝"), ("senior oldies", "classic pop hits")),
+ "CHANSON": ("Chanson", ("chanson", "샹송", "シャンソン", "프랑스 샹송"),
+   ("asmr", "instrumental only"), ("フレンチシャンソン", "シャンソン 名曲"), ("샹송 명곡", "프랑스 샹송"), ("chanson playlist", "french chanson")),
+ "LATIN": ("Latin", ("latin music", "라틴 음악", "라틴 팝", "ラテン音楽", "ラテンポップ"),
+   ("asmr", "instrumental only"), ("ラテンポップ", "ラテン音楽"), ("라틴 음악", "라틴 팝 플레이리스트"), ("latin pop playlist", "latin music")),
+ "BOSSA_NOVA": ("Bossa Nova", ("bossa nova", "보사노바", "보사 노바", "ボサノバ", "ボサ・ノヴァ"),
+   ("asmr", "sleep sounds only"), ("ボサノバ", "ボサノバ カフェ"), ("보사노바", "카페 보사노바"), ("bossa nova playlist", "bossa nova cafe")),
+ "ACOUSTIC_BALLAD": ("Acoustic / Ballad", ("acoustic ballad", "acoustic", "어쿠스틱 발라드", "발라드", "アコースティックバラード", "バラード"),
+   ("asmr", "white noise", "instrumental only"), ("アコースティックバラード", "バラード名曲"), ("어쿠스틱 발라드", "발라드 플레이리스트"), ("acoustic ballad playlist", "acoustic songs")),
+}
+for _genre_id, (_title, _positive, _negative, _jp, _kr, _en) in _PRESETS.items():
+    GENRES[_genre_id] = Genre(_title, _positive, _negative, _jp, _kr,
+                              aliases=_positive, en_queries=_en)
+
+
+def custom_genre_id(name: str) -> str:
+    """Return a stable opaque ID for a user-defined genre name."""
+    normalized = " ".join(str(name or "").split()).casefold()
+    if not 2 <= len(normalized) <= 80:
+        raise ValueError("장르 이름은 2~80자로 입력하세요.")
+    return "CUSTOM_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16].upper()
+
+
+def validate_custom_genres(definitions) -> list[dict]:
+    if definitions is None:
+        return []
+    if not isinstance(definitions, (list, tuple)) or len(definitions) > 50:
+        raise ValueError("사용자 장르는 프로필마다 최대 50개까지 등록할 수 있습니다.")
+    normalized = []
+    seen = set()
+    fields = {"aliases": 24, "include_terms": 24, "exclude_terms": 24,
+              "jp_queries": 24, "kr_queries": 24, "en_queries": 24, "conflicts": 12}
+    for item in definitions:
+        if not isinstance(item, dict):
+            raise ValueError("사용자 장르 설정 형식이 올바르지 않습니다.")
+        allowed = {"id", "name", *fields, "localized_queries"}
+        if set(item) - allowed:
+            raise ValueError("지원하지 않는 사용자 장르 설정 항목이 있습니다.")
+        name = " ".join(str(item.get("name", "")).split())
+        genre_id = str(item.get("id") or custom_genre_id(name))
+        if not re.fullmatch(r"CUSTOM_[A-F0-9]{16}", genre_id) or genre_id in seen or genre_id in GENRES:
+            raise ValueError("사용자 장르 ID가 중복되었거나 잘못되었습니다.")
+        if not 2 <= len(name) <= 80:
+            raise ValueError("사용자 장르 이름은 2~80자로 입력하세요.")
+        seen.add(genre_id)
+        record = {"id": genre_id, "name": name}
+        for field, limit in fields.items():
+            raw = item.get(field, [])
+            if isinstance(raw, str):
+                raw = raw.splitlines() if field == "conflicts" else raw.split(",")
+            if not isinstance(raw, (list, tuple)) or len(raw) > limit:
+                raise ValueError(f"{field} 목록이 올바르지 않습니다.")
+            values = []
+            for value in raw:
+                text = " ".join(str(value).split())
+                if len(text) > 100:
+                    raise ValueError(f"{field} 항목은 100자 이하여야 합니다.")
+                if text and text not in values:
+                    values.append(text)
+            record[field] = values
+        if not record["include_terms"]:
+            raise ValueError("사용자 장르에는 적어도 하나의 포함 신호가 필요합니다.")
+        localized = item.get("localized_queries", {})
+        if not isinstance(localized, dict) or len(localized) > 8:
+            raise ValueError("추가 언어 검색어 설정이 올바르지 않습니다.")
+        localized_clean = {}
+        for language, raw_terms in localized.items():
+            code = str(language).strip().upper()
+            if not re.fullmatch(r"[A-Z0-9]{2,12}", code) or code in {"JP", "KR", "EN"}:
+                raise ValueError("추가 검색 언어 코드는 JP/KR/EN을 제외한 영문·숫자 2~12자여야 합니다.")
+            if isinstance(raw_terms, str):
+                raw_terms = raw_terms.split(",")
+            if not isinstance(raw_terms, (list, tuple)) or len(raw_terms) > 24:
+                raise ValueError("언어별 검색어는 최대 24개까지 가능합니다.")
+            terms = [" ".join(str(term).split()) for term in raw_terms if str(term).strip()]
+            if any(len(term) > 100 for term in terms):
+                raise ValueError("검색어는 100자 이하여야 합니다.")
+            localized_clean[code] = list(dict.fromkeys(terms))
+        record["localized_queries"] = localized_clean
+        if any(value not in GENRES and value not in seen for value in record["conflicts"]):
+            # Cross-references may target another custom definition declared later;
+            # full validation is completed after all IDs have been collected below.
+            pass
+        normalized.append(record)
+    valid_ids = set(GENRES) | seen
+    if any(value not in valid_ids for item in normalized for value in item["conflicts"]):
+        raise ValueError("충돌 장르는 등록된 프리셋 또는 사용자 장르여야 합니다.")
+    return normalized
+
+
+def custom_catalog(definitions=None) -> dict[str, Genre]:
+    result = {}
+    for item in validate_custom_genres(definitions):
+        result[item["id"]] = Genre(item["name"], tuple(item["include_terms"]),
+            tuple(item["exclude_terms"]), tuple(item["jp_queries"]), tuple(item["kr_queries"]),
+            conflicts=tuple(item["conflicts"]), aliases=tuple(item["aliases"]),
+            en_queries=tuple(item["en_queries"]), is_custom=True,
+            localized_queries=tuple((code, tuple(terms)) for code, terms in item["localized_queries"].items()))
+    return result
+
+
+def genre_title(genre_id: str, custom_genres=None) -> str:
+    genre = GENRES.get(genre_id) or custom_catalog(custom_genres).get(genre_id)
+    return genre.title if genre else f"미등록 장르 ({genre_id})"
+
 @dataclass(frozen=True)
 class Verdict:
     decision: str
@@ -68,7 +197,7 @@ def _contains(text: str, term: str) -> bool:
     return folded in text
 
 def _signals(genre: Genre, text: str) -> list[str]:
-    return [term for term in genre.positives if _contains(text, term)]
+    return [term for term in (*genre.positives, *genre.aliases) if _contains(text, term)]
 
 
 # A genre word alone is insufficient. For these rap genres, corroborating
@@ -96,9 +225,14 @@ def _rap_support(genre_id: str, description: str) -> tuple[str, ...]:
             evidence.append(f"{group}: {match}")
     return tuple(evidence)
 
-def assess(genre_id: str, title: str, description: str = "") -> Verdict:
+def assess(genre_id: str, title: str, description: str = "", custom_genres=None) -> Verdict:
     """Classify from metadata only; search keywords never influence the result."""
-    genre = GENRES[genre_id]
+    custom = custom_catalog(custom_genres)
+    catalog = {**GENRES, **custom}
+    genre = catalog.get(genre_id)
+    if not genre:
+        return Verdict(REVIEW, 0, "선택한 장르 규칙을 찾을 수 없습니다. 장르 설정을 확인하세요.",
+                       uncertainty="미지원 또는 미등록 장르")
     title_text = (title or "").casefold()
     description_text = (description or "")[:1500].casefold()
     combined = title_text + "\n" + description_text
@@ -123,7 +257,29 @@ def assess(genre_id: str, title: str, description: str = "") -> Verdict:
         # all agree. Keep Cafe/Jazz and other unrelated genre conflicts intact.
         if morning_rap_compatibility and other_id in {"CHILL_RAP", "RNB_HIPHOP"}:
             continue
-        conflicting.extend(_signals(GENRES[other_id], combined))
+        other = catalog.get(other_id)
+        if other:
+            conflicting.extend(_signals(other, combined))
+    if genre.is_custom:
+        # User rules are never treated as audio truth. A direct title match and
+        # two distinct description signals are required before custom FIT.
+        title_hits = _signals(genre, title_text)
+        description_hits = _signals(genre, description_text)
+        score = min(95, 55 * bool(title_hits) + 10 * min(len(set(description_hits)), 4))
+        conflicting = []
+        for other_id in genre.conflicts:
+            other = catalog.get(other_id)
+            if other:
+                conflicting.extend(_signals(other, combined))
+        positives = tuple(dict.fromkeys(title_hits + description_hits))
+        if conflicting:
+            conflicts = tuple(dict.fromkeys(conflicting))
+            return Verdict(REVIEW, min(score, 69), "충돌하는 장르 신호가 있어 직접 확인이 필요합니다.",
+                           positives, conflicts, "사용자 장르 규칙 간 충돌")
+        if title_hits and len(set(description_hits)) >= 2 and score >= 75:
+            return Verdict(FIT, score, "사용자 설정 장르 신호가 제목과 설명에서 함께 확인됨 (실제 음원 청취 확인 아님)", positives)
+        return Verdict(REVIEW, score, "사용자 장르 설정만으로 음원 장르를 확정할 근거가 부족합니다.",
+                       positives, uncertainty="메타데이터 근거 부족 또는 직접 청취 필요")
     score = min(100, 55 * bool(title_hits) + 15 * min(max(len(title_hits)-1, 0), 1)
                 + 10 * min(len(description_hits), 2) + 8 * len(support_evidence))
     positives = tuple(dict.fromkeys(title_hits + description_hits + list(support_evidence)))
@@ -153,20 +309,35 @@ def assess(genre_id: str, title: str, description: str = "") -> Verdict:
     return Verdict(REVIEW, 0, "장르 근거 부족: 직접 감상 후 검토",
                    uncertainty="긍정 신호 없음")
 
-def search_terms(genre_id: str, market: str) -> tuple[str, ...]:
-    if market not in ("JP", "KR"):
-        raise ValueError("시장 코드는 JP 또는 KR이어야 합니다.")
-    genre = GENRES[genre_id]
-    return genre.jp_queries if market == "JP" else genre.kr_queries
+def search_terms(genre_id: str, market: str, custom_genres=None, language: str | None = None) -> tuple[str, ...]:
+    """Return locale-specific queries; locale controls search text, not identity."""
+    locale = (language or market or "").upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,12}", locale):
+        raise ValueError("검색 언어 코드는 영문/숫자 2~12자여야 합니다.")
+    genre = GENRES.get(genre_id) or custom_catalog(custom_genres).get(genre_id)
+    if not genre:
+        return ()
+    if locale == "JP":
+        return genre.jp_queries
+    if locale == "KR":
+        return genre.kr_queries
+    if locale == "EN":
+        return genre.en_queries
+    localized = dict(genre.localized_queries)
+    if locale not in localized:
+        raise ValueError("해당 장르에 등록된 검색어 언어가 아닙니다.")
+    return localized[locale]
 
-def related_classification(core_id: str, related_ids, title: str, description: str = "") -> dict:
+def related_classification(core_id: str, related_ids, title: str, description: str = "", custom_genres=None) -> dict:
     """Keep core verdict independent; related signals are evidence, never promotion."""
-    core = assess(core_id, title, description)
+    core = assess(core_id, title, description, custom_genres)
+    custom = custom_catalog(custom_genres)
+    catalog = {**GENRES, **custom}
     signals = {}
     for genre_id in related_ids or ():
-        if genre_id not in GENRES or genre_id == core_id:
+        if genre_id not in catalog or genre_id == core_id:
             continue
-        result = assess(genre_id, title, description)
+        result = assess(genre_id, title, description, custom_genres)
         if result.positive_signals:
             signals[genre_id] = {"decision": result.decision, "signals": result.positive_signals}
     if core.decision == EXCLUDE:

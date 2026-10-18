@@ -1,5 +1,16 @@
 # ZISU Integrated Project Status
 
+### Latest state — V4.6.0 integrated offline implementation batch (2026-10-18)
+
+- The formerly Deferred V46-GENRE-FLEX-01 is implemented offline in this branch. It adds 11 genre presets and profile-local custom genres, independent core/related/subgenre and mood/era/audience/content-language/search-language facets, and connects these settings to profile UI, query planning, metadata rules, AI context/cache, candidate diversity, schedule snapshots and dashboard labels.
+- Database changes are additive. Six legacy genre IDs remain stable. Legacy `subgenre` is copied once into structured `subgenres` when the new config column is first introduced, while the original field remains intact. Candidate/audit/schedule snapshots preserve decision-time settings; active work prevents config changes; human labels are not rewritten.
+- Custom-genre FIT requires a direct title signal plus at least two distinct metadata description signals. AI FIT alone cannot promote an uncertain custom-genre result. Unknown rules remain REVIEW.
+- Integration review fixed the Autopilot fail-closed wrapper dropping genre context before provider review; it now forwards supported custom/core/related/facet context. A targeted contract test covers the path.
+- Batch verification after final rerun: **280 unit tests, 279 PASS / 1 opt-in installed-browser SKIP / 0 FAIL**; offline acceptance **29/29 PASS**; GUI smoke `GUI_SMOKE_PASS`; compileall PASS; `git diff --check` PASS. Eight focused flex tests and 30 core/store tests passed. These are isolated Mock/database checks, not live discovery accuracy.
+- Existing weighted estimates remain overall **86.18%**, V4.5.9/release **90.83%**, V4.6.0 **79.20%** under the current fixed denominator. V46-GENRE-FLEX-01 is **78% estimated** and reported separately because it had previously been excluded from the 100-point score. Estimates are not test metrics.
+- No live Google/YouTube/Gemini/Analytics request, actual Chrome lifecycle, human audio label, visual DPI review, V4.5.9 install, user DB, OAuth or DPAPI store was accessed. Actual Chrome, visual DPI, live search/human quality, live Analytics/quota and six-hour wall-clock operation remain PENDING. Final cross-version/security/stress QA was not started.
+- GitHub push/CI was not attempted. PR #4 Draft, `main`, PR #2 and installed V4.5.9 were not touched. Local commit is pending at this status entry.
+
 ### V46-05 synthetic genre-rule quality follow-up (2026-10-18)
 
 - Baseline evaluator result was 17/24 synthetic matches. The seven expected-FIT / actual-REVIEW cases and findings were:
@@ -14,7 +25,7 @@
 - Added regression tests in `tests/test_core.py` for support thresholds, cross-genre compatibility constraints, and negative context in EN/KR/JP.
 - After result: 23/24 synthetic agreement (95.8%); the one remaining `mcr_kr_fit_02` expectation is considered ambiguous and is deliberately not promoted without stronger evidence. Market agreement: JP Morning 6/6, KR Morning 5/6, JP Chill 6/6, KR Chill 6/6. These are synthetic fixture agreement figures only. No human labels or actual audio/search samples exist; real-search precision/recall is **not measured**.
 - Verification: focused genre/core, fixture evaluator, candidate diversity and Autopilot tests passed 51/51. Full unit suite: **272 run, 271 PASS / 1 opt-in browser SKIP / 0 FAIL**. Offline acceptance **23/23 PASS**; GUI smoke `GUI_SMOKE_PASS`; compileall and `git diff --check` passed. The skip is the opt-in live-browser integration, not treated as success. No real APIs, user DB, credentials, final integrated QA or wall-clock six-hour test used.
-- V46-GENRE-FLEX-01 remains Deferred and unimplemented. Fixed-ID handoff inventory for that later task:
+- At this historical V46-05 follow-up point, V46-GENRE-FLEX-01 remained Deferred. The fixed-ID handoff inventory below is historical and is superseded by the latest implementation entry at the top of this document:
   - `mcrs/genres.py`: `GENRES`, `assess`, `search_terms`, `related_classification`, `_RAP_SUPPORT_GENRES`, Morning-specific compatibility and context rules.
   - `mcrs/store.py`: `normalize_related_genres`, `create_profile`, `update_profile`, and research-session settings/snapshots validate or persist the current fixed genre IDs.
   - `mcrs/gui.py`: `ProfileDialog` defaults and JP Morning related-genre suggestion; profile summaries; AI preview/demo candidates use hard-coded Morning Chill Rap examples.

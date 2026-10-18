@@ -9,7 +9,7 @@ import json
 from contextlib import contextmanager, closing
 from datetime import datetime, timezone
 from pathlib import Path
-from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess
+from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess, validate_custom_genres
 
 MARKETS = ("JP", "KR")
 
@@ -17,9 +17,71 @@ MARKETS = ("JP", "KR")
 class ActiveResearchSessionError(RuntimeError):
     """A profile already has an in-flight fit-target research job."""
 
-def normalize_related_genres(primary, related=()):
+def _normalize_genre_config(value=None):
+    if value is None:
+        value = {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("장르 설정을 읽을 수 없습니다.") from None
+    if not isinstance(value, dict) or set(value) - {"custom_genres", "subgenres", "facets", "search_languages"}:
+        raise ValueError("장르 설정 형식이 올바르지 않습니다.")
+    custom = validate_custom_genres(value.get("custom_genres", []))
+    facets = value.get("facets", {})
+    if not isinstance(facets, dict) or set(facets) - {"moods", "eras", "audiences", "languages"}:
+        raise ValueError("분위기·시대·청취 대상·언어 설정이 올바르지 않습니다.")
+    clean_facets = {}
+    for key in ("moods", "eras", "audiences", "languages"):
+        raw = facets.get(key, [])
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        if not isinstance(raw, (list, tuple)) or len(raw) > 12:
+            raise ValueError(f"{key} 설정은 최대 12개까지 가능합니다.")
+        values = []
+        for item in raw:
+            text = " ".join(str(item).split())
+            if len(text) > 60:
+                raise ValueError(f"{key} 항목은 60자 이하여야 합니다.")
+            if text and text not in values:
+                values.append(text)
+        clean_facets[key] = values
+    raw_subgenres = value.get("subgenres", [])
+    if isinstance(raw_subgenres, str):
+        raw_subgenres = raw_subgenres.split(",")
+    if not isinstance(raw_subgenres, (list, tuple)) or len(raw_subgenres) > 12:
+        raise ValueError("세부 장르는 최대 12개까지 설정할 수 있습니다.")
+    subgenres = []
+    for item in raw_subgenres:
+        text = " ".join(str(item).split())
+        if len(text) > 60:
+            raise ValueError("세부 장르 항목은 60자 이하여야 합니다.")
+        if text and text not in subgenres:
+            subgenres.append(text)
+    languages = value.get("search_languages", [])
+    if not isinstance(languages, (list, tuple)) or len(languages) > 8:
+        raise ValueError("검색 언어는 최대 8개까지 선택할 수 있습니다.")
+    clean_languages = []
+    for language in languages:
+        code = str(language).strip().upper()
+        if not code.isascii() or not code.isalnum() or not 2 <= len(code) <= 12:
+            raise ValueError("검색 언어 코드는 영문/숫자 2~12자로 입력하세요.")
+        if code not in clean_languages:
+            clean_languages.append(code)
+    return {"custom_genres": custom, "subgenres": subgenres, "facets": clean_facets,
+            "search_languages": clean_languages}
+
+
+def profile_genre_config(profile):
+    """Return validated profile-local custom genre rules and independent facets."""
+    return _normalize_genre_config(profile.get("genre_config_json", "{}"))
+
+
+def normalize_related_genres(primary, related=(), custom_genres=None):
     """Validate and canonicalize related genre IDs; legacy subgenre stays untouched."""
-    if primary not in GENRES:
+    custom = {item["id"] for item in validate_custom_genres(custom_genres or [])}
+    valid = set(GENRES) | custom
+    if primary not in valid:
         raise ValueError("Choose a registered core genre.")
     if related is None:
         related = ()
@@ -32,7 +94,7 @@ def normalize_related_genres(primary, related=()):
         raise ValueError("Related genres must be a list.")
     result = []
     for genre in related:
-        if genre not in GENRES:
+        if genre not in valid:
             raise ValueError("Only registered genres can be selected.")
         if genre != primary and genre not in result:
             result.append(genre)
@@ -111,6 +173,8 @@ def _add_column(db, table, definition):
 def initialize(path=None):
     """Create or migrate in place. Existing rows are never dropped or replaced."""
     with connect(path) as db:
+        profile_columns_before = {row[1] for row in db.execute("PRAGMA table_info(profiles)")}
+        migrate_legacy_subgenre = bool(profile_columns_before and "genre_config_json" not in profile_columns_before)
         # WAL permits readers during writes and is safe to request repeatedly.
         # SQLite keeps existing user rows intact when changing journal mode.
         db.execute("PRAGMA journal_mode=WAL")
@@ -139,6 +203,7 @@ def initialize(path=None):
           genre_decision TEXT NOT NULL, genre_score INTEGER NOT NULL,
           genre_reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT '미확인',
           classified_genre TEXT NOT NULL DEFAULT '', related_genres_json TEXT NOT NULL DEFAULT '[]',
+          genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}',
           notes TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id),
@@ -159,6 +224,7 @@ def initialize(path=None):
           rule_verdict TEXT NOT NULL DEFAULT '', ai_verdict TEXT NOT NULL DEFAULT '',
           proposed_verdict TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '',
           model_version TEXT NOT NULL DEFAULT '', decision_at TEXT NOT NULL DEFAULT '',
+          genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}',
           review_status TEXT NOT NULL DEFAULT 'needs_review',
           reviewed_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id),
@@ -207,6 +273,7 @@ def initialize(path=None):
           id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
           market TEXT NOT NULL CHECK(market IN ('JP','KR')),
           core_genre TEXT NOT NULL, related_genres_json TEXT NOT NULL DEFAULT '[]',
+          genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}',
           channel_id TEXT NOT NULL DEFAULT '', start_at_utc TEXT NOT NULL,
           total_minutes INTEGER NOT NULL, research_minutes INTEGER NOT NULL,
           break_minutes INTEGER NOT NULL, approved_search_calls INTEGER NOT NULL,
@@ -251,6 +318,7 @@ def initialize(path=None):
             "google_account_id TEXT NOT NULL DEFAULT ''",
             "subgenre TEXT NOT NULL DEFAULT ''",
             "related_genres_json TEXT NOT NULL DEFAULT '[]'",
+            "genre_config_json TEXT NOT NULL DEFAULT '{}'",
             "comment_persona_name TEXT NOT NULL DEFAULT ''",
             "comment_language TEXT NOT NULL DEFAULT ''",
             "comment_tone TEXT NOT NULL DEFAULT ''",
@@ -258,6 +326,15 @@ def initialize(path=None):
             "comment_length TEXT NOT NULL DEFAULT 'short'",
         ):
             _add_column(db, "profiles", definition)
+        if migrate_legacy_subgenre:
+            # Preserve the historical free-text subgenre while making it
+            # visible to the new structured search/UI configuration. This
+            # one-time additive migration only runs when the config column is
+            # first introduced; later intentional edits are not overwritten.
+            for row in db.execute("SELECT id,subgenre FROM profiles WHERE trim(subgenre)<>''"):
+                config = _normalize_genre_config({"subgenres": [row["subgenre"]]})
+                db.execute("UPDATE profiles SET genre_config_json=? WHERE id=?",
+                           (json.dumps(config, ensure_ascii=False, sort_keys=True), row["id"]))
         _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
         _add_column(db, "research_sessions", "diversity_version TEXT NOT NULL DEFAULT 'legacy'")
@@ -265,12 +342,18 @@ def initialize(path=None):
         _add_column(db, "research_schedules", "research_extension_cycle INTEGER NOT NULL DEFAULT -1")
         _add_column(db, "research_schedules", "research_extension_seconds INTEGER NOT NULL DEFAULT 0")
         _add_column(db, "research_schedules", "research_extension_used INTEGER NOT NULL DEFAULT 0")
+        _add_column(db, "research_schedules", "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+        db.execute("UPDATE research_schedules SET genre_config_snapshot_json=(SELECT genre_config_json FROM profiles "
+                   "WHERE profiles.id=research_schedules.profile_id) WHERE genre_config_snapshot_json='{}' "
+                   "AND EXISTS(SELECT 1 FROM profiles WHERE profiles.id=research_schedules.profile_id)")
         _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
         _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
+        _add_column(db, "candidates", "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'")
         for definition in (
             "rule_verdict TEXT NOT NULL DEFAULT ''", "ai_verdict TEXT NOT NULL DEFAULT ''",
             "proposed_verdict TEXT NOT NULL DEFAULT ''", "evidence TEXT NOT NULL DEFAULT ''",
             "model_version TEXT NOT NULL DEFAULT ''", "decision_at TEXT NOT NULL DEFAULT ''",
+            "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'",
             "review_status TEXT NOT NULL DEFAULT 'needs_review'",
         ):
             _add_column(db, "genre_audit", definition)
@@ -299,18 +382,21 @@ def initialize(path=None):
                        "channel_title=CASE WHEN excluded.channel_title='' THEN channel_title ELSE excluded.channel_title END",
                        (account_id,row["youtube_channel_id"] or "",row["youtube_channel_title"] or ""))
 
-def create_profile(name, market, genre, path=None, subgenre="", related_genres=None):
+def create_profile(name, market, genre, path=None, subgenre="", related_genres=None, genre_config=None):
     initialize(path)
     name = (name or "").strip()
     if not 2 <= len(name) <= 70:
         raise ValueError("프로필 이름은 2~70자로 입력하세요.")
-    if market not in MARKETS or genre not in GENRES:
+    config = _normalize_genre_config(genre_config)
+    custom_ids = {item["id"] for item in config["custom_genres"]}
+    if market not in MARKETS or genre not in set(GENRES) | custom_ids:
         raise ValueError("국가와 장르를 확인하세요.")
-    related = normalize_related_genres(genre, related_genres)
+    related = normalize_related_genres(genre, related_genres, config["custom_genres"])
     profile_id = uuid.uuid4().hex
     with connect(path) as db:
-        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre,related_genres_json) VALUES(?,?,?,?,?,?)",
-                   (profile_id,name,market,genre,(subgenre or "").strip()[:100],json.dumps(related)))
+        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre,related_genres_json,genre_config_json) VALUES(?,?,?,?,?,?,?)",
+                   (profile_id,name,market,genre,(subgenre or "").strip()[:100],json.dumps(related,ensure_ascii=False),
+                    json.dumps(config,ensure_ascii=False,sort_keys=True)))
     return profile_id
 
 def list_profiles(path=None):
@@ -511,27 +597,33 @@ def bind_google_account_channel(profile_id, channel_id, channel_title, email="",
                    (account_id,channel_id or "",channel_title.strip(),email,profile_id))
     return account_id
 
-def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None, related_genres=None):
+def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None, related_genres=None, genre_config=None):
     name = (name or "").strip()
-    if market not in MARKETS or genre not in GENRES:
-        raise ValueError("국가와 장르를 확인하세요.")
     if not 2 <= len(name) <= 70:
         raise ValueError("프로필 이름은 2~70자여야 합니다.")
     with connect(path) as db:
-        old = db.execute("SELECT market,genre,related_genres_json FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        old = db.execute("SELECT market,genre,related_genres_json,genre_config_json FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not old:
             raise ValueError("프로필을 찾을 수 없습니다.")
-        related = normalize_related_genres(genre, old["related_genres_json"] if related_genres is None else related_genres)
+        config = _normalize_genre_config(old["genre_config_json"] if genre_config is None else genre_config)
+        custom_ids = {item["id"] for item in config["custom_genres"]}
+        if market not in MARKETS or genre not in set(GENRES) | custom_ids:
+            raise ValueError("국가와 장르를 확인하세요.")
+        related = normalize_related_genres(genre, old["related_genres_json"] if related_genres is None else related_genres,
+                                           config["custom_genres"])
         count = db.execute("SELECT COUNT(*) FROM candidates WHERE profile_id=?", (profile_id,)).fetchone()[0]
         if count and (old["market"] != market or old["genre"] != genre):
             raise ValueError("후보가 저장된 프로필의 국가·장르는 변경할 수 없습니다. 새 프로필을 추가하세요.")
         old_related = json.loads(old["related_genres_json"] or "[]")
-        if (old["genre"] != genre or old_related != related) and db.execute(
-                "SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') LIMIT 1",
-                (profile_id,)).fetchone():
+        old_config = _normalize_genre_config(old["genre_config_json"])
+        if (old["genre"] != genre or old_related != related or old_config != config) and db.execute(
+                "SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') "
+                "UNION ALL SELECT 1 FROM research_schedules WHERE profile_id=? AND state IN ('paused','scheduled','running') LIMIT 1",
+                (profile_id, profile_id)).fetchone():
             raise ValueError("An active research session uses the current genre settings. Finish or cancel it before changing genres.")
-        assignments = "name=?,market=?,genre=?,related_genres_json=?"
-        values = [name, market, genre, json.dumps(related, ensure_ascii=False)]
+        assignments = "name=?,market=?,genre=?,related_genres_json=?,genre_config_json=?"
+        values = [name, market, genre, json.dumps(related, ensure_ascii=False),
+                  json.dumps(config, ensure_ascii=False, sort_keys=True)]
         if subgenre is not None:
             assignments += ",subgenre=?"; values.append((subgenre or "").strip()[:100])
         db.execute("UPDATE profiles SET " + assignments + " WHERE id=?", (*values, profile_id))
@@ -549,29 +641,33 @@ def save_candidates(profile_id, rows, path=None):
     if not profile:
         raise ValueError("선택한 프로필을 찾을 수 없습니다.")
     values, audit_values, stats = [], [], {"적합":0, "검토":0, "제외":0}
-    related_snapshot = json.dumps(normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]")), ensure_ascii=False)
+    config = profile_genre_config(profile)
+    custom = config["custom_genres"]
+    related_snapshot = json.dumps(normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]"), custom), ensure_ascii=False)
+    config_snapshot = json.dumps(config, ensure_ascii=False, sort_keys=True)
     for row in rows:
         video_id = str(row.get("video_id", ""))
         if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
             continue
         title = str(row.get("video_title", ""))[:1000]
         description = str(row.get("description", ""))[:10000]
-        verdict = assess(profile["genre"], title, description)
+        verdict = assess(profile["genre"], title, description, custom)
         stats[verdict.decision] += 1
         audit_values.append((profile_id,video_id,title,description,
           profile["market"],profile["genre"],verdict.decision,verdict.score,verdict.reason,
-          " | ".join(verdict.positive_signals)," | ".join(verdict.conflict_signals),verdict.uncertainty))
+          " | ".join(verdict.positive_signals)," | ".join(verdict.conflict_signals),verdict.uncertainty,config_snapshot))
         if verdict.decision == EXCLUDE:
             continue
         values.append((profile_id,video_id,title,str(row.get("channel_title",""))[:500],
           str(row.get("channel_id",""))[:200],f"https://www.youtube.com/watch?v={video_id}",description,
           str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),str(row.get("country",""))[:20],
           str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason,
-          profile["genre"],related_snapshot))
+          profile["genre"],related_snapshot,config_snapshot))
     with connect(path) as db:
         db.executemany("""INSERT INTO genre_audit(profile_id,video_id,video_title,description,market,
-          target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty,
+          genre_config_snapshot_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
           video_title=excluded.video_title,description=excluded.description,market=excluded.market,
           target_genre=excluded.target_genre,predicted_decision=excluded.predicted_decision,
           predicted_score=excluded.predicted_score,reason=excluded.reason,
@@ -579,8 +675,8 @@ def save_candidates(profile_id, rows, path=None):
           uncertainty=excluded.uncertainty,updated_at=CURRENT_TIMESTAMP""", audit_values)
         db.executemany("""INSERT INTO candidates(profile_id,video_id,video_title,channel_title,channel_id,
           video_url,description,published_at,views,country,keyword,genre_decision,genre_score,genre_reason,
-          classified_genre,related_genres_json)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          classified_genre,related_genres_json,genre_config_snapshot_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
           video_title=excluded.video_title,channel_title=excluded.channel_title,channel_id=excluded.channel_id,
           views=excluded.views,description=excluded.description,country=excluded.country,
           keyword=excluded.keyword,published_at=excluded.published_at,

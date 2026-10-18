@@ -1,6 +1,6 @@
 import csv, unittest
 from mcrs import store
-from mcrs.genres import EXCLUDE, FIT, REVIEW, GENRES, assess, search_terms
+from mcrs.genres import EXCLUDE, FIT, REVIEW, GENRES, LEGACY_GENRE_IDS, assess, search_terms
 from mcrs.gui import extract_video_id
 from mcrs.youtube_api import lookup_videos
 from support import WorkspaceTemp
@@ -8,12 +8,12 @@ from unittest.mock import patch
 
 class GenreTests(unittest.TestCase):
     def test_six_genres_and_local_queries(self):
-        self.assertEqual(6,len(GENRES))
-        for genre_id in GENRES:
+        self.assertEqual(6,len(LEGACY_GENRE_IDS))
+        for genre_id in LEGACY_GENRE_IDS:
             self.assertGreaterEqual(len(search_terms(genre_id,"JP")),10)
             self.assertGreaterEqual(len(search_terms(genre_id,"KR")),10)
     def test_market_queries_are_independent(self):
-        for genre_id in GENRES: self.assertTrue(set(search_terms(genre_id,"JP")).isdisjoint(search_terms(genre_id,"KR")))
+        for genre_id in LEGACY_GENRE_IDS: self.assertTrue(set(search_terms(genre_id,"JP")).isdisjoint(search_terms(genre_id,"KR")))
     def test_morning_needs_time_and_genre(self):
         self.assertEqual(FIT,assess("MORNING_CHILL_RAP","아침 Morning Chill Rap 플레이리스트").decision)
         self.assertEqual(REVIEW,assess("MORNING_CHILL_RAP","Chill Rap playlist").decision)
@@ -136,7 +136,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("legacy value",profile["subgenre"])
         with self.assertRaises(ValueError): store.update_profile(self.jp,name="JP test",market="JP",genre="MORNING_CHILL_RAP",
             related_genres=["BAD_GENRE"],path=self.db)
-        self.assertEqual(5, len(store.normalize_related_genres("MORNING_CHILL_RAP", list(GENRES))))
+        self.assertEqual(5, len(store.normalize_related_genres("MORNING_CHILL_RAP", list(LEGACY_GENRE_IDS))))
 
     def test_legacy_profile_migration_adds_empty_related_without_data_loss(self):
         import sqlite3
@@ -148,6 +148,12 @@ class StoreTests(unittest.TestCase):
         profile=store.get_profile("legacy",legacy)
         self.assertEqual("kept",profile["subgenre"])
         self.assertEqual("[]",profile["related_genres_json"])
+        self.assertEqual(["kept"],store.profile_genre_config(profile)["subgenres"])
+        store.update_profile("legacy",name="Legacy JP",market="JP",genre="MORNING_CHILL_RAP",
+            genre_config={"subgenres":[]},path=legacy)
+        store.initialize(legacy)
+        self.assertEqual([],store.profile_genre_config(store.get_profile("legacy",legacy))["subgenres"])
+        self.assertEqual("kept",store.get_profile("legacy",legacy)["subgenre"])
 
     def test_candidate_keeps_decision_genre_snapshot_after_profile_related_edit(self):
         import json

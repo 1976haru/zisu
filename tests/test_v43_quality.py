@@ -4,7 +4,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
-from mcrs.genres import EXCLUDE, FIT, GENRES, REVIEW, assess
+from mcrs.genres import EXCLUDE, FIT, GENRES, LEGACY_GENRE_IDS, REVIEW, assess
 from mcrs import store, youtube_api
 from support import WorkspaceTemp
 
@@ -31,7 +31,7 @@ SUFFIXES = ("", " 2026", " | mix", " 🎧", " 【HQ】", " vol.01 – édition")
 class GenreBoundaryMatrixTests(unittest.TestCase):
     def test_216_balanced_multilingual_boundary_cases(self):
         counts = {FIT: 0, REVIEW: 0, EXCLUDE: 0}
-        for genre_id in GENRES:
+        for genre_id in LEGACY_GENRE_IDS:
             for market in ("KR", "JP"):
                 cases = (
                     (FIT, FIT_TITLES[genre_id][market]),

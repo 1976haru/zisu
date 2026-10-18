@@ -64,6 +64,14 @@ GATES = {
         "tests.test_dashboard_tree_state.DashboardTreeStateTests.test_refresh_restores_expansion_selection_focus_and_scroll",
         "tests.test_dashboard_tree_state.DashboardTreeStateTests.test_deleted_selection_falls_back_to_active_profile_and_ignores_stale_open_nodes",
     ),
+    "flexible_genre_profiles": (
+        "tests.test_genre_flex.FlexibleGenreRuleTests.test_existing_six_ids_remain_stable_and_new_presets_are_localized",
+        "tests.test_genre_flex.FlexibleGenreRuleTests.test_profile_custom_rules_facets_and_locales_persist_without_cross_profile_leak",
+        "tests.test_genre_flex.FlexibleGenreRuleTests.test_candidate_and_audit_keep_genre_rule_snapshot_and_human_label",
+        "tests.test_genre_flex.FlexibleGenreRuleTests.test_ai_fit_cannot_promote_uncertain_custom_genre_to_automatic_fit",
+        "tests.test_genre_flex.FlexibleGenreRuleTests.test_custom_genre_flows_through_bounded_search_rules_and_saved_candidate",
+        "tests.test_genre_flex.FlexibleGenreRuleTests.test_autopilot_provider_wrapper_preserves_selected_genre_context",
+    ),
 }
 
 # CI cannot certify any of these by running mocks, headless geometry, or fake clock.
