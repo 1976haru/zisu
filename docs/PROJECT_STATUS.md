@@ -5,7 +5,7 @@ Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source on user's Windows: `D:\03 zisu\.test_tmp\history_audit` (not accessed in this GitHub-only task; its last local HEAD predates the new remote CI commits and must fast-forward before further Codex changes; parent checkout was not touched)
 V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implementation is committed on the requested feature branch (see current Git HEAD).
-Remote status: feature-branch HEAD `9f18e9fec524e093109b04da3867d44bafc8a441`; PR #4 checked open/Draft. Push Actions `39117316473` and PR Actions `39117319193` both completed successfully (including new offline acceptance, Windows packaging and startup smoke). PR #2 and `main` were not touched.
+Remote status: last tested code commit `9f18e9fec524e093109b04da3867d44bafc8a441` (followed by documentation-only commits); PR #4 checked open/Draft. Always re-fetch current feature-branch HEAD before new writes. Push Actions `39117316473` and PR Actions `39117319193` both completed successfully (including new offline acceptance, Windows packaging and startup smoke). PR #2 and `main` were not touched.
 
 Latest estimates recomputed from the fixed backlog weights: overall ZISU **86.18%**; V4.5.9 stabilization/release scope **90.83%** across STAB-01/02/REL-01; V4.6.0 **79.20%** across its eight weighted rows; V46-03 **91%**; P0 V46-01/V46-02/V46-RESOURCE-01 **81.11%**. These are weighted implementation-maturity estimates, not test pass rates. The value changed because the current backlog row values supersede the stale 85%/76% summary; no external/real-world gate is being counted as passed.
 
