@@ -1,5 +1,28 @@
 # ZISU Integrated Project Status
 
+### V46-05 synthetic genre-rule quality follow-up (2026-10-18)
+
+- Baseline evaluator result was 17/24 synthetic matches. The seven expected-FIT / actual-REVIEW cases and findings were:
+  - `mcr_jp_fit_03` — FIT / REVIEW: false conflict. Morning Chill Rap explicitly supports R&B/Neo Soul context, but a broad adjacent-genre conflict blocked it.
+  - `mcr_kr_fit_02` — FIT / REVIEW: missing direct Korean Morning Chill Rap phrase (`모닝 칠랩`); even after adding that signal, a competing Chill Rap cue and no explicit rhythm support leave the metadata ambiguous. It remains REVIEW.
+  - `chill_jp_fit_01` — FIT / REVIEW: rule gap; the description's calm rap vocal + hip-hop rhythm evidence was not scored.
+  - `chill_jp_fit_02` — FIT / REVIEW: rule gap; soft beat + vocal description was not scored.
+  - `chill_jp_fit_03` — FIT / REVIEW: rule gap; vocal performance + clear beat description was not scored.
+  - `chill_kr_fit_01` — FIT / REVIEW: rule gap; Korean mellow-rap-vocal + hip-hop-rhythm description was not scored.
+  - `chill_kr_fit_02` — FIT / REVIEW: rule gap; Korean calm-rap-vocal + clear-beat description was not scored.
+- Updated `mcrs/genres.py` to add Korean Morning Chill Rap aliases, bounded description-only vocal/rhythm support (+8 per evidence group for the two rap genres), explicit English/Korean/Japanese absence terms, and a narrow Morning/R&B/Neo Soul compatibility allowance requiring Morning context, title cue, and both support groups. Title-only and one-support-only examples stay REVIEW. No synthetic expected values were altered.
+- Added regression tests in `tests/test_core.py` for support thresholds, cross-genre compatibility constraints, and negative context in EN/KR/JP.
+- After result: 23/24 synthetic agreement (95.8%); the one remaining `mcr_kr_fit_02` expectation is considered ambiguous and is deliberately not promoted without stronger evidence. Market agreement: JP Morning 6/6, KR Morning 5/6, JP Chill 6/6, KR Chill 6/6. These are synthetic fixture agreement figures only. No human labels or actual audio/search samples exist; real-search precision/recall is **not measured**.
+- Verification: focused genre/core, fixture evaluator, candidate diversity and Autopilot tests passed 51/51. Full unit suite: **272 run, 271 PASS / 1 opt-in browser SKIP / 0 FAIL**. Offline acceptance **23/23 PASS**; GUI smoke `GUI_SMOKE_PASS`; compileall and `git diff --check` passed. The skip is the opt-in live-browser integration, not treated as success. No real APIs, user DB, credentials, final integrated QA or wall-clock six-hour test used.
+- V46-GENRE-FLEX-01 remains Deferred and unimplemented. Fixed-ID handoff inventory for that later task:
+  - `mcrs/genres.py`: `GENRES`, `assess`, `search_terms`, `related_classification`, `_RAP_SUPPORT_GENRES`, Morning-specific compatibility and context rules.
+  - `mcrs/store.py`: `normalize_related_genres`, `create_profile`, `update_profile`, and research-session settings/snapshots validate or persist the current fixed genre IDs.
+  - `mcrs/gui.py`: `ProfileDialog` defaults and JP Morning related-genre suggestion; profile summaries; AI preview/demo candidates use hard-coded Morning Chill Rap examples.
+  - `mcrs/ai_research.py`: one-shot Gemini demo fixture and fallback demo candidates use Morning Chill Rap; profile query/settings hashing and review prompts consume profile genre configuration and need generic-rule audit.
+  - `mcrs/comments.py`: `persona_for_profile` specializes JP Morning Chill Rap and Old Pop.
+  - `mcrs/candidate_diversity.py`: audit `classify_search_category` / `diversify_page` for remaining fixed-ID conditions while preserving profile-driven core/related semantics.
+- Progress estimates unchanged: overall 86.18%, V4.5.9/release 90.83%, V4.6.0 79.20%, V46-05 65% estimated. No progress increase is claimed from synthetic match rate alone.
+
 ### Deferred feature registered: V46-GENRE-FLEX-01 (2026-10-18)
 
 - The requested generic, channel/profile-scoped genre and facet configuration has been added to `MASTER_BACKLOG.md` as **Deferred / not started**. It is sequenced after the existing active V4.6.0 P0/P1/P2 implementation and before the final cross-version consistency/security and six-hour QA phase.
@@ -19,7 +42,7 @@
 - Existing backlog maturity estimates are unchanged pending real-world gates: overall 86.18%, V4.5.9/release 90.83%, V4.6.0 79.20%; V46-03 91%, V46-04 66%, V46-05 65%, V46-06 65%, V46-07 65%. No score was raised based solely on synthetic fixtures or mechanical smoke.
 - Local implementation commits: `66f32744bfbc30e03a9e23730cc648ac6476b3be` (browser cleanup fail-closed), `0d6341ac18b081b47496eb470f05060a65a7bc5b` (dashboard mechanics), `a7ac811ada807988fc29cfaaf319dba2be06c4a1` (genre evaluation tool/fixture), `e0d03b0bf880ce227e9d4d797bca08fb1a6cb31f` (network/Analytics regressions), and `51d3bd7ddc96370c22398b45c3d34ab4de04fac4` (clarify live per-cycle vs final residue metrics; 33/33 browser suite rerun). No push or CI run was attempted. The last confirmed remote feature-branch SHA is `9b9f1e0927419c914e961596b546b3a7dd8d66d3`; before this batch the local branch was already 2 commits ahead. PR #4 remains Draft; main and PR #2 were not touched.
 
-Last checked: 2026-10-18 (P1/P2 offline verification batch complete locally; latest remote CI status remains the separate 39117703604/39117699436 startup-measurement failure)
+Last checked: 2026-10-18 (V46-05 genre synthetic-rule follow-up verified locally; no push, CI refresh, live API, or final QA in this batch)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (the requested workspace; separate parent checkout `D:\03 zisu` was not changed)

@@ -19,7 +19,7 @@ SLEEP_STUDY = ("수면", "숙면", "공부", "집중", "作業用", "睡眠用",
 
 GENRES = {
  "MORNING_CHILL_RAP": Genre("Morning Chill Rap",
-  ("morning chill rap", "chill rap", "mellow rap", "melodic rap", "감성 힙합", "멜로딕 랩", "칠 랩", "チルラップ", "メロウラップ", "朝ラップ", "メロディックラップ"),
+  ("morning chill rap", "chill rap", "mellow rap", "melodic rap", "감성 힙합", "멜로딕 랩", "칠 랩", "모닝 칠랩", "아침 칠랩", "チルラップ", "メロウラップ", "朝ラップ", "メロディックラップ"),
   COMMON_NON_MUSIC + SLEEP_STUDY + ("클래식", "classic bgm", "solo piano", "jazz instrumental", "카페 재즈", "ジャズ", "ハードコアラップ", "무보컬", "보컬 없음", "instrumental only", "ambient", "앰비언트", "インストゥルメンタル", "アンビエント"),
   ("朝 チルラップ", "朝 メロウラップ", "モーニング チルラップ", "朝 ドライブ チルラップ", "朝の感性ヒップホップ", "朝 R&B ヒップホップ", "Morning Chill Rap Japan", "朝 通勤 ラップ", "朝 カフェ チルラップ", "爽やか チルラップ", "朝 プレイリスト ヒップホップ", "朝 日本語ラップ"),
   ("아침 칠랩", "모닝 칠랩", "아침 감성 힙합", "출근길 칠랩", "아침 드라이브 힙합", "Morning Chill Rap Korea", "아침 멜로우 랩", "모닝 감성랩", "아침 R&B 힙합", "상쾌한 칠랩", "아침 플레이리스트 힙합", "출근 감성랩"),
@@ -70,6 +70,32 @@ def _contains(text: str, term: str) -> bool:
 def _signals(genre: Genre, text: str) -> list[str]:
     return [term for term in genre.positives if _contains(text, term)]
 
+
+# A genre word alone is insufficient. For these rap genres, corroborating
+# metadata in the description must independently mention both vocal presence
+# and a beat/rhythm before the rule score can cross the recommendation threshold.
+_RAP_SUPPORT = {
+    "vocal": ("vocal", "vocals", "vocal performance", "보컬", "보컬 중심", "ボーカル", "歌声"),
+    "rhythm": ("beat", "beats", "rhythm", "비트", "리듬", "ビート", "リズム"),
+}
+_RAP_SUPPORT_GENRES = {"MORNING_CHILL_RAP", "CHILL_RAP"}
+_RAP_ABSENCE_TERMS = (
+    "no vocals", "without vocals", "no rap", "without rap", "rap-free",
+    "보컬 없음", "보컬이 없는", "랩 없음", "랩이 없는",
+    "ボーカルなし", "歌声なし", "ラップなし", "ラップのない",
+)
+
+
+def _rap_support(genre_id: str, description: str) -> tuple[str, ...]:
+    if genre_id not in _RAP_SUPPORT_GENRES:
+        return ()
+    evidence = []
+    for group, terms in _RAP_SUPPORT.items():
+        match = next((term for term in terms if _contains(description, term)), None)
+        if match:
+            evidence.append(f"{group}: {match}")
+    return tuple(evidence)
+
 def assess(genre_id: str, title: str, description: str = "") -> Verdict:
     """Classify from metadata only; search keywords never influence the result."""
     genre = GENRES[genre_id]
@@ -77,17 +103,30 @@ def assess(genre_id: str, title: str, description: str = "") -> Verdict:
     description_text = (description or "")[:1500].casefold()
     combined = title_text + "\n" + description_text
     negative = [term for term in genre.negatives if _contains(combined, term)]
+    if genre_id in _RAP_SUPPORT_GENRES:
+        negative.extend(term for term in _RAP_ABSENCE_TERMS if _contains(combined, term))
     if negative:
         return Verdict(EXCLUDE, 0, "배제 신호: " + ", ".join(negative[:3]),
                        conflict_signals=tuple(negative), uncertainty="명시적 배제 조건")
     title_hits = _signals(genre, title_text)
     description_hits = [x for x in _signals(genre, description_text) if x not in title_hits]
+    support_evidence = _rap_support(genre_id, description_text)
     context_hits = [x for x in genre.required_context if _contains(combined, x)]
     conflicting = []
+    morning_rap_compatibility = bool(
+        genre_id == "MORNING_CHILL_RAP" and context_hits and title_hits
+        and {"vocal", "rhythm"}.issubset({item.split(":", 1)[0] for item in support_evidence})
+    )
     for other_id in genre.conflicts:
+        # Chill Rap and R&B/Neo Soul are constituent sounds of Morning Chill
+        # Rap when morning context, a direct core cue, and vocal+rhythm evidence
+        # all agree. Keep Cafe/Jazz and other unrelated genre conflicts intact.
+        if morning_rap_compatibility and other_id in {"CHILL_RAP", "RNB_HIPHOP"}:
+            continue
         conflicting.extend(_signals(GENRES[other_id], combined))
-    score = min(100, 55 * bool(title_hits) + 15 * min(max(len(title_hits)-1, 0), 1) + 10 * min(len(description_hits), 2))
-    positives = tuple(dict.fromkeys(title_hits + description_hits))
+    score = min(100, 55 * bool(title_hits) + 15 * min(max(len(title_hits)-1, 0), 1)
+                + 10 * min(len(description_hits), 2) + 8 * len(support_evidence))
+    positives = tuple(dict.fromkeys(title_hits + description_hits + list(support_evidence)))
     if genre_id == "MORNING_CHILL_RAP":
         rap_terms = ("rap", "랩", "ラップ", "힙합", "hip-hop", "hiphop", "ヒップホップ")
         if not any(_contains(combined, term) for term in rap_terms):
@@ -105,7 +144,9 @@ def assess(genre_id: str, title: str, description: str = "") -> Verdict:
         return Verdict(REVIEW, min(score, 69), "인접 장르 신호가 함께 있음: " + ", ".join(conflicts[:3]),
                        positives, conflicts, "교차 장르 가능성")
     if title_hits and score >= 70:
-        return Verdict(FIT, score, "제목 장르 신호: " + ", ".join(title_hits[:3]), positives)
+        return Verdict(FIT, score,
+                       "메타데이터 장르 신호와 보강 근거: " + ", ".join((title_hits + list(support_evidence))[:4])
+                       + " (실제 음원 청취 확인 아님)", positives)
     if title_hits or description_hits:
         return Verdict(REVIEW, score, "장르 신호는 있으나 제목·설명만으로 확정 불가",
                        positives, uncertainty="메타데이터 근거 부족")

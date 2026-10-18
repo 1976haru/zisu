@@ -22,6 +22,35 @@ class GenreTests(unittest.TestCase):
         for title in ("아침 카페 재즈","수면용 Lo-Fi","ASMR 빗소리","클래식 BGM"):
             self.assertEqual(EXCLUDE,assess("MORNING_CHILL_RAP",title).decision,title)
     def test_keyword_does_not_promote(self): self.assertEqual(REVIEW,assess("CHILL_RAP","Morning Flowers","No genre evidence").decision)
+    def test_rap_fit_requires_genre_title_and_vocal_rhythm_description_support(self):
+        self.assertEqual(REVIEW, assess("CHILL_RAP", "Chill Rap playlist", "").decision)
+        self.assertEqual(REVIEW, assess("CHILL_RAP", "Chill Rap playlist", "Relaxed vocal performance.").decision)
+        supported = assess("CHILL_RAP", "Chill Rap playlist",
+                           "Relaxed vocal performance over a clear beat and hip-hop rhythm.")
+        self.assertEqual(FIT, supported.decision)
+        self.assertIn("vocal: vocal", supported.positive_signals)
+        self.assertIn("rhythm: beat", supported.positive_signals)
+        self.assertIn("아님", supported.reason)
+    def test_morning_core_allows_compatible_rnb_only_with_context_and_two_support_groups(self):
+        title = "모닝 칠랩 R&B vocal mix"
+        weak = assess("MORNING_CHILL_RAP", title,
+                      "Melodic rap and neo soul vocals centered in a morning playlist.")
+        self.assertEqual(REVIEW, weak.decision)
+        strong = assess("MORNING_CHILL_RAP", title,
+                        "Melodic rap and neo soul vocals in a morning playlist with a clear beat.")
+        self.assertEqual(FIT, strong.decision)
+        self.assertFalse(strong.conflict_signals)
+        self.assertIn("vocal: vocal", strong.positive_signals)
+    def test_explicit_absence_of_rap_or_vocals_is_excluded_for_both_rap_genres(self):
+        cases = (
+            ("MORNING_CHILL_RAP", "Morning Chill Rap", "No vocals, instrumental beat only."),
+            ("MORNING_CHILL_RAP", "朝のChill Rap", "ボーカルなし、ラップなし。"),
+            ("CHILL_RAP", "Chill Rap playlist", "ボーカルなし。"),
+            ("CHILL_RAP", "Chill Rap playlist", "No rap, vocals absent."),
+        )
+        for genre_id, title, description in cases:
+            with self.subTest(genre=genre_id, title=title, description=description):
+                self.assertEqual(EXCLUDE, assess(genre_id, title, description).decision)
     def test_cross_genre_is_review(self): self.assertEqual(REVIEW,assess("CHILL_RAP","감성 힙합 R&B 힙합 플레이리스트").decision)
     def test_japanese_signals(self): self.assertEqual(FIT,assess("MORNING_CHILL_RAP","朝 チルラップ プレイリスト").decision)
     def test_verdict_exposes_structured_evidence(self):
