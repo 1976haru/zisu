@@ -49,7 +49,10 @@ jobs:
               throw "Required module missing from onedir release: $module"
             }
           }
-          if (-not (Select-String -LiteralPath 'onefile_archive_listing.txt' -Pattern 'tzdata[\\/]zoneinfo[\\/]America[\\/]Los_Angeles' -Quiet)) {
+          # archive_viewer quotes archive names and escapes path separators as \\\\.
+          # Normalize the display representation before checking the exact resource path.
+          $onefileArchive = (Get-Content -LiteralPath 'onefile_archive_listing.txt' -Raw -Encoding utf8).Replace('\\', '\').Replace('/', '\')
+          if (-not $onefileArchive.Contains('tzdata\zoneinfo\America\Los_Angeles')) {
             throw 'Pacific timezone data missing from onefile archive.'
           }
           $onedirTimezone = 'dist/onedir/ZisuResearchStudio/_internal/tzdata/zoneinfo/America/Los_Angeles'

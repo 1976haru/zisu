@@ -1,5 +1,11 @@
 # ZISU Master Backlog
 
+### Windows CI timezone archive-check correction (2026-10-18)
+
+- Push/PR runs `39115099975` / `39115103718` failed in the onefile Pacific timezone archive gate, after tests, stress, GUI smoke, compile and both PyInstaller builds passed.
+- Rebuilt the onefile executable locally and inspected `pyi-archive_viewer` output: `tzdata\\zoneinfo\\America\\Los_Angeles` is present. The failure was a validator false negative: the viewer escapes Windows separators in its quoted listing, while the prior regex expected a single separator. Normalize the viewer listing and assert the exact resource path; retain `--collect-all tzdata` and the separate onedir file check.
+- The onefile executable imports `mcrs.quota_ledger`, which constructs `ZoneInfo("America/Los_Angeles")` at module load. Local archive inspection confirms the resource is packaged, but local frozen execution could not reach Python: PyInstaller extraction failed to write `VCRUNTIME140.dll` with Win32 permission denied, including with isolated workspace `TEMP`/`TMP`. Packaged runtime loading remains unverified locally; rerun the existing CI startup smoke after this validator fix. No final integrated QA is implied.
+
 ### V46-03 verifier shutdown recovery (2026-10-18)
 
 - Root cause confirmed in the verifier UI: while `_busy`, the window-close handler rejected X and told the user to wait; the auto-run had no cancellation event, and app destruction synchronously shut down/joined the loopback server.
