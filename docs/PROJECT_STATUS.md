@@ -1,6 +1,6 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 11:47 KST (V46-02 account/channel mapping and scoped regression)
+Last checked: 2026-10-18 (V46-RESOURCE-01 resource admission/lifecycle implementation and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
@@ -11,10 +11,10 @@ Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 77% estimated (77.1 weighted points across the 100-point backlog after V46-02 moved to 80%). This includes remaining V4.6 scope; it is not a test-pass percentage.
+- **Overall ZISU:** 78% estimated (77.95 weighted points using the existing backlog scoring; this includes remaining V4.6 scope and is not a test-pass percentage).
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 57% estimated (56.5% weighted across its backlog). Schedule state, offline account/channel registry, Autopilot block integration and widget-level schedule UI are present; browser lifecycle, expanded dashboard and actual APIs remain incomplete.
-- **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 76% estimated (20.65/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth, browser lifecycle and long-duration/Windows resource measurements remain.
+- **V4.6.0:** 59% estimated (58.6% weighted across its backlog). Schedule state, offline account/channel registry, resource sampling/admission and widget-level schedule UI are present; browser lifecycle, expanded dashboard and actual APIs remain incomplete.
+- **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 80% estimated (21.5/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth, browser lifecycle and wall-clock EXE runtime remain.
 
 ## Verified and unverified state
 
@@ -73,3 +73,14 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 ## Immediate constraints and next order
 
 No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Next backlog item is V46-03 dedicated browser lifecycle; V46-RESOURCE-01 long-run validation and V46-04 dashboard/DPI work remain. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
+
+### V46-RESOURCE-01 continuation (2026-10-18)
+
+- Extended the native/optional resource sampler to report ZISU process CPU separately from its RSS and system CPU/available RAM/system memory load. The first CPU sample remains unknown until a baseline interval exists; invalid, non-finite, unavailable, or throwing samples now fail closed for new work. Sampling/callback failures no longer terminate the monitor loop.
+- Added process-wide single-capacity slots for YouTube search+metadata operations and AI provider HTTP operations. A contending caller waits with a bounded blocking timeout (no polling loop); existing approved call budgets and uncertain-request rules are unchanged. Search contention fails safely without starting another request.
+- Updated easy-mode wording for resource waits/recovery and included process CPU in advanced diagnostics. No other application or user process is terminated.
+- Scoped regression: scheduler 17/17, Autopilot 12/12, resource lifecycle 7/7 = **36/36 PASS**; compileall PASS; GUI smoke PASS; `git diff --check` PASS. A first run surfaced one old synthetic `ResourceSnapshot(0)` test fixture that represented a CPU-only reading; because missing RAM now correctly fails closed, the fixture was upgraded to provide complete mock readings. The regression then passed.
+- Windows host sample (single short observation, not a guarantee): system CPU 2.34%, available RAM 10,461,011,968 bytes, system memory load 69%, Python process RSS 34,902,016 bytes, process CPU 0.0%.
+- Isolated virtual stability experiment: 12 simulated six-hour sessions and 12 pause/resume cycles; RSS milestones 34,959,360 → 35,319,808 → 35,323,904 → 35,328,000 bytes (net +368,640 bytes during this bounded test); `tracemalloc` current 56,031 bytes / peak 74,532 bytes; thread count 1→1; Windows process handles 114→114. These virtual-clock cycles do not represent 72 hours of wall-clock operation or a built EXE. The final process CPU field was unavailable on one sampled cycle, so no sustained CPU average is claimed.
+- Deferred: full regression suite/final QA, real six-hour Windows EXE operation, high-load contention on a user workstation, GUI visual/DPI verification, and browser lifecycle. V4.5.9 install/user DB/OAuth/DPAPI stores remain untouched; no external APIs were called.
+- GitHub `gh auth status` was checked during this continuation and reports the stored credential invalid. Push/CI were not attempted; local source remains on the requested feature branch.

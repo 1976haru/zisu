@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from .work_slots import AI_REQUEST_SLOT, WorkSlotBusy, occupy
 
 from . import genres, store
 from .credential_store import CredentialStore, CredentialError
@@ -50,6 +51,7 @@ PROVIDER_ERROR_MESSAGES = {
     "json_invalid": "Gemini 응답이 올바른 JSON이 아니어서 결과를 폐기했습니다.",
     "schema_invalid": "Gemini 응답이 ZISU 결과 스키마와 맞지 않아 결과를 폐기했습니다.",
     "unsupported_model": "선택한 Gemini 모델의 구조화 응답 계약이 확인되지 않았습니다. 지원 목록의 모델을 선택하세요.",
+    "busy": "다른 AI 요청을 처리 중입니다. 현재 요청이 끝난 뒤 저장된 조사에서 이어가세요.",
     "unknown": "AI 검토에 실패했습니다. 규칙 판정을 유지하고 직접 확인하세요.",
 }
 
@@ -175,6 +177,15 @@ class JsonHttpProvider:
         """GET JSON without exposing URL/header/provider error bodies."""
         self.last_http_success = False
         self.last_request_attempted = False
+        try:
+            with occupy(AI_REQUEST_SLOT):
+                return self._get_one(url, headers)
+        except WorkSlotBusy:
+            raise ProviderFailure("busy") from None
+
+    def _get_one(self, url: str, headers: dict[str, str]) -> dict:
+        self.last_http_success = False
+        self.last_request_attempted = False
         request = Request(url, headers=headers, method="GET")
         try:
             self.last_request_attempted = True
@@ -209,6 +220,15 @@ class JsonHttpProvider:
         return result
 
     def _post(self, url: str, headers: dict[str, str], payload: dict) -> dict:
+        self.last_http_success = False
+        self.last_request_attempted = False
+        try:
+            with occupy(AI_REQUEST_SLOT):
+                return self._post_one(url, headers, payload)
+        except WorkSlotBusy:
+            raise ProviderFailure("busy") from None
+
+    def _post_one(self, url: str, headers: dict[str, str], payload: dict) -> dict:
         self.last_http_success = False
         self.last_request_attempted = False
         request = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

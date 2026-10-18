@@ -6,6 +6,7 @@ snapshots. This module never terminates another process or starts a busy loop.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import threading
 import time
@@ -40,6 +41,7 @@ class ResourceSnapshot:
     available_ram_bytes: int | None = None
     system_memory_percent: float | None = None
     process_rss_bytes: int | None = None
+    process_cpu_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -76,12 +78,23 @@ class ResourceGuard:
             if (self._last_decision is not None and self._last_sample_at is not None and
                     now - self._last_sample_at < self.min_sample_interval_seconds):
                 return self._last_decision
-            snapshot = sampler()
+            try:
+                snapshot = sampler()
+            except Exception:
+                # Unknown host state is not treated as free capacity while
+                # low-load mode is enabled. The next sample may recover it.
+                snapshot = ResourceSnapshot(now)
             self._last_sample_at = now
             self._last_decision = self.evaluate(snapshot)
             return self._last_decision
 
     def evaluate(self, snapshot: ResourceSnapshot) -> ResourceDecision:
+        if not _valid_snapshot(snapshot):
+            return ResourceDecision(False, "unavailable", ("resource_sample_unavailable",), snapshot)
+        if all(value is None for value in (snapshot.system_cpu_percent,
+                snapshot.available_ram_bytes, snapshot.system_memory_percent,
+                snapshot.process_rss_bytes)):
+            return ResourceDecision(False, "unavailable", ("resource_sample_unavailable",), snapshot)
         reasons = []
         now = float(snapshot.sampled_at)
         limits = self.limits
@@ -131,9 +144,10 @@ def sample_resources() -> ResourceSnapshot:
         cpu = float(psutil.cpu_percent(interval=None))
         memory = psutil.virtual_memory()
         process = psutil.Process(os.getpid())
+        process_cpu = float(process.cpu_percent(interval=None))
         return ResourceSnapshot(now, cpu, int(memory.available), float(memory.percent),
-                                int(process.memory_info().rss))
-    except (ImportError, OSError, RuntimeError, AttributeError):
+                                int(process.memory_info().rss), process_cpu)
+    except Exception:
         pass
     if sys.platform == "win32":
         try:
@@ -165,9 +179,12 @@ def sample_resources() -> ResourceSnapshot:
             kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
             kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
             kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, ctypes.POINTER(FILETIME),
+                ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME)]
+            kernel32.GetProcessTimes.restype = wintypes.BOOL
             idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
             cpu = None
-            global _CPU_PREVIOUS, _CPU_LOCK
+            global _CPU_PREVIOUS, _CPU_LOCK, _PROCESS_PREVIOUS, _PROCESS_LOCK
             if kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
                 current = (idle.value(), kernel.value(), user.value())
                 with _CPU_LOCK:
@@ -178,6 +195,21 @@ def sample_resources() -> ResourceSnapshot:
                     idle_delta = current[0] - previous[0]
                     if total > 0:
                         cpu = max(0.0, min(100.0, 100.0 * (total - idle_delta) / total))
+            process_cpu = None
+            creation, exit_time, process_kernel, process_user = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+            if kernel32.GetProcessTimes(kernel32.GetCurrentProcess(), ctypes.byref(creation),
+                    ctypes.byref(exit_time), ctypes.byref(process_kernel), ctypes.byref(process_user)):
+                process_ticks = process_kernel.value() + process_user.value()
+                system_ticks = kernel.value() + user.value()
+                current_process = (process_ticks, system_ticks)
+                with _PROCESS_LOCK:
+                    previous_process = _PROCESS_PREVIOUS
+                    _PROCESS_PREVIOUS = current_process
+                if previous_process:
+                    process_delta = max(0, process_ticks - previous_process[0])
+                    system_delta = max(0, system_ticks - previous_process[1])
+                    if system_delta > 0:
+                        process_cpu = max(0.0, min(100.0, 100.0 * process_delta / system_delta))
 
             memory = MEMORYSTATUSEX()
             memory.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
@@ -191,7 +223,8 @@ def sample_resources() -> ResourceSnapshot:
             rss = None
             if psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(process), process.cb):
                 rss = int(process.WorkingSetSize)
-            return ResourceSnapshot(now, cpu, int(memory.ullAvailPhys), float(memory.dwMemoryLoad), rss)
+            return ResourceSnapshot(now, cpu, int(memory.ullAvailPhys), float(memory.dwMemoryLoad), rss,
+                                    process_cpu)
         except (OSError, AttributeError, TypeError, ValueError):
             return ResourceSnapshot(now)
     return ResourceSnapshot(now)
@@ -199,6 +232,30 @@ def sample_resources() -> ResourceSnapshot:
 
 _CPU_PREVIOUS = None
 _CPU_LOCK = threading.Lock()
+_PROCESS_PREVIOUS = None
+_PROCESS_LOCK = threading.Lock()
+
+
+def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
+    if not isinstance(snapshot, ResourceSnapshot):
+        return False
+    try:
+        if not math.isfinite(float(snapshot.sampled_at)):
+            return False
+        for value in (snapshot.system_cpu_percent, snapshot.system_memory_percent,
+                      snapshot.process_cpu_percent):
+            if value is not None and (not math.isfinite(float(value)) or float(value) < 0):
+                return False
+        if snapshot.system_cpu_percent is not None and snapshot.system_cpu_percent > 100:
+            return False
+        if snapshot.system_memory_percent is not None and snapshot.system_memory_percent > 100:
+            return False
+        for value in (snapshot.available_ram_bytes, snapshot.process_rss_bytes):
+            if value is not None and (isinstance(value, bool) or int(value) < 0):
+                return False
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    return True
 
 
 class ResourceMonitor:
@@ -231,9 +288,17 @@ class ResourceMonitor:
 
     def _run(self):
         while not self._stop.wait(self.interval_seconds):
-            decision = self.guard.evaluate(self.sampler())
+            try:
+                snapshot = self.sampler()
+            except Exception:
+                snapshot = ResourceSnapshot(time.monotonic())
+            decision = self.guard.evaluate(snapshot)
             if self.on_decision:
-                self.on_decision(decision)
+                try:
+                    self.on_decision(decision)
+                except Exception:
+                    # A presentation callback must not silently kill the sampler.
+                    continue
 
     def stop(self, timeout: float = 2.0):
         with self._lifecycle_lock:

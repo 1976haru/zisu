@@ -4,6 +4,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from .work_slots import SEARCH_SLOT, WorkSlotBusy, occupy
 
 
 class APIError(Exception):
@@ -61,7 +62,7 @@ def _get(endpoint, key, access_token=None, retries=2, retry_delay=0.25, **kwargs
     raise APIError("API 요청을 완료하지 못했습니다.")
 
 
-def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False):
+def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False):
     if market not in ("KR", "JP"):
         raise ValueError("시장 코드는 KR 또는 JP입니다.")
     lang = "ko" if market == "KR" else "ja"
@@ -104,3 +105,12 @@ def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=
         for item in items
     ]
     return {"items": rows, "nextPageToken": results.get("nextPageToken", "")} if return_page else rows
+
+
+def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False):
+    """Serialize a complete search + metadata-enrichment operation process-wide."""
+    try:
+        with occupy(SEARCH_SLOT):
+            return _lookup_videos(key, keyword, market, limit, access_token, page_token, return_page)
+    except WorkSlotBusy:
+        raise APIError("다른 검색을 정리하는 중입니다. 잠시 뒤 저장된 작업을 이어가세요.") from None

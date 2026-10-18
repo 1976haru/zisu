@@ -1537,6 +1537,7 @@ class Studio(tk.Tk):
         self.resource_low_load_var=tk.BooleanVar(value=True)
         self.resource_guard=ResourceGuard()
         self.resource_status_text=tk.StringVar(value="컴퓨터 여유 있음 · 저부하 모드 권장")
+        self._resource_was_waiting=False
         ttk.Checkbutton(actions,text="저부하 모드 · 권장",variable=self.resource_low_load_var).pack(side="left",padx=5)
         ttk.Button(actions,text="리소스 상태 보기",command=self._resource_status).pack(side="left",padx=3)
         ttk.Label(actions,textvariable=self.resource_status_text).pack(side="left",padx=6)
@@ -1585,14 +1586,16 @@ class Studio(tk.Tk):
 
     def _resource_status(self):
         decision=self.resource_guard.check(sample_resources)
-        labels={"available":"컴퓨터 여유 있음","busy":"다른 작업이 바빠 잠시 쉬는 중",
-                "low_memory":"메모리가 부족해 조사를 기다리는 중"}
+        labels={"available":"컴퓨터 여유 있음","busy":"컴퓨터가 바빠서 잠시 기다리는 중",
+                "low_memory":"메모리가 부족해 조사를 기다리는 중",
+                "unavailable":"컴퓨터 상태를 확인하지 못해 새 조사를 기다리는 중"}
         self.resource_status_text.set(labels.get(decision.status,"리소스 상태를 확인할 수 없습니다"))
         snap=decision.snapshot
         details=[labels.get(decision.status,"리소스 상태를 확인할 수 없습니다")]
         if snap and snap.system_cpu_percent is not None: details.append(f"시스템 CPU: {snap.system_cpu_percent:.0f}%")
         if snap and snap.available_ram_bytes is not None: details.append(f"사용 가능 메모리: {snap.available_ram_bytes/(1024**3):.1f} GB")
         if snap and snap.process_rss_bytes is not None: details.append(f"ZISU 메모리: {snap.process_rss_bytes/(1024**2):.0f} MB")
+        if snap and snap.process_cpu_percent is not None: details.append(f"ZISU CPU: {snap.process_cpu_percent:.1f}%")
         if decision.reasons: details.append("보류 이유: "+", ".join(decision.reasons))
         messagebox.showinfo("리소스 상태", "\n".join(details), parent=self)
 
@@ -1782,8 +1785,9 @@ class Studio(tk.Tk):
                     if not low_load_enabled:
                         return True
                     decision=self.resource_guard.check(sample_resources)
-                    labels={"available":"컴퓨터 여유 있음","busy":"다른 작업이 바빠 잠시 쉬는 중",
-                            "low_memory":"메모리가 부족해 조사를 기다리는 중"}
+                    labels={"available":"컴퓨터 여유 있음","busy":"컴퓨터가 바빠서 잠시 기다리는 중",
+                            "low_memory":"메모리가 부족해 조사를 기다리는 중",
+                            "unavailable":"컴퓨터 상태를 확인하지 못해 새 조사를 기다리는 중"}
                     self.autopilot_events.put({"stage":"resource_status",
                         "status":labels.get(decision.status,"리소스 상태를 확인할 수 없습니다"),
                         "allow":decision.allow_new_work})
@@ -1853,7 +1857,7 @@ class Studio(tk.Tk):
                         research_scheduler.request_resource_pause(schedule_id,profile_id,
                             decision.reasons[0],now=datetime.now().astimezone())
                         self.autopilot_schedule_pause_event.clear()
-                        self.autopilot_events.put({"stage":"resource_status","status":"다른 작업이 바빠 잠시 쉬는 중","allow":False})
+                        self.autopilot_events.put({"stage":"resource_status","status":"컴퓨터가 바빠서 잠시 기다리는 중","allow":False})
                         continue
                 if item and item["state"]=="paused":
                     research_scheduler.resume(schedule_id,profile_id)
@@ -1868,7 +1872,7 @@ class Studio(tk.Tk):
                         self.autopilot_events.put({"stage":"schedule","message":"컴퓨터 여유가 회복되었습니다. 승인된 예산과 체크포인트를 확인해 이어갑니다."})
                         continue
                     except research_scheduler.ResourceWorkDeferred as exc:
-                        self.autopilot_events.put({"stage":"resource_status","status":"다른 작업이 바빠 잠시 쉬는 중","allow":False})
+                        self.autopilot_events.put({"stage":"resource_status","status":"컴퓨터가 바빠서 잠시 기다리는 중","allow":False})
                         self.autopilot_schedule_resume_event.wait(15)
                         self.autopilot_schedule_resume_event.clear()
                         continue
@@ -1943,7 +1947,11 @@ class Studio(tk.Tk):
                 elif stage=="resource_status":
                     self.resource_status_text.set(event.get("status","리소스 상태를 확인할 수 없습니다"))
                     if not event.get("allow",True):
+                        self._resource_was_waiting=True
                         self.autopilot_stage_text.set(event.get("status","리소스 사용량이 높아 잠시 멈췄습니다")+" · 저장된 예산 안에서 다시 시작할 수 있어요")
+                    elif self._resource_was_waiting:
+                        self._resource_was_waiting=False
+                        self.autopilot_stage_text.set("컴퓨터 상태가 좋아졌습니다. 저장된 예산과 체크포인트를 확인해 조사를 이어갑니다.")
                 elif stage=="schedule_status" and event.get("item"):
                     item=event["item"]
                     elapsed=item.get("elapsed_seconds",0)

@@ -92,6 +92,9 @@ def _safe_error(exc: Exception) -> dict:
                           "진행 중인 창에서 일시 정지하거나 완료된 뒤 다시 확인하세요.", False)
     if isinstance(exc, APIError):
         message = str(exc).casefold()
+        if "다른 검색" in message:
+            return _exception("search_busy", "다른 검색을 기다리는 중이라 이번 새 검색은 시작하지 않았습니다.",
+                              "동시에 검색하지 않도록 보호했습니다. 체크포인트와 승인된 잔여 한도를 확인하세요.", False)
         if "할당량" in message or "quota" in message:
             return _exception("youtube_quota", "검색이 안전하게 중단됐습니다.",
                               "YouTube 프로젝트 할당량을 확인하고 갱신 후 새 한도를 승인하세요.", False)

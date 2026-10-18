@@ -241,7 +241,8 @@ class ResearchSchedulerTests(unittest.TestCase):
             config = autopilot.AutopilotConfig(self.jp, target=5, max_search_calls=8,
                                                 session_id=session_id)
             result = scheduler.run_autopilot_block(session["id"], self.jp, controller, config,
-                collector, self.db, now=lambda: clock[0], resource_sampler=lambda: ResourceSnapshot(0))
+                collector, self.db, now=lambda: clock[0],
+                resource_sampler=lambda: ResourceSnapshot(0, 0, 8 * 1024**3, 20, 32 * 1024**2))
             session_id = result.session_id
             self.assertIn(result.state, {"paused", "complete"})
             saved_schedule = scheduler.get(session["id"], self.jp, self.db, now=clock[0])
