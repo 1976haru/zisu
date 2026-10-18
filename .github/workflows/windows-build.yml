@@ -39,10 +39,12 @@ jobs:
               throw "Required module missing from onedir release: $module"
             }
           }
-          foreach ($listing in @('onefile_archive_listing.txt', 'onedir_archive_listing.txt')) {
-            if (-not (Select-String -LiteralPath $listing -Pattern 'tzdata[\\/]zoneinfo[\\/]America[\\/]Los_Angeles' -Quiet)) {
-              throw "Pacific timezone data missing from package archive: $listing"
-            }
+          if (-not (Select-String -LiteralPath 'onefile_archive_listing.txt' -Pattern 'tzdata[\\/]zoneinfo[\\/]America[\\/]Los_Angeles' -Quiet)) {
+            throw 'Pacific timezone data missing from onefile archive.'
+          }
+          $onedirTimezone = 'dist/onedir/ZisuResearchStudio/_internal/tzdata/zoneinfo/America/Los_Angeles'
+          if (-not (Test-Path -LiteralPath $onedirTimezone -PathType Leaf)) {
+            throw "Pacific timezone data missing from onedir release: $onedirTimezone"
           }
       - name: Write SHA-256 manifest
         shell: pwsh
