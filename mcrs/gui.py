@@ -23,6 +23,7 @@ from . import ai_research
 from . import comments
 from . import timers
 from . import autopilot
+from . import research_scheduler
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
@@ -1451,25 +1452,42 @@ class Studio(tk.Tk):
 
     def _autopilot_ui(self,tab):
         tab.columnconfigure(0,weight=1)
-        tab.rowconfigure(12,weight=1)
+        tab.rowconfigure(14,weight=1)
         ttk.Label(tab,text="AI 자동 조사 · Autopilot",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(2,8))
         self.autopilot_profile_text=tk.StringVar(value="작업 프로필을 선택하세요.")
         ttk.Label(tab,textvariable=self.autopilot_profile_text,wraplength=1050).grid(row=1,column=0,sticky="w",pady=3)
         self.autopilot_scope_text=tk.StringVar(value="적합 목표 10 · 규칙 전용 · 검색 3회 이내")
         ttk.Label(tab,textvariable=self.autopilot_scope_text,wraplength=1050).grid(row=2,column=0,sticky="w",pady=3)
+        schedule=ttk.LabelFrame(tab,text="연구 시간 설정 · 저부하 권장")
+        schedule.grid(row=3,column=0,sticky="ew",pady=4)
+        self.schedule_hours=tk.StringVar(value="6")
+        self.schedule_research_minutes=tk.StringVar(value="30")
+        self.schedule_break_minutes=tk.StringVar(value="30")
+        self.schedule_start_time=tk.StringVar(value="")
+        for label, variable, values, width in (("전체 시간",self.schedule_hours,("2","4","6","8"),4),
+                ("연구 분",self.schedule_research_minutes,("20","30","40"),4),
+                ("휴식 분",self.schedule_break_minutes,("15","30","40"),4)):
+            ttk.Label(schedule,text=label).pack(side="left",padx=(6,2))
+            ttk.Combobox(schedule,textvariable=variable,values=values,state="readonly",width=width).pack(side="left")
+        ttk.Label(schedule,text="시작 시각 선택 (HH:MM)").pack(side="left",padx=(8,2))
+        ttk.Entry(schedule,textvariable=self.schedule_start_time,width=7).pack(side="left")
+        ttk.Button(schedule,text="연구 시간 설정",command=self._autopilot_schedule_preview).pack(side="left",padx=7)
+        self.schedule_progress_text=tk.StringVar(value="예약 대기 · 6시간 / 연구 30분 / 휴식 30분")
+        ttk.Label(tab,textvariable=self.schedule_progress_text,wraplength=1050).grid(row=4,column=0,sticky="w",pady=3)
         self.autopilot_start_button=ttk.Button(tab,text="AI 자동 조사 시작",command=self._autopilot_start,
                                                 style="Accent.TButton")
-        self.autopilot_start_button.grid(row=3,column=0,sticky="ew",ipady=10,pady=(7,5))
+        self.autopilot_start_button.configure(text="연구 시작")
+        self.autopilot_start_button.grid(row=5,column=0,sticky="ew",ipady=10,pady=(7,5))
         self.autopilot_progress=ttk.Progressbar(tab,mode="determinate",maximum=100)
-        self.autopilot_progress.grid(row=4,column=0,sticky="ew",pady=4)
+        self.autopilot_progress.grid(row=6,column=0,sticky="ew",pady=4)
         self.autopilot_stage_text=tk.StringVar(value="대기 중 · 시작을 누르면 승인된 범위 안에서 순차 조사합니다.")
-        ttk.Label(tab,textvariable=self.autopilot_stage_text,wraplength=1050).grid(row=5,column=0,sticky="w",pady=4)
+        ttk.Label(tab,textvariable=self.autopilot_stage_text,wraplength=1050).grid(row=7,column=0,sticky="w",pady=4)
         self.autopilot_counts_text=tk.StringVar(value="검색 0회 · 후보 0 · 중복 0 · 추천 적합 0/10 · AI 0 · 사람 확인 0 · 잔여 예산 확인 전")
-        ttk.Label(tab,textvariable=self.autopilot_counts_text,wraplength=1050).grid(row=6,column=0,sticky="new",pady=4)
+        ttk.Label(tab,textvariable=self.autopilot_counts_text,wraplength=1050).grid(row=8,column=0,sticky="new",pady=4)
         self.autopilot_ai_stats=tk.StringVar(value="AI 요청 통계는 조사 완료 후 실제 요청·성공·실패·캐시·예산 차단을 구분해 표시합니다.")
-        ttk.Label(tab,textvariable=self.autopilot_ai_stats,wraplength=1050).grid(row=6,column=0,sticky="sew",pady=(30,4))
+        ttk.Label(tab,textvariable=self.autopilot_ai_stats,wraplength=1050).grid(row=8,column=0,sticky="sew",pady=(30,4))
         detail=ttk.LabelFrame(tab,text="상세 설정 (필요할 때만 열기)")
-        detail.grid(row=7,column=0,sticky="ew",pady=4)
+        detail.grid(row=9,column=0,sticky="ew",pady=4)
         self.autopilot_detail_panel=ttk.Frame(detail)
         self.autopilot_detail_panel.pack(fill="x")
         row=ttk.Frame(self.autopilot_detail_panel); row.pack(fill="x",pady=3)
@@ -1501,10 +1519,10 @@ class Studio(tk.Tk):
         self.autopilot_detail_panel.pack_forget()
         self.autopilot_details_button=ttk.Button(detail,text="상세 설정 열기",command=self._autopilot_toggle_details)
         self.autopilot_details_button.pack(anchor="w",padx=5,pady=3)
-        actions=ttk.Frame(tab); actions.grid(row=8,column=0,sticky="ew",pady=4)
-        self.autopilot_pause_button=ttk.Button(actions,text="일시 정지",command=self._autopilot_pause,state="disabled")
+        actions=ttk.Frame(tab); actions.grid(row=10,column=0,sticky="ew",pady=4)
+        self.autopilot_pause_button=ttk.Button(actions,text="잠시 멈추기",command=self._autopilot_pause,state="disabled")
         self.autopilot_pause_button.pack(side="left",padx=3)
-        self.autopilot_resume_button=ttk.Button(actions,text="이어하기",command=self._autopilot_resume)
+        self.autopilot_resume_button=ttk.Button(actions,text="이전 작업 이어하기",command=self._autopilot_resume)
         self.autopilot_resume_button.pack(side="left",padx=3)
         self.autopilot_stop_button=ttk.Button(actions,text="안전 중단",command=self._autopilot_stop,state="disabled")
         self.autopilot_stop_button.pack(side="left",padx=3)
@@ -1516,24 +1534,46 @@ class Studio(tk.Tk):
         ttk.Label(actions,textvariable=self.resource_status_text).pack(side="left",padx=6)
         ttk.Button(actions,text="결과 보고서 내보내기",command=self._autopilot_export).pack(side="left",padx=3)
         ttk.Button(actions,text="AI 상세 화면",command=lambda:self.tabs.select(self.frames[6])).pack(side="left",padx=3)
-        ttk.Label(tab,text="예외 / 사람 확인 대기함",font=("Malgun Gothic",11,"bold")).grid(row=9,column=0,sticky="w",pady=(6,2))
+        ttk.Label(tab,text="예외 / 사람 확인 대기함",font=("Malgun Gothic",11,"bold")).grid(row=11,column=0,sticky="w",pady=(6,2))
         self.autopilot_exception_tree=ttk.Treeview(tab,columns=("type","impact","action","retry","status"),show="headings",height=4)
         for col,label,width in (("type","유형",125),("impact","영향",220),("action","권장 조치",390),("retry","재시도",75),("status","상태",85)):
             self.autopilot_exception_tree.heading(col,text=label); self.autopilot_exception_tree.column(col,width=width,stretch=col=="action")
-        self.autopilot_exception_tree.grid(row=10,column=0,sticky="nsew",pady=3)
-        ttk.Label(tab,text="최근 조사 보고서",font=("Malgun Gothic",11,"bold")).grid(row=11,column=0,sticky="w",pady=(6,2))
+        self.autopilot_exception_tree.grid(row=12,column=0,sticky="nsew",pady=3)
+        ttk.Label(tab,text="최근 조사 보고서",font=("Malgun Gothic",11,"bold")).grid(row=13,column=0,sticky="w",pady=(6,2))
         self.autopilot_report=tk.Text(tab,height=7,wrap="word",font=("Consolas",9))
-        self.autopilot_report.grid(row=12,column=0,sticky="nsew",pady=3)
+        self.autopilot_report.grid(row=14,column=0,sticky="nsew",pady=3)
         self.autopilot_report.insert("1.0","보고서는 프로필별로 저장됩니다. AI 판정은 사람의 실제 청취 정답과 분리되며 댓글은 게시되지 않습니다.")
         self.autopilot_report.configure(state="disabled")
         self.autopilot_controller=autopilot.AutopilotController()
         self.autopilot_events=queue.Queue()
         self.autopilot_result=None
         self.autopilot_close_pending=False
+        self.autopilot_schedule_id=None
+        self.autopilot_schedule_running=False
+        self.autopilot_schedule_pause_event=threading.Event()
+        self.autopilot_schedule_resume_event=threading.Event()
+        self.autopilot_schedule_stop_event=threading.Event()
+        self.autopilot_schedule_shutdown_event=threading.Event()
         self.ai_target.trace_add("write",lambda *_: self._autopilot_refresh_profile())
         self.ai_max_calls.trace_add("write",lambda *_: self._autopilot_refresh_profile())
         self.ai_provider_choice.trace_add("write",lambda *_: self._autopilot_refresh_profile())
         self._autopilot_refresh_profile()
+
+    def _autopilot_schedule_preview(self):
+        try:
+            config=research_scheduler.ScheduleConfig(
+                profile_id=(self.current_profile() or {}).get("id",""),
+                total_hours=int(self.schedule_hours.get()),
+                research_minutes=int(self.schedule_research_minutes.get()),
+                break_minutes=int(self.schedule_break_minutes.get()),
+                approved_search_calls=int(self.ai_max_calls.get()))
+            config.validate()
+        except (TypeError,ValueError):
+            messagebox.showerror("시간 설정 확인","전체 시간, 연구/휴식 간격과 검색 한도를 다시 확인해 주세요.",parent=self)
+            return
+        start=self.schedule_start_time.get().strip() or "지금 시작"
+        self.schedule_progress_text.set(
+            f"설정됨 · {config.total_hours}시간 · 연구 {config.research_minutes}분 / 휴식 {config.break_minutes}분 · 시작 {start} · 검색 한도 {config.approved_search_calls}회")
 
     def _resource_status(self):
         decision=self.resource_guard.check(sample_resources)
@@ -1606,7 +1646,7 @@ class Studio(tk.Tk):
         if not profile:
             self._autopilot_show_exception({"type":"profile_required","impact":"조사 프로필이 없습니다.","recommended_action":"국가와 핵심 장르를 선택해 프로필을 추가하세요.","retry_allowed":False})
             return
-        if self.autopilot_controller.running:
+        if self.autopilot_controller.running or self.autopilot_schedule_running:
             self.autopilot_stage_text.set("이미 Autopilot 작업이 실행 중입니다. 중복 실행은 차단했습니다.")
             return
         if not session_settings:
@@ -1649,6 +1689,7 @@ class Studio(tk.Tk):
                 provider=ai_research.OllamaProvider()
             summary=(f"프로필 {profile['name']} ({profile['market']} / {GENRES[profile['genre']].title})\n"
                      f"목표 적합 {target}개 · YouTube 검색 호출 최대 {max_calls}회 · 검색어 {len(plan['search_terms'])}개\n"
+                     f"연구 일정 {self.schedule_hours.get()}시간 · 연구 {self.schedule_research_minutes.get()}분 / 휴식 {self.schedule_break_minutes.get()}분 · 시작 {self.schedule_start_time.get().strip() or '지금'} (PC 현지 시각) · 저부하 {'켜짐' if self.resource_low_load_var.get() else '꺼짐'}\n"
                      f"AI: {provider_id} / {getattr(provider,'model','none')} · AI 호출은 최대 10회/작업이며 검색 한도와 별도입니다.\n"
                      f"유료 AI 비용 추정 {cost_estimate if cost_estimate is not None else '없음'} USD, 입력 상한 {cost_limit if cost_limit is not None else '없음'} USD\n"
                      "계속을 누르면 이 승인 범위 안에서는 단계별 팝업 없이 진행합니다. 외부 권한·예산을 늘리지 않으며 사람 라벨과 댓글 게시를 자동 수행하지 않습니다.")
@@ -1659,7 +1700,8 @@ class Studio(tk.Tk):
                 max_search_calls=max_calls,provider_id=provider_id,allow_paid_external=paid,
                 cost_estimate_usd=cost_estimate,cost_limit_usd=cost_limit)
         else:
-            settings,session_id=session_settings
+            settings,session_id,*saved_schedule=session_settings
+            schedule_id=saved_schedule[0] if saved_schedule else None
             provider_id=settings["provider_id"]
             provider=(ai_research.GeminiProvider(model=settings["model"]) if provider_id=="gemini" else
                       ai_research.OpenAIProvider() if provider_id=="openai" else
@@ -1675,6 +1717,47 @@ class Studio(tk.Tk):
         key=self.api_key.get().strip()
         profile_id=profile["id"]
         low_load_enabled=bool(self.resource_low_load_var.get())
+        if session_settings is None:
+            schedule_id=None
+        if session_settings is None:
+            try:
+                start_at=None
+                start_text=self.schedule_start_time.get().strip()
+                if start_text:
+                    parsed=datetime.strptime(start_text,"%H:%M").time()
+                    local_now=datetime.now().astimezone()
+                    start_at=datetime.combine(local_now.date(),parsed,tzinfo=local_now.tzinfo)
+                    if start_at < local_now:
+                        raise ValueError("시작 시각은 오늘의 현재 시각 이후로 입력해 주세요.")
+                schedule=research_scheduler.create(research_scheduler.ScheduleConfig(
+                    profile_id=profile_id,total_hours=int(self.schedule_hours.get()),
+                    research_minutes=int(self.schedule_research_minutes.get()),
+                    break_minutes=int(self.schedule_break_minutes.get()),start_at=start_at,
+                    approved_search_calls=config.max_search_calls))
+                schedule_id=schedule["id"]
+                research_scheduler.checkpoint(schedule_id,profile_id,{
+                    "approved_provider_id":config.provider_id,
+                    "approved_model":getattr(provider,"model","none") if provider else "none",
+                    "approved_target":config.target,
+                    "approved_max_search_calls":config.max_search_calls,
+                    "paid_external_approved":bool(config.allow_paid_external),
+                    "cost_estimate_usd":config.cost_estimate_usd,
+                    "cost_limit_usd":config.cost_limit_usd,
+                    "processed_video_ids":[],"uncertain_request":False,
+                })
+            except (ValueError, research_scheduler.ScheduleBusy) as exc:
+                if schedule_id:
+                    try: research_scheduler.cancel(schedule_id,profile_id)
+                    except Exception: pass
+                self._autopilot_show_exception({"type":"schedule_settings","impact":"연구 시간을 설정하지 못했습니다.",
+                    "recommended_action":str(exc) if isinstance(exc,ValueError) else "이 프로필에 진행 중인 예약이 있습니다. 먼저 이어가거나 안전 중단하세요.",
+                    "retry_allowed":False})
+                return
+        self.autopilot_schedule_id=schedule_id
+        self.autopilot_schedule_pause_event.clear()
+        self.autopilot_schedule_resume_event.clear()
+        self.autopilot_schedule_stop_event.clear()
+        self.autopilot_schedule_shutdown_event.clear()
         self.autopilot_result=None
         self.autopilot_exception_tree.delete(*self.autopilot_exception_tree.get_children())
         self.autopilot_progress.configure(value=0)
@@ -1683,6 +1766,7 @@ class Studio(tk.Tk):
         self.autopilot_pause_button.configure(state="normal")
         self.autopilot_stop_button.configure(state="normal")
         self.profile_combo.configure(state="disabled")
+        self.autopilot_schedule_running=bool(schedule_id)
         def worker():
             try:
                 token=oauth.get_access_token(profile_id) if not key else None
@@ -1699,17 +1783,134 @@ class Studio(tk.Tk):
                 def collect(term,market,limit,page_token=None):
                     return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
                                          page_token=page_token,return_page=True)
-                outcome=self.autopilot_controller.run(config,collect,provider=provider,
-                    on_event=self.autopilot_events.put,continue_check=resource_check,
-                    resource_check=resource_check)
+                if schedule_id:
+                    outcome=self._autopilot_schedule_worker(schedule_id,profile_id,config,provider,
+                        collect,resource_check,low_load_enabled)
+                else:
+                    outcome=self.autopilot_controller.run(config,collect,provider=provider,
+                        on_event=self.autopilot_events.put,continue_check=resource_check,
+                        resource_check=resource_check)
                 self.autopilot_events.put({"stage":"result","result":outcome,"profile_id":profile_id})
             except Exception:
+                if schedule_id:
+                    try:
+                        pending=research_scheduler.get(schedule_id,profile_id)
+                        if pending and pending["state"]=="running" and not pending["search_in_flight"]:
+                            research_scheduler.pause(schedule_id,profile_id)
+                    except Exception:
+                        pass
                 self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
                     "exception":{"type":"startup","impact":"조사를 시작하지 못했습니다.",
                                  "recommended_action":"프로필 연결·읽기 권한·저장 경로를 확인하세요. 개인 키는 로그에 기록하지 않았습니다.",
                                  "retry_allowed":False,"status":"pending"}})
+            finally:
+                self.autopilot_schedule_running=False
         threading.Thread(target=worker,name="zisu-autopilot",daemon=True).start()
         self.after(100,self._autopilot_poll)
+
+    def _autopilot_schedule_worker(self,schedule_id,profile_id,config,provider,collector,resource_check,low_load_enabled):
+        last_result=None
+        settings=autopilot.AutopilotController._settings(config,provider)
+        while True:
+            if self.autopilot_schedule_shutdown_event.is_set():
+                item=research_scheduler.get(schedule_id,profile_id)
+                if item and item["state"]=="running" and not item["search_in_flight"]:
+                    research_scheduler.pause(schedule_id,profile_id)
+                self.autopilot_events.put({"stage":"schedule","message":"앱을 닫기 전에 예약 체크포인트를 저장했습니다. 다음 실행에서 이어하기를 선택하세요."})
+                break
+            if self.autopilot_schedule_stop_event.is_set():
+                item=research_scheduler.get(schedule_id,profile_id)
+                if item and item["state"] in {"running","scheduled","paused"} and not item["search_in_flight"]:
+                    research_scheduler.cancel(schedule_id,profile_id)
+                self.autopilot_events.put({"stage":"schedule","message":"예약 조사를 안전하게 중단하고 체크포인트를 보존했습니다."})
+                break
+            item=research_scheduler.get(schedule_id,profile_id)
+            if not item or item["state"] in {"completed","cancelled"}:
+                break
+            self.autopilot_events.put({"stage":"schedule_status","item":item})
+            if self.autopilot_schedule_pause_event.is_set():
+                if item["state"]=="running":
+                    research_scheduler.pause(schedule_id,profile_id)
+                self.autopilot_events.put({"stage":"schedule","message":"연구를 잠시 멈췄습니다. 이어하기를 누르면 저장된 범위 안에서 계속합니다."})
+                if self.autopilot_schedule_shutdown_event.is_set(): break
+                while not self.autopilot_schedule_resume_event.wait(1):
+                    if self.autopilot_schedule_stop_event.is_set() or self.autopilot_schedule_shutdown_event.is_set(): break
+                if self.autopilot_schedule_stop_event.is_set(): continue
+                if self.autopilot_schedule_shutdown_event.is_set(): break
+                self.autopilot_schedule_resume_event.clear()
+                item=research_scheduler.get(schedule_id,profile_id)
+                if low_load_enabled:
+                    decision=self.resource_guard.check(sample_resources)
+                    if not decision.allow_new_work:
+                        research_scheduler.request_resource_pause(schedule_id,profile_id,
+                            decision.reasons[0],now=datetime.now().astimezone())
+                        self.autopilot_schedule_pause_event.clear()
+                        self.autopilot_events.put({"stage":"resource_status","status":"다른 작업이 바빠 잠시 쉬는 중","allow":False})
+                        continue
+                if item and item["state"]=="paused":
+                    research_scheduler.resume(schedule_id,profile_id)
+                self.autopilot_schedule_pause_event.clear()
+                continue
+            if item["state"]=="paused":
+                if item.get("pause_reason","").startswith(("system_","process_")) and low_load_enabled:
+                    try:
+                        research_scheduler.resume_after_resource_recovery(schedule_id,profile_id,
+                            resource_guard=self.resource_guard,expected_autopilot_settings=settings,
+                            allow_new_autopilot_session=not bool(config.session_id))
+                        self.autopilot_events.put({"stage":"schedule","message":"컴퓨터 여유가 회복되었습니다. 승인된 예산과 체크포인트를 확인해 이어갑니다."})
+                        continue
+                    except research_scheduler.ResourceWorkDeferred as exc:
+                        self.autopilot_events.put({"stage":"resource_status","status":"다른 작업이 바빠 잠시 쉬는 중","allow":False})
+                        self.autopilot_schedule_resume_event.wait(15)
+                        self.autopilot_schedule_resume_event.clear()
+                        continue
+                    except Exception:
+                        self.autopilot_events.put({"stage":"schedule","message":"저장된 요청이나 승인 범위를 자동 확인할 수 없습니다. 이어하기 전에 확인이 필요합니다."})
+                        break
+                self.autopilot_events.put({"stage":"schedule","message":"이전 예약이 복구 대기 중입니다. 이어하기 버튼으로 계속할 수 있습니다."})
+                break
+            if item["state"]=="scheduled" or item["phase"]=="waiting":
+                self.autopilot_events.put({"stage":"schedule","message":f"예약된 시작까지 {item['remaining_seconds']//60}분 남았습니다."})
+                self.autopilot_schedule_resume_event.wait(min(15,max(1,item["remaining_seconds"])))
+                self.autopilot_schedule_resume_event.clear()
+                continue
+            if item["phase"]=="break":
+                self.autopilot_events.put({"stage":"schedule","message":f"휴식 중 · 새 검색과 AI 요청 없이 {item['remaining_seconds']//60}분 남았습니다."})
+                self.autopilot_schedule_resume_event.wait(min(15,max(1,item["remaining_seconds"])))
+                self.autopilot_schedule_resume_event.clear()
+                continue
+            if item["search_calls_remaining"]<=0:
+                research_scheduler.pause(schedule_id,profile_id)
+                self.autopilot_events.put({"stage":"schedule","message":"승인된 검색 한도에 도달해 안전하게 멈췄습니다."})
+                break
+            self.autopilot_events.put({"stage":"schedule","message":"연구 구간 · 기존 Autopilot으로 승인된 범위에서 검색합니다."})
+            resumed_config=autopilot.AutopilotConfig(profile_id=config.profile_id,target=config.target,
+                max_search_calls=config.max_search_calls,provider_id=config.provider_id,
+                allow_paid_external=config.allow_paid_external,cost_estimate_usd=config.cost_estimate_usd,
+                cost_limit_usd=config.cost_limit_usd,session_id=config.session_id)
+            last_result=research_scheduler.run_autopilot_block(schedule_id,profile_id,
+                self.autopilot_controller,resumed_config,collector,provider=provider,
+                on_event=self.autopilot_events.put,resource_guard=self.resource_guard if low_load_enabled else None)
+            if last_result.state=="complete":
+                research_scheduler.complete(schedule_id,profile_id)
+                break
+            if self.autopilot_schedule_stop_event.is_set():
+                item=research_scheduler.get(schedule_id,profile_id)
+                if item and not item["search_in_flight"] and item["state"] in {"running","paused","scheduled"}:
+                    research_scheduler.cancel(schedule_id,profile_id)
+                self.autopilot_events.put({"stage":"schedule","message":"예약을 안전하게 중단했습니다. 진행 기록은 보존했습니다."})
+                break
+            item=research_scheduler.get(schedule_id,profile_id)
+            if item and item["state"]=="running" and item["phase"]=="research":
+                # Any non-resource pause/error is surfaced to the operator; do
+                # not automatically replay a request or spin through retries.
+                research_scheduler.pause(schedule_id,profile_id)
+                self.autopilot_events.put({"stage":"schedule","message":"조사가 일시 정지되었습니다. 결과와 대기함을 확인한 뒤 이어가세요."})
+                break
+            config.session_id=last_result.session_id
+        final=research_scheduler.get(schedule_id,profile_id)
+        self.autopilot_events.put({"stage":"schedule_status","item":final})
+        return last_result or autopilot.AutopilotResult(profile_id,"","paused",{},(),None)
 
     def _autopilot_poll(self):
         if not self.winfo_exists(): return
@@ -1735,6 +1936,15 @@ class Studio(tk.Tk):
                     self.resource_status_text.set(event.get("status","리소스 상태를 확인할 수 없습니다"))
                     if not event.get("allow",True):
                         self.autopilot_stage_text.set(event.get("status","리소스 사용량이 높아 잠시 멈췄습니다")+" · 저장된 예산 안에서 다시 시작할 수 있어요")
+                elif stage=="schedule_status" and event.get("item"):
+                    item=event["item"]
+                    elapsed=item.get("elapsed_seconds",0)
+                    total=max(1,int(item.get("total_minutes",1))*60)
+                    self.autopilot_progress.configure(value=min(100,100*elapsed/total))
+                    self.schedule_progress_text.set(
+                        f"{item.get('phase','대기')} · 경과 {elapsed//60}분 · 남은 시간 {item.get('remaining_seconds',0)//60}분 · 검색 잔여 {item.get('search_calls_remaining',0)}회")
+                elif stage=="schedule" and event.get("message"):
+                    self.autopilot_stage_text.set(event["message"])
                 elif stage=="progress":
                     max_calls=max(1,int(self.ai_max_calls.get()))
                     self.autopilot_progress.configure(value=min(95,100*event.get("calls_used",0)/max_calls))
@@ -1752,7 +1962,7 @@ class Studio(tk.Tk):
                     if event.get("exception"): self._autopilot_show_exception(event["exception"])
         except queue.Empty:
             pass
-        if self.autopilot_controller.running or not self.autopilot_events.empty():
+        if self.autopilot_controller.running or self.autopilot_schedule_running or not self.autopilot_events.empty():
             self.after(100,self._autopilot_poll)
         elif self.autopilot_close_pending:
             self._prepare_close()
@@ -1783,14 +1993,71 @@ class Studio(tk.Tk):
         self._autopilot_refresh_profile()
 
     def _autopilot_pause(self):
-        if self.autopilot_controller.pause(): self.autopilot_stage_text.set("일시 정지 요청 · 현재 페이지 완료 후 체크포인트 저장")
+        if self.autopilot_schedule_running:
+            self.autopilot_schedule_pause_event.set()
+            self.autopilot_controller.pause()
+            self.autopilot_stage_text.set("일시 정지 요청 · 진행 중인 페이지를 마친 뒤 체크포인트를 저장합니다.")
+        elif self.autopilot_controller.pause(): self.autopilot_stage_text.set("일시 정지 요청 · 현재 페이지 완료 후 체크포인트 저장")
 
     def _autopilot_stop(self):
-        if self.autopilot_controller.cancel(): self.autopilot_stage_text.set("안전 중단 요청 · 현재 읽기 요청 완료 후 결과와 세션을 보존")
+        if self.autopilot_schedule_running:
+            self.autopilot_schedule_stop_event.set()
+            self.autopilot_schedule_resume_event.set()
+            self.autopilot_controller.cancel()
+            self.autopilot_stage_text.set("안전 중단 요청 · 현재 요청 뒤 예약을 중단하고 체크포인트를 보존합니다.")
+        elif self.autopilot_controller.cancel(): self.autopilot_stage_text.set("안전 중단 요청 · 현재 읽기 요청 완료 후 결과와 세션을 보존")
 
     def _autopilot_resume(self):
+        if self.autopilot_schedule_running:
+            self.autopilot_schedule_resume_event.set()
+            self.autopilot_stage_text.set("저장된 연구 일정을 이어갑니다.")
+            return
         profile=self.current_profile()
         if not profile: return
+        try:
+            research_scheduler.recover_interrupted(profile["id"])
+            schedules=research_scheduler.list_active(profile["id"])
+        except Exception:
+            schedules=[]
+        for schedule in schedules:
+            if schedule["state"] not in {"paused","scheduled"}: continue
+            if not messagebox.askyesno("이전 작업이 발견되었습니다.",
+                f"저장 시각: {schedule.get('updated_at','확인 불가')}\n"
+                f"프로필: {profile['name']}\n단계: {schedule.get('phase','확인 필요')}\n"
+                f"검색 호출: {schedule.get('search_calls_used',0)}회 사용 / {schedule.get('approved_search_calls',0)}회 승인\n\n"
+                "이전 작업을 확인하고 이어갈까요? 외부 요청은 자동으로 다시 보내지 않습니다.",parent=self):
+                return
+            checkpoint=json.loads(schedule.get("checkpoint_json") or "{}")
+            autopilot_session_id=checkpoint.get("autopilot_session_id")
+            if schedule.get("search_in_flight"):
+                confirm=messagebox.askyesno("요청 결과 확인 필요",
+                    "종료 직전에 검색 요청이 전송되었을 수 있어 같은 요청을 자동 재전송하지 않습니다.\n\n"
+                    "결과가 불확실한 요청을 검색 한도 1회 사용 처리하고 이어갈까요?",parent=self)
+                if not confirm: return
+                try: research_scheduler.acknowledge_uncertain_search_consumed(schedule["id"],profile["id"])
+                except ValueError: return
+                schedule=research_scheduler.get(schedule["id"],profile["id"])
+            settings=(store.get_autopilot_settings(profile["id"],autopilot_session_id)
+                      if autopilot_session_id else None)
+            if not settings and all(key in checkpoint for key in (
+                    "approved_provider_id","approved_model","approved_target",
+                    "approved_max_search_calls","paid_external_approved")):
+                settings={"provider_id":checkpoint["approved_provider_id"],
+                    "model":checkpoint["approved_model"],"target":checkpoint["approved_target"],
+                    "max_search_calls":checkpoint["approved_max_search_calls"],
+                    "cost_estimate_usd":checkpoint.get("cost_estimate_usd"),
+                    "cost_limit_usd":checkpoint.get("cost_limit_usd"),
+                    "paid_external_approved":checkpoint["paid_external_approved"],
+                    "report_version":1}
+            if not settings:
+                self._autopilot_show_exception({"type":"approval_missing","impact":"이전 작업의 승인 범위를 확인할 수 없습니다.",
+                    "recommended_action":"이전 외부 요청을 자동 재개하지 않았습니다. 예산을 확인하고 새 조사를 승인하세요.","retry_allowed":False})
+                return
+            if schedule["state"]=="paused" and not str(schedule.get("pause_reason","")).startswith(("system_","process_")):
+                try: research_scheduler.resume(schedule["id"],profile["id"])
+                except (ValueError,research_scheduler.UnresolvedSearchCall): return
+            self._autopilot_start((settings,autopilot_session_id,schedule["id"]))
+            return
         for session in store.list_resumable_sessions(profile["id"]):
             settings=store.get_autopilot_settings(profile["id"],session["id"])
             if settings:
@@ -1812,7 +2079,15 @@ class Studio(tk.Tk):
                 self._autopilot_show_exception({"type":"report_export","impact":"보고서 파일을 쓸 수 없습니다.","recommended_action":"다른 저장 경로와 폴더 쓰기 권한을 확인하세요.","retry_allowed":True})
 
     def _autopilot_window_close(self):
-        if self.autopilot_controller.running:
+        if self.autopilot_schedule_running:
+            self.autopilot_schedule_shutdown_event.set()
+            self.autopilot_schedule_pause_event.set()
+            self.autopilot_schedule_resume_event.set()
+            self.autopilot_controller.pause()
+            self.autopilot_close_pending=True
+            self.autopilot_stage_text.set("앱 종료 대기 · 진행 중인 요청을 마친 뒤 예약 체크포인트를 저장합니다.")
+            self.after(100,self._autopilot_poll)
+        elif self.autopilot_controller.running:
             self.autopilot_controller.pause()
             self.autopilot_close_pending=True
             self.autopilot_stage_text.set("앱 종료 대기 · 현재 요청 완료 후 세션을 일시 정지 저장합니다.")

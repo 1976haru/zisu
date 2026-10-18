@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -182,10 +183,63 @@ def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None 
         raise ValueError("Only a paused research session can be resumed.")
     if item["search_in_flight"]:
         raise UnresolvedSearchCall("A search may have reached YouTube; it must be reconciled before resuming.")
+    cycle = (int(item["research_minutes"]) + int(item["break_minutes"])) * 60
+    phase = "research" if item["elapsed_seconds"] % cycle < int(item["research_minutes"]) * 60 else "break"
     with store.connect(path) as db:
-        db.execute("UPDATE research_schedules SET state='running',phase='research',pause_reason='',running_since_utc=?,"
+        db.execute("UPDATE research_schedules SET state='running',phase=?,pause_reason='',running_since_utc=?,"
                    "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND state='paused'",
-                   (_stamp(current), session_id, profile_id))
+                   (phase, _stamp(current), session_id, profile_id))
+    return get(session_id, profile_id, path, now=current)
+
+
+def resume_after_resource_recovery(session_id: str, profile_id: str, path=None, *,
+                                   resource_guard: ResourceGuard,
+                                   resource_sampler=sample_resources,
+                                   expected_autopilot_settings: dict | None = None,
+                                   allow_new_autopilot_session: bool = False,
+                                   now: datetime | None = None) -> dict:
+    """Fail-closed recovery for a same-process resource pause.
+
+    Never auto-resumes crash/interruption or uncertain API requests. A saved
+    Autopilot approval must still match exactly; a brand-new Autopilot session
+    is allowed only when the caller still holds this process's fresh approval.
+    """
+    current = _utc(now)
+    item = get(session_id, profile_id, path, now=current)
+    if item and item["search_in_flight"]:
+        raise UnresolvedSearchCall("A search result is uncertain; it will not be repeated automatically.")
+    if not item or item["state"] != "paused" or not str(item.get("pause_reason", "")).startswith((
+            "system_", "process_")):
+        raise ValueError("Only a resource-paused schedule can be automatically resumed.")
+    decision = resource_guard.check(resource_sampler)
+    if not decision.allow_new_work:
+        raise ResourceWorkDeferred(decision.status, decision.reasons)
+    if item["search_calls_remaining"] <= 0:
+        raise ValueError("The approved search allowance is exhausted.")
+    saved = {}
+    checkpoint_data = json.loads(item.get("checkpoint_json") or "{}")
+    autopilot_session_id = checkpoint_data.get("autopilot_session_id")
+    if autopilot_session_id:
+        saved = store.get_autopilot_settings(profile_id, autopilot_session_id, path)
+        if not saved or expected_autopilot_settings is None or saved != expected_autopilot_settings:
+            raise ValueError("The saved approval or profile settings changed; review before resuming.")
+    elif not allow_new_autopilot_session or expected_autopilot_settings is None:
+        raise ValueError("A fresh in-process approval is required before resuming this schedule.")
+    return resume(session_id, profile_id, path, now=current)
+
+
+def complete(session_id: str, profile_id: str, path=None, *, now: datetime | None = None) -> dict:
+    """Mark an early-finished schedule complete without changing its history."""
+    current = _utc(now)
+    item = get(session_id, profile_id, path, now=current)
+    if not item or item["state"] not in {"running", "paused", "scheduled"}:
+        raise ValueError("This research schedule is no longer active.")
+    if item["search_in_flight"]:
+        raise UnresolvedSearchCall("An external search is unresolved; the schedule cannot be completed yet.")
+    with store.connect(path) as db:
+        db.execute("UPDATE research_schedules SET state='completed',phase='complete',running_since_utc='',"
+                   "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=?",
+                   (session_id, profile_id))
     return get(session_id, profile_id, path, now=current)
 
 
@@ -206,7 +260,10 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
     if not isinstance(values, dict) or any(not isinstance(k, str) or _FORBIDDEN_KEY.search(k) for k in values):
         raise ValueError("Checkpoint must contain non-secret, allow-listed progress fields.")
     allowed = {"processed_video_ids", "last_video_id", "query_index", "phase",
-               "autopilot_session_id", "notes_draft_id", "uncertain_request"}
+               "autopilot_session_id", "notes_draft_id", "uncertain_request",
+               "approved_provider_id", "approved_model", "approved_target",
+               "approved_max_search_calls", "paid_external_approved",
+               "cost_estimate_usd", "cost_limit_usd"}
     if set(values) - allowed:
         raise ValueError("Checkpoint contains unsupported fields.")
     for key, value in values.items():
@@ -216,9 +273,23 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
         elif key == "query_index":
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError("Query position must be a non-negative whole number.")
-        elif key == "uncertain_request":
+        elif key in {"uncertain_request", "paid_external_approved"}:
             if not isinstance(value, bool):
                 raise ValueError("Request uncertainty must be true or false.")
+        elif key in {"approved_target", "approved_max_search_calls"}:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("Approved research limits must be positive whole numbers.")
+            if key == "approved_max_search_calls" and value > MAX_SEARCH_CALLS:
+                raise ValueError("Approved search allowance is above the supported maximum.")
+        elif key in {"cost_estimate_usd", "cost_limit_usd"}:
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not math.isfinite(value) or value < 0):
+                raise ValueError("Approved cost values must be finite non-negative numbers.")
+        elif key in {"approved_provider_id", "approved_model"}:
+            if not isinstance(value, str) or len(value) > 128:
+                raise ValueError("Approved provider details are invalid.")
+            if key == "approved_provider_id" and value not in {"disabled", "gemini", "openai", "ollama"}:
+                raise ValueError("Approved provider is not supported.")
         elif not isinstance(value, str) or len(value) > 128:
             raise ValueError("Checkpoint text is invalid.")
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True, allow_nan=False)
@@ -230,7 +301,8 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
     return get(session_id, profile_id, path, now=now)
 
 
-def request_resource_pause(session_id: str, profile_id: str, reason: str, path=None) -> dict:
+def request_resource_pause(session_id: str, profile_id: str, reason: str, path=None, *,
+                           now: datetime | None = None) -> dict:
     """Finish an in-flight call safely, then prevent admission of new work."""
     allowed = {"system_cpu_sustained", "system_ram_low", "system_memory_high",
                "process_memory_high", "process_memory_growth"}
@@ -239,14 +311,14 @@ def request_resource_pause(session_id: str, profile_id: str, reason: str, path=N
     with store.connect(path) as db:
         row = db.execute("SELECT elapsed_seconds,state,search_in_flight FROM research_schedules "
                          "WHERE id=? AND profile_id=?", (session_id, profile_id)).fetchone()
-        if not row or row["state"] not in {"running", "scheduled"}:
+        if not row or row["state"] not in {"running", "scheduled", "paused"}:
             raise ValueError("Research schedule does not match the active profile.")
         state = "running" if row["search_in_flight"] else "paused"
         db.execute("UPDATE research_schedules SET state=?,phase='resource_pause',pause_reason=?,"
                    "running_since_utc=CASE WHEN search_in_flight=1 THEN running_since_utc ELSE '' END,"
                    "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=?",
                    (state, reason, session_id, profile_id))
-    return get(session_id, profile_id, path)
+    return get(session_id, profile_id, path, now=now)
 
 
 def claim_search_call(session_id: str, profile_id: str, path=None, *, now: datetime | None = None,
@@ -261,7 +333,7 @@ def claim_search_call(session_id: str, profile_id: str, path=None, *, now: datet
         decision = resource_guard.evaluate(resource_snapshot or ResourceSnapshot(_utc(clock()).timestamp()))
         if not decision.allow_new_work:
             reason = decision.reasons[0]
-            request_resource_pause(session_id, profile_id, reason, path)
+            request_resource_pause(session_id, profile_id, reason, path, now=clock())
             raise ResourceWorkDeferred(decision.status, decision.reasons)
     with store.connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
@@ -357,7 +429,7 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
             return False
         decision = guard.check(resource_sampler)
         if not decision.allow_new_work:
-            request_resource_pause(session_id, profile_id, decision.reasons[0], path)
+            request_resource_pause(session_id, profile_id, decision.reasons[0], path, now=clock())
             return False
         return True
 
@@ -370,18 +442,43 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
             except (TypeError, ValueError):
                 params = {}
             if "page_token" in params or len(params) >= 4:
-                return collector(term, market, limit, page_token)
-            return collector(term, market, limit)
-        finally:
+                result = collector(term, market, limit, page_token)
+            else:
+                result = collector(term, market, limit)
+        except Exception:
+            # The remote service may have accepted the request. Retain the
+            # consumed reservation and require explicit reconciliation.
+            with store.connect(path) as db:
+                db.execute("UPDATE research_schedules SET state='paused',phase='uncertain_request',"
+                           "pause_reason='uncertain_request',running_since_utc='',"
+                           "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND search_in_flight=1",
+                           (session_id, profile_id))
+            raise
+        else:
             finish_search_call(session_id, profile_id, path)
+            return result
+
+    def schedule_event(event):
+        if event.get("stage") in {"session", "resume"} and event.get("session_id"):
+            current = get(session_id, profile_id, path, now=clock())
+            progress = json.loads(current.get("checkpoint_json") or "{}") if current else {}
+            progress.update(autopilot_session_id=event["session_id"], uncertain_request=False)
+            checkpoint(session_id, profile_id, progress, path, now=clock())
+        if on_event:
+            on_event(event)
 
     result = controller.run(config, scheduled_collector, provider=provider,
-                            on_event=on_event, continue_check=can_continue,
+                            on_event=schedule_event, continue_check=can_continue,
                             resource_check=can_continue)
-    checkpoint(session_id, profile_id, {
+    latest = get(session_id, profile_id, path, now=clock())
+    progress = json.loads(latest.get("checkpoint_json") or "{}") if latest else {}
+    previous_ids = progress.get("processed_video_ids", [])
+    new_ids = [str(row.get("video_id", "")) for row in
+               (result.run.candidates if result.run else ()) if row.get("video_id")]
+    progress.update({
         "autopilot_session_id": result.session_id,
-        "processed_video_ids": [str(row.get("video_id", "")) for row in
-                                (result.run.candidates if result.run else ()) if row.get("video_id")],
-        "uncertain_request": False,
-    }, path, now=clock())
+        "processed_video_ids": list(dict.fromkeys(previous_ids + new_ids))[-10000:],
+        "uncertain_request": bool(latest and latest["search_in_flight"]),
+    })
+    checkpoint(session_id, profile_id, progress, path, now=clock())
     return result

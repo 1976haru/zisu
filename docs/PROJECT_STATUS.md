@@ -1,20 +1,20 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 11:27 KST (offline implementation, isolated tests, resource sampling and local commit)
+Last checked: 2026-10-18 11:40 KST (offline schedule GUI integration, recovery and host resource sample)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Current HEAD: `a5eb644381d46e76b8848832515da48defe68104`
+Current base HEAD before this task's local commit: `c319cdf37e8de61c42f67e61d5bbdeca6858bf57`
 Remote status: not refreshed; Codex `gh auth status` failed (exit 1), so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 68% estimated (67.9% weighted across the 100-point backlog). This includes remaining V4.6 scope; it is not a test-pass percentage.
+- **Overall ZISU:** 72% estimated (72.2% weighted across the 100-point backlog after this task's estimated row updates). This includes remaining V4.6 scope; it is not a test-pass percentage.
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 34% estimated (33.5% weighted across its backlog). Schedule state and Mockable Autopilot block integration are present; scheduler UI, dedicated browser lifecycle and real API integration are incomplete.
-- **Current P0 work (V46-01 + V46-RESOURCE-01):** 58% estimated. Schedule/Autopilot integration, resource admission gates and Mock recovery tests pass; automatic recovery, browser management and live GUI scheduler remain.
+- **V4.6.0:** 44% estimated (44.25% weighted across its backlog). Schedule state, Autopilot block integration and widget-level schedule UI are present; browser lifecycle, expanded dashboard and actual APIs remain incomplete.
+- **Current P0 work (V46-01 + V46-RESOURCE-01, with V46-02 dependency):** 58% estimated (15.75/27 weighted points). Scheduler UI, resource admission and safe same-process recovery pass isolated tests; browser management and long-duration/Windows resource measurements remain.
 
 ## Verified and unverified state
 
@@ -40,20 +40,29 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 - Added deterministic 2/4/6/8-hour schedule state, research/rest phase computation, scheduled start, pause/resume/cancel, crash-to-paused recovery, profile-scoped non-secret checkpoints and atomic search-call reservations. Uncertain in-flight requests remain consumed and block resume until explicit reconciliation. The module does not start a browser, playback, or external API call.
 - Thirteen isolated scheduler/resource tests cover 6-hour fake-clock transitions, research-only Autopilot, break windows, saved session continuation, profile isolation, quota concurrency, resource pressure, rate limiting and safe in-flight completion.
 - `mcrs/resource_guard.py` provides configurable CPU/RAM admission rules, 10-second-minimum cached sampling, Windows-native fallback sampling, and no process termination. Autopilot search and AI calls can be deferred while rule evidence, approvals and budgets remain distinct. The easy Autopilot tab now has a default-on low-load option, editable CPU/RAM thresholds and a resource status view.
-- Resource recovery currently requires the user to resume; automatic restart is not implemented. The CPU/RAM sampler was measured once on this Windows host over 10.51 seconds: second CPU sample 5.57%, available RAM 13.68 GB, system memory load 59%, current sampler process working set 17.4 MB. This is a point observation, not a sustained idle average or guarantee.
+- At the previous baseline, resource recovery required user resume. The CPU/RAM sampler was measured once on this Windows host over 10.51 seconds: second CPU sample 5.57%, available RAM 13.68 GB, system memory load 59%, current sampler process working set 17.4 MB. This is a point observation, not a sustained idle average or guarantee. Same-process guarded recovery was added in the update below; long-duration load measurement remains pending.
+
+### V4.6.0 schedule UI and recovery update (this task)
+
+- Added Autopilot schedule controls for 2/4/6/8 hours, 20/30/40-minute research, 15/30/40-minute breaks, and optional same-day local start time. Defaults are 6 hours, 30/30 and low-load enabled. The active profile banner remains the research channel selector; the profile is disabled while its scheduled work runs.
+- The existing Autopilot worker now runs only during scheduled research windows, leaves breaks API-free, updates phase/elapsed/remaining/search allowance, and supports pause, continue, safe stop, close-time checkpoint, and a user-confirmed recovery prompt after restart. Approval metadata is allow-listed and contains no credentials or tokens.
+- Resource recovery now requires a healthy resource decision, an unchanged saved Autopilot approval (or a still-live in-process approval before session creation), remaining search allowance, and no uncertain request. Recovery after app restart is never automatic. Resume preserves a break phase instead of restarting research early.
+- A network/collector exception retains its consumed search reservation and marks the request uncertain; it is not refunded or silently repeated. The user must explicitly reconcile it before continuing.
+- Host resource observation during this task: 10.01-second sampling interval, system CPU 4.23% at the second sample, available RAM 12.71 GiB, system memory load 59%, sampler Python process working set 16.5 MiB. This is one brief host observation, not ZISU idle-average or extended-run performance.
+- Added four schedule tests for exact approval matching, resource recovery, uncertain call retention, and preserving a break across pause/resume. GUI smoke verifies the new controls/defaults and low-load setting. This is widget-level verification, not screenshot or DPI validation.
 
 ## Latest validation
 
-- `python -m compileall -q main.py mcrs tests`: PASS.
-- `python -m unittest discover -s tests -p test_*.py -v`: **157/157 PASS**.
-- `python tests/smoke_gui.py`: PASS.
-- `python tests/stress_v43.py`: PASS; 100 profiles, 10,000 candidates, 12 workers, 5.854 s, peak traced memory 2.55 MiB, 0 failures.
+- `python -m compileall -q main.py mcrs tests`: PASS (this task).
+- `python -m unittest discover -s tests -p test_*.py -v`: **161/161 PASS** (157 existing plus 4 new schedule/recovery tests; final rerun this task).
+- `python tests/smoke_gui.py`: PASS; schedule selector defaults, low-load default and schedule callbacks are present (this task). No screenshot/DPI evidence.
+- `python tests/stress_v43.py`: PASS; 100 profiles, 10,000 candidates, 12 workers, 5.886 s, peak traced memory 2.55 MiB, 0 failures (this task).
 - One full-suite rerun exposed a pre-existing order-dependent assertion in the shortfall test; it now selects the expected audit by `video_id`. The isolated test and final 157-test suite pass.
 - PowerShell parser: PASS (release script).
 - `git diff --check` plus UTF-8/newline/trailing-whitespace checks: PASS for current authored files.
 - Release-script Dry Run on the same V4.5.9 CI ZIP: PASS, ZIP SHA `78c9be89c5b2a5183365bf3904655102449b978473ec266d551c6d708d14fff6`, EXE SHA as above; isolated package smoke PASS.
-- Not tested: Windows 11, visible pixel/screen layout or DPI matrix, real OAuth/YouTube/Gemini/Analytics, managed browser lifecycle, scheduler GUI, automatic resource recovery, long-duration memory leak, fresh GitHub CI or sustained system CPU average.
+- Not tested: fresh Windows EXE build/install, Windows 11, visible pixel/screen layout or DPI matrix, real OAuth/YouTube/Gemini/Analytics, managed browser lifecycle, actual 6-hour wall-clock run, long-duration memory leak, fresh GitHub CI or sustained system CPU average.
 
 ## Immediate constraints and next order
 
-No data-loss or credential issue was found. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Continue V46-01 by adding the schedule controls and automatic resource-recovery/resume coordination, then complete dedicated browser ownership tests. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
+No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Continue with GUI/DPI and long-run resource validation, then complete dedicated browser ownership tests. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.

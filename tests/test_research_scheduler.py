@@ -125,6 +125,18 @@ class ResearchSchedulerTests(unittest.TestCase):
             scheduler.checkpoint(session["id"], self.jp, {"access_token": "do-not-store"}, self.db)
         with self.assertRaises(ValueError):
             scheduler.checkpoint(session["id"], self.jp, {"api_key": "do-not-store"}, self.db)
+        safe = scheduler.checkpoint(session["id"], self.jp, {
+            "approved_provider_id":"gemini", "approved_model":"mock-model",
+            "approved_target":10, "approved_max_search_calls":8,
+            "paid_external_approved":True, "cost_estimate_usd":0.02,
+            "cost_limit_usd":0.10, "processed_video_ids":[],
+            "uncertain_request":False,
+        }, self.db)
+        self.assertIn('"approved_model": "mock-model"', safe["checkpoint_json"])
+        self.assertNotIn("api_key", safe["checkpoint_json"])
+        with self.assertRaises(ValueError):
+            scheduler.checkpoint(session["id"], self.jp,
+                {"cost_limit_usd":float("inf")}, self.db)
         store.initialize(self.db)
         store.initialize(self.db)
         restored = scheduler.get(session["id"], self.jp, self.db, now=self.now)
@@ -137,7 +149,7 @@ class ResearchSchedulerTests(unittest.TestCase):
         session = scheduler.create(scheduler.ScheduleConfig(self.jp, approved_search_calls=3),
                                    self.db, now=self.now)
         scheduler.claim_search_call(session["id"], self.jp, self.db, now=self.now)
-        pending = scheduler.request_resource_pause(session["id"], self.jp, "system_ram_low", self.db)
+        pending = scheduler.request_resource_pause(session["id"], self.jp, "system_ram_low", self.db, now=self.now)
         self.assertEqual(("running", 1), (pending["state"], pending["search_in_flight"]))
         scheduler.finish_search_call(session["id"], self.jp, self.db)
         paused = scheduler.get(session["id"], self.jp, self.db, now=self.now)
@@ -147,6 +159,68 @@ class ResearchSchedulerTests(unittest.TestCase):
             scheduler.claim_search_call(session["id"], self.jp, self.db, now=self.now)
         resumed = scheduler.resume(session["id"], self.jp, self.db, now=self.now + timedelta(minutes=1))
         self.assertEqual("", resumed["pause_reason"])
+
+    def test_resource_recovery_requires_clear_guard_matching_approval_and_quota(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, approved_search_calls=2),
+                                   self.db, now=self.now)
+        config = autopilot.AutopilotConfig(self.jp, target=5, max_search_calls=2)
+        research_id = store.start_research_session(self.jp, "JP", "MORNING_CHILL_RAP", 5, 2,
+                                                   self.db, settings_hash="schedule-test")
+        approved = autopilot.AutopilotController._settings(config, None)
+        store.save_autopilot_settings(self.jp, research_id, approved, self.db)
+        scheduler.checkpoint(session["id"], self.jp,
+            {"autopilot_session_id": research_id, "processed_video_ids": []}, self.db)
+        scheduler.request_resource_pause(session["id"], self.jp, "system_ram_low", self.db, now=self.now)
+        guard = ResourceGuard()
+        healthy = lambda: ResourceSnapshot(100, 20, 4*1024**3, 40, 100)
+        with self.assertRaises(ValueError):
+            scheduler.resume_after_resource_recovery(session["id"], self.jp, self.db,
+                resource_guard=guard, resource_sampler=healthy,
+                expected_autopilot_settings={**approved, "target": 20}, now=self.now)
+        resumed = scheduler.resume_after_resource_recovery(session["id"], self.jp, self.db,
+            resource_guard=guard, resource_sampler=healthy,
+            expected_autopilot_settings=approved, now=self.now)
+        self.assertEqual(("running", 2), (resumed["state"], resumed["search_calls_remaining"]))
+
+    def test_resource_recovery_never_resumes_uncertain_or_crash_request(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp), self.db, now=self.now)
+        scheduler.claim_search_call(session["id"], self.jp, self.db, now=self.now)
+        scheduler.request_resource_pause(session["id"], self.jp, "system_ram_low", self.db, now=self.now)
+        healthy_guard = ResourceGuard()
+        with self.assertRaises(scheduler.UnresolvedSearchCall):
+            scheduler.resume_after_resource_recovery(session["id"], self.jp, self.db,
+                resource_guard=healthy_guard,
+                resource_sampler=lambda: ResourceSnapshot(1, 10, 4*1024**3, 40, 100),
+                expected_autopilot_settings={"provider_id":"disabled"},
+                allow_new_autopilot_session=True, now=self.now)
+        saved = scheduler.get(session["id"], self.jp, self.db, now=self.now)
+        self.assertEqual(("running", 1, 1),
+                         (saved["state"], saved["search_in_flight"], saved["search_calls_used"]))
+
+    def test_schedule_call_exception_keeps_uncertainty_and_never_refunds_quota(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, approved_search_calls=2),
+                                   self.db, now=self.now)
+        result = scheduler.run_autopilot_block(session["id"], self.jp,
+            autopilot.AutopilotController(self.db),
+            autopilot.AutopilotConfig(self.jp, target=5, max_search_calls=2),
+            lambda *_args: (_ for _ in ()).throw(TimeoutError("private transport detail")),
+            self.db, resource_sampler=lambda: ResourceSnapshot(0, 10, 4*1024**3, 40, 100), now=self.now)
+        saved = scheduler.get(session["id"], self.jp, self.db, now=self.now)
+        payload = __import__("json").loads(saved["checkpoint_json"])
+        self.assertEqual("paused", result.state)
+        self.assertEqual(("paused", "uncertain_request", 1, 1),
+                         (saved["state"], saved["pause_reason"], saved["search_in_flight"], saved["search_calls_used"]))
+        self.assertTrue(payload["uncertain_request"])
+        with self.assertRaises(scheduler.UnresolvedSearchCall):
+            scheduler.resume(session["id"], self.jp, self.db, now=self.now)
+
+    def test_resume_keeps_rest_phase_after_user_pause(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, research_minutes=20,
+            break_minutes=15), self.db, now=self.now)
+        at_break = self.now + timedelta(minutes=25)
+        scheduler.pause(session["id"], self.jp, self.db, now=at_break)
+        resumed = scheduler.resume(session["id"], self.jp, self.db, now=at_break+timedelta(hours=1))
+        self.assertEqual(("running", "break"), (resumed["state"], resumed["phase"]))
 
     def test_autopilot_runs_only_in_research_windows_and_resumes_one_checkpoint(self):
         clock = [self.now]

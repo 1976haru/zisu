@@ -21,6 +21,13 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"autopilot_start_button")
     assert hasattr(app,"autopilot_exception_tree")
     assert hasattr(app,"autopilot_controller")
+    assert app.autopilot_start_button.cget("text")=="연구 시작"
+    assert app.schedule_hours.get()=="6"
+    assert app.schedule_research_minutes.get()=="30"
+    assert app.schedule_break_minutes.get()=="30"
+    assert app.resource_low_load_var.get() is True
+    assert callable(app._autopilot_schedule_worker)
+    assert callable(app._autopilot_schedule_preview)
     assert len(app.ai_tree.get_children())==0
     assert hasattr(app,"ai_credential_entry") and hasattr(app,"ai_pause_button")
     assert hasattr(app,"ai_gemini_test_button")
