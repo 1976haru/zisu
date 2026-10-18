@@ -1,6 +1,6 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-05 scheduled candidate diversification implementation and scoped regression)
+Last checked: 2026-10-18 (V46-06 network/auth/quota safe-stop implementation and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
@@ -11,13 +11,14 @@ Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 84% estimated (83.55 weighted points using the existing backlog scoring, rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
+- **Overall ZISU:** 84% estimated (84.20 weighted points using the existing backlog scoring, rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 75% estimated (74.875% weighted across its backlog after V46-05 progress update). Schedule state, offline account/channel registry, resource sampling/admission, dashboard, browser lifecycle control and offline candidate diversification are present; browser page navigation/clean process shutdown, dashboard visual DPI, live discovery quality and actual APIs remain incomplete.
+- **V4.6.0:** 74% estimated (74.25% weighted across V4.6.0 rows after V46-06 implementation; branding is a release gate accounted within REL-01). Schedule state, offline account/channel registry, resource sampling/admission, dashboard, browser lifecycle control, candidate diversification, and network/auth/quota safeguards are present; browser page navigation/clean process shutdown, dashboard visual DPI, live discovery quality, actual project quota reconciliation and live APIs remain incomplete.
 - **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 81% estimated (21.9/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth and wall-clock EXE runtime remain.
 - **Current V46-03:** 65% estimated and unchanged. Edge produced a visible top-level frame, but the local test page did not load and the isolated process needed a verified cleanup fallback; Chrome failed during startup. End-to-end browser use is not complete.
 - **Current V46-04:** 65% estimated. Dashboard grouping and profile-scoped counts/scheduler/resource status are implemented and scoped tests pass; real Windows DPI appearance remains unverified.
 - **Current V46-05:** 65% estimated. Profile-scoped discovery provenance, query categories, bounded recent-first searches, within-page/history duplicate suppression and deterministic genre-first/channel-exposure ordering are implemented. Scoped Mock suite passes; live recommendation quality and human-reviewed KR/JP precision are not measured.
+- **Current V46-06:** 65% estimated. Typed safe handling, pre-request quota reservations, Pacific-day project buckets, profile/session ledger, bounded retries, safe scheduled pause and explicit auth/quota resume confirmation are implemented offline. Live account/project quota reconciliation is not verified.
 
 ## Verified and unverified state
 
@@ -72,6 +73,19 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 - `git diff --check` plus UTF-8/newline/trailing-whitespace checks: PASS for current authored files.
 - Release-script Dry Run on the same V4.5.9 CI ZIP: PASS, ZIP SHA `78c9be89c5b2a5183365bf3904655102449b978473ec266d551c6d708d14fff6`, EXE SHA as above; isolated package smoke PASS.
 - Not tested: fresh Windows EXE build/install, Windows 11, visible pixel/screen layout or DPI matrix, real OAuth/YouTube/Gemini/Analytics, production-AppData browser lifecycle, actual 6-hour wall-clock run, long-duration memory leak, fresh GitHub CI or sustained system CPU average.
+
+### V46-06 network, authentication and quota safety (2026-10-18)
+
+- `mcrs/youtube_api.py` now returns allowlisted safe error categories for HTTP 401, permission/quota 403, rate limit 429, server 5xx, DNS, offline/connection failure, timeout, invalid response, and a changed network-interface signature (VPN/Wi-Fi change signal). Interface status is sampled only at request/error boundaries; no polling loop or IP rotation is used. Provider response bodies are bounded and never displayed or persisted.
+- Ambiguous timeouts, network changes, and server failures are not automatically replayed. The scheduler pauses only the matching profile, saves its state, preserves an in-flight marker when the remote outcome is uncertain, and blocks resume until explicit reconciliation. Auth/quota pauses require explicit recovery confirmation. Rest phases still issue no new API calls; the approved schedule and AI budgets are not expanded.
+- Added `mcrs/quota_ledger.py`: additive SQLite request reservations, idempotent completion status (reserved/succeeded/failed/uncertain), project-scope hashing, profile/session attribution, crash reservations retained conservatively, and daily reset at midnight Pacific Time. `search.list` has a separate local call cap; `videos.list` and `channels.list` consume separately tallied estimated units. Defaults follow the official [quota calculator](https://developers.google.com/youtube/data/determine_quota_cost) but are configurable estimates, not a live Cloud quota balance or billing amount. If an OAuth project identity is unavailable, the local ledger groups it conservatively under one unknown-project bucket.
+- Autopilot and ordinary search now attach the profile, local DB path, non-secret project identity and session metadata to requests; the Autopilot screen displays project/profile estimate counts and explicitly tells users to check Google Cloud for the authoritative balance. AI/Gemini remains on its existing separate request/cost budget and single-flight path.
+- Added 9 isolated network/quota tests: status normalization; DNS, timeout, offline and changed-network classification; no retry on ambiguous timeout; API-key non-persistence; shared project/profile/session limits; Pacific-day boundary; profile-scoped scheduler pause; explicit auth recovery; OAuth error sanitization. Updated an old test that expected unknown network errors to retry: now it asserts fail-closed one-request behavior.
+- Current V46-06 scoped regression: new network/quota **9/9 PASS**, scheduler **18/18 PASS**, Autopilot **12/12 PASS**, candidate diversity **6/6 PASS**, dashboard data **3/3 PASS**, OAuth management **16/16 PASS**, API/genre resilience **5/5 PASS**; GUI smoke **PASS**, compileall **PASS**, `git diff --check` **PASS**. These are targeted suites only; the full suite/final QA was not started.
+- No live YouTube, OAuth or Gemini request; no real user DB, OAuth token contents or DPAPI key store was accessed/changed. V4.5.9 installed EXE and user-data backups remain unchanged. No current CPU/RAM benchmark was run; the prior host sample in the V46-05 record is not a V46-06 performance claim.
+- Branding request is registered as `V46-BRAND-01` in MASTER_BACKLOG, P1 and deferred until feature gates are complete, with packaging effort accounted within REL-01. Official name/slogan are recorded; no title/icon/EXE branding has been applied yet.
+- Current branch remains `feature/v4.5-ai-research-manager`; base before this task was `7f6162cb3808a4afe01c5651387d79c01711139a`. Local commit is pending final staged review. GitHub credentials were not retried in this task; no push, CI refresh, EXE build or installation was attempted. PR #4 remains Draft by prior reported state; live state not checked. PR #2 and `main` were not touched.
+- Still open: V46-03 actual browser page navigation/clean shutdown, V46-04 visual DPI, V46-05 real search/human quality, V46-06 real project quota/auth reconciliation, V46-07 read-only Analytics, V46-RESOURCE-01 long-run validation, final cross-version/EXE QA and V46-BRAND-01 package branding.
 
 ## Immediate constraints and next order
 

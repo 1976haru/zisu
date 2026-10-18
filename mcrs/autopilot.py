@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from . import ai_research, comments, store
+from . import ai_research, comments, oauth, store
 from .youtube_api import APIError
 
 
@@ -90,7 +90,48 @@ def _safe_error(exc: Exception) -> dict:
     if isinstance(exc, store.ActiveResearchSessionError):
         return _exception("active_job", "이 프로필의 조사가 이미 진행 중이어서 중복 실행을 막았습니다.",
                           "진행 중인 창에서 일시 정지하거나 완료된 뒤 다시 확인하세요.", False)
+    if isinstance(exc, oauth.OAuthError):
+        code = getattr(exc, "code", "unknown")
+        safe = {
+            "access_denied": ("google_auth", "Google 계정 연결이 만료되었거나 권한 승인이 취소되었습니다."),
+            "test_user_required": ("google_auth", "테스트 모드의 Google 계정 등록을 확인해야 합니다."),
+            "scope_mismatch": ("google_permission", "필요한 YouTube 읽기 권한이 확인되지 않았습니다."),
+            "api_permission": ("google_permission", "YouTube 읽기 권한 또는 API 사용 설정을 확인해야 합니다."),
+            "token_storage": ("token_storage", "Google 연결 정보를 안전하게 저장하지 못했습니다."),
+            "account_mismatch": ("account_mismatch", "선택한 프로필과 Google 계정이 일치하지 않습니다."),
+            "account_identity": ("account_identity", "Google 계정 정보를 확인하지 못했습니다."),
+            "network_timeout": ("network_wait", "Google 연결 응답이 늦어 작업을 저장하고 기다립니다."),
+            "local_callback": ("network_wait", "브라우저 인증 후 ZISU로 돌아오는 연결을 확인해야 합니다."),
+            "redirect_uri_mismatch": ("google_setup", "Google Cloud의 데스크톱 인증 설정을 확인해야 합니다."),
+            "invalid_client": ("google_setup", "Google Cloud의 데스크톱 인증 파일을 확인해야 합니다."),
+        }
+        category, impact = safe.get(code, ("google_setup", "Google 연결 상태를 확인해야 합니다."))
+        return _exception(category, impact,
+                          "Google 연결 설정을 확인한 뒤 이 프로필에서 직접 이어가기를 선택하세요.", False)
     if isinstance(exc, APIError):
+        code = getattr(exc, "code", "api_error")
+        if code == "auth_required":
+            return _exception("google_auth", "Google 연결이 만료되었거나 계정 확인이 필요합니다.",
+                              "현재 조사 프로필의 Google 읽기 전용 연결을 확인한 뒤 직접 이어가기를 선택하세요.", False)
+        if code == "permission_denied":
+            return _exception("google_permission", "이 프로필에 필요한 YouTube 읽기 권한이 없습니다.",
+                              "연결된 Google 계정과 YouTube Data API 설정을 확인하세요. 다른 프로필에는 영향이 없습니다.", False)
+        if code in {"quota_exhausted", "quota_local_limit"}:
+            return _exception("youtube_quota", "설정한 검색 예산 또는 Google 프로젝트 할당량에 도달했습니다.",
+                              "Google Cloud 할당량 화면을 확인하세요. 승인 한도를 늘리기 전에는 새 요청을 보내지 않습니다.", False)
+        if code == "rate_limited":
+            return _exception("rate_limited", "요청 제한 응답을 받아 조사를 안전하게 멈췄습니다.",
+                              "잠시 기다린 뒤 사용량을 확인하고 직접 이어가기를 선택하세요. 자동 재시도는 하지 않았습니다.", False)
+        if code == "server_error":
+            return _exception("google_server", "Google API 서버가 응답하지 않아 체크포인트에 멈췄습니다.",
+                              "연결 상태를 확인하고 직접 이어가기를 선택하세요. 완료 여부가 불확실한 요청은 먼저 확인해야 합니다.", False)
+        if code in {"dns_failure", "network_timeout", "network_offline",
+                    "network_changed", "connection_failed"}:
+            return _exception("network_wait", "인터넷 연결이 끊기거나 변경되어 조사 내용을 저장하고 기다리는 중입니다.",
+                              "인터넷 또는 VPN 연결을 확인한 뒤 현재 프로필에서 직접 이어가기를 선택하세요.", False)
+        if code == "invalid_response":
+            return _exception("api_response", "Google 응답을 확인할 수 없어 조사 내용을 저장하고 멈췄습니다.",
+                              "예산을 확인한 뒤 저장된 작업 상태를 살펴보세요. 같은 요청은 자동으로 다시 보내지 않았습니다.", False)
         message = str(exc).casefold()
         if "다른 검색" in message:
             return _exception("search_busy", "다른 검색을 기다리는 중이라 이번 새 검색은 시작하지 않았습니다.",
@@ -188,7 +229,7 @@ class AutopilotController:
                 provider = FailClosedProvider(provider)
             emit("validate", message="프로필, 연결, 승인된 예산 확인")
 
-            def collect(term, market, limit, page_token=None, order="relevance"):
+            def collect(term, market, limit, page_token=None, order="relevance", quota_context=None):
                 actual_queries.append({"keyword": term, "market": market,
                                        "page": len(actual_queries) + 1,
                                        "continued_page": bool(page_token), "order": order})
@@ -201,12 +242,19 @@ class AutopilotController:
                 accepts_page = "page_token" in parameters or len(parameters) >= 4 or not parameters
                 accepts_order = "order" in parameters or any(
                     p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
-                if accepts_page and accepts_order:
-                    return collector(term, market, limit, page_token, order=order)
+                accepts_quota = "quota_context" in parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+                extra = {"order": order} if accepts_order else {}
+                if accepts_quota:
+                    extra["quota_context"] = {**(quota_context or {}),
+                        "profile_id": config.profile_id, "session_id": session_id or "",
+                        "path": self.path}
+                if accepts_page:
+                    return collector(term, market, limit, page_token, **extra)
+                if extra:
+                    return collector(term, market, limit, **extra)
                 if accepts_page:
                     return collector(term, market, limit, page_token)
-                if accepts_order:
-                    return collector(term, market, limit, order=order)
                 return collector(term, market, limit)
 
             def session_ready(new_session_id, resumed):

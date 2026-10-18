@@ -205,13 +205,18 @@ def pause(session_id: str, profile_id: str, path=None, *, now: datetime | None =
     return get(session_id, profile_id, path, now=current)
 
 
-def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None = None) -> dict:
+def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None = None,
+           external_recovery_confirmed: bool = False) -> dict:
     current = _utc(now)
     item = get(session_id, profile_id, path, now=current)
     if not item or item["state"] != "paused":
         raise ValueError("Only a paused research session can be resumed.")
     if item["search_in_flight"]:
         raise UnresolvedSearchCall("A search may have reached YouTube; it must be reconciled before resuming.")
+    confirmation_reasons = {"auth_required", "permission_denied", "quota_exhausted",
+                            "quota_local_limit", "rate_limited"}
+    if item.get("pause_reason") in confirmation_reasons and not external_recovery_confirmed:
+        raise ValueError("External authentication or quota state must be confirmed before resume.")
     phase, _ = _phase_at(item, item["elapsed_seconds"])
     with store.connect(path) as db:
         db.execute("UPDATE research_schedules SET state='running',phase=?,pause_reason='',running_since_utc=?,"
@@ -426,6 +431,36 @@ class ResourceWorkDeferred(RuntimeError):
         self.reasons = reasons
 
 
+def pause_for_api_error(session_id: str, profile_id: str, error, path=None) -> dict:
+    """Pause only the owning profile and retain uncertain requests for review."""
+    code = getattr(error, "code", "unknown_network")
+    if error.__class__.__name__ == "OAuthError" and code == "unknown":
+        code = "access_denied"
+    allowed = {
+        "auth_required": "auth_required", "permission_denied": "permission_denied",
+        "access_denied": "auth_required", "scope_mismatch": "permission_denied",
+        "api_permission": "permission_denied", "token_storage": "auth_required",
+        "quota_exhausted": "quota_exhausted", "quota_local_limit": "quota_local_limit",
+        "rate_limited": "rate_limited", "server_error": "server_error",
+        "dns_failure": "network_wait", "network_timeout": "network_wait",
+        "network_offline": "network_wait", "network_changed": "network_wait",
+        "connection_failed": "network_wait", "invalid_response": "uncertain_request",
+    }
+    reason = allowed.get(code, "uncertain_request")
+    default_uncertain = code not in {"access_denied", "scope_mismatch", "api_permission", "token_storage"}
+    uncertain = bool(getattr(error, "request_uncertain", default_uncertain))
+    with store.connect(path) as db:
+        result = db.execute(
+            "UPDATE research_schedules SET state='paused',phase=?,pause_reason=?,"
+            "search_in_flight=CASE WHEN ? THEN search_in_flight ELSE 0 END,"
+            "running_since_utc='',updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND profile_id=? AND state IN ('running','paused')",
+            (reason, reason, int(uncertain), session_id, profile_id))
+        if result.rowcount != 1:
+            raise ValueError("Research schedule does not match the selected profile.")
+    return get(session_id, profile_id, path)
+
+
 def recover_interrupted(profile_id: str, path=None, *, now: datetime | None = None) -> list[dict]:
     """Convert crashed running rows to paused checkpoints; never resume requests."""
     current = _utc(now)
@@ -488,7 +523,7 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
             return False
         return True
 
-    def scheduled_collector(term, market, limit, page_token=None, order="relevance"):
+    def scheduled_collector(term, market, limit, page_token=None, order="relevance", quota_context=None):
         claim_search_call(session_id, profile_id, path, now=clock())
         try:
             try:
@@ -498,20 +533,33 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
                 params = {}
             accepts_order = "order" in params or any(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-            if accepts_order:
-                result = collector(term, market, limit, page_token, order=order) if ("page_token" in params or len(params)>=4) else collector(term, market, limit, order=order)
-            elif "page_token" in params or len(params) >= 4:
-                result = collector(term, market, limit, page_token)
+            accepts_page = "page_token" in params or len(params) >= 4
+            accepts_quota = "quota_context" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            extra = {"order": order} if accepts_order else {}
+            if accepts_quota:
+                extra["quota_context"] = {**(quota_context or {}), "schedule_id": session_id}
+            if accepts_page:
+                result = collector(term, market, limit, page_token, **extra)
+            elif extra:
+                result = collector(term, market, limit, **extra)
             else:
                 result = collector(term, market, limit)
-        except Exception:
-            # The remote service may have accepted the request. Retain the
-            # consumed reservation and require explicit reconciliation.
-            with store.connect(path) as db:
-                db.execute("UPDATE research_schedules SET state='paused',phase='uncertain_request',"
-                           "pause_reason='uncertain_request',running_since_utc='',"
-                           "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND search_in_flight=1",
-                           (session_id, profile_id))
+        except Exception as exc:
+            try:
+                from .youtube_api import APIError
+                if isinstance(exc, APIError):
+                    pause_for_api_error(session_id, profile_id, exc, path)
+                else:
+                    with store.connect(path) as db:
+                        db.execute("UPDATE research_schedules SET state='paused',phase='uncertain_request',"
+                            "pause_reason='uncertain_request',running_since_utc='',"
+                            "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND search_in_flight=1",
+                            (session_id, profile_id))
+            except Exception:
+                # Preserve the original failure; a persisted in-flight reservation
+                # remains fail-closed if diagnostics could not be written.
+                pass
             raise
         else:
             finish_search_call(session_id, profile_id, path)

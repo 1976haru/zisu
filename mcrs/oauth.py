@@ -193,6 +193,28 @@ def get_access_token(profile_id):
         raise
     except Exception as exc:
         error_code = str(getattr(exc, "error", "") or "").casefold()
+        safe_marker = str(exc).casefold() if isinstance(exc, RuntimeError) else ""
+        if error_code == "invalid_grant" or "invalid_grant" in safe_marker:
+            raise OAuthError(code="access_denied", stage="token_refresh") from None
+        raise OAuthError(code="unknown", stage="token_refresh") from None
+
+
+def quota_project_identity(profile_id):
+    """Return a transient OAuth client identity for shared quota bucketing.
+
+    The caller hashes this value before persistence; neither token nor client
+    identity is written to logs or quota rows.
+    """
+    try:
+        data=json.loads(token_path(profile_id).read_text(encoding="utf-8"))
+        client_id=data.get("client_id","")
+        return "oauth-client:"+client_id if isinstance(client_id,str) and client_id else ""
+    except (OSError,ValueError,TypeError):
+        return ""
+    except OAuthError:
+        raise
+    except Exception as exc:
+        error_code = str(getattr(exc, "error", "") or "").casefold()
         # Inspect only the allowlisted error marker; never display/log the
         # provider exception string, which can contain response diagnostics.
         safe_marker = str(exc).casefold() if isinstance(exc, RuntimeError) else ""

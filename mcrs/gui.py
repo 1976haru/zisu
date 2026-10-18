@@ -17,8 +17,9 @@ from datetime import datetime, date
 from urllib.parse import urlencode, urlparse, parse_qs
 from . import store
 from .genres import GENRES, search_terms, assess, related_classification
-from .youtube_api import lookup_videos, APIError
+from .youtube_api import lookup_videos, APIError, quota_project_identity
 from . import oauth
+from . import quota_ledger
 from . import ai_research
 from . import comments
 from . import timers
@@ -1068,7 +1069,10 @@ class Studio(tk.Tk):
             try:
                 token = oauth.get_access_token(profile["id"]) if not key else None
                 for term in words:
-                    collected.extend(lookup_videos(key,term,profile["market"],limit=12,access_token=token))
+                    collected.extend(lookup_videos(key,term,profile["market"],limit=12,access_token=token,
+                        quota_context={"profile_id":profile["id"],"path":store.db_path(),
+                            "project_identity":quota_project_identity(key,
+                                (oauth.quota_project_identity(profile["id"]) or "oauth-project:unknown") if not key else "")}))
                 unique={r["video_id"]:r for r in collected}
                 counts=store.save_candidates(profile["id"],list(unique.values()))
             except (APIError,oauth.OAuthError,ValueError,OSError) as exc:
@@ -1687,7 +1691,9 @@ class Studio(tk.Tk):
         self.autopilot_ai_stats=tk.StringVar(value="AI 요청 통계는 조사 완료 후 실제 요청·성공·실패·캐시·예산 차단을 구분해 표시합니다.")
         ttk.Label(tab,textvariable=self.autopilot_ai_stats,wraplength=1050).grid(row=8,column=0,sticky="sew",pady=(30,4))
         detail=ttk.LabelFrame(tab,text="상세 설정 (필요할 때만 열기)")
-        detail.grid(row=9,column=0,sticky="ew",pady=4)
+        self.autopilot_quota_text=tk.StringVar(value="오늘 검색량: 기록을 불러오는 중입니다. 이 값은 Google Cloud의 실제 잔여량이 아닌 로컬 추정치입니다.")
+        ttk.Label(tab,textvariable=self.autopilot_quota_text,wraplength=1050).grid(row=9,column=0,sticky="w",pady=3)
+        detail.grid(row=10,column=0,sticky="ew",pady=4)
         self.autopilot_detail_panel=ttk.Frame(detail)
         self.autopilot_detail_panel.pack(fill="x")
         row=ttk.Frame(self.autopilot_detail_panel); row.pack(fill="x",pady=3)
@@ -1995,6 +2001,13 @@ class Studio(tk.Tk):
         def worker():
             try:
                 token=oauth.get_access_token(profile_id) if not key else None
+                identity=quota_project_identity(key,
+                    (oauth.quota_project_identity(profile_id) or "oauth-project:unknown") if not key else "")
+                if identity:
+                    project_quota=quota_ledger.summary(identity,store.db_path())
+                    profile_quota=quota_ledger.summary(identity,store.db_path(),profile_id=profile_id)
+                    self.autopilot_events.put({"stage":"quota_status","profile":profile_quota,
+                                               "project":project_quota})
                 def resource_check():
                     if not low_load_enabled:
                         return True
@@ -2006,9 +2019,24 @@ class Studio(tk.Tk):
                         "status":labels.get(decision.status,"리소스 상태를 확인할 수 없습니다"),
                         "allow":decision.allow_new_work})
                     return decision.allow_new_work
-                def collect(term,market,limit,page_token=None,order="relevance"):
-                    return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
-                                         page_token=page_token,return_page=True,order=order)
+                def collect(term,market,limit,page_token=None,order="relevance",quota_context=None):
+                    context={"profile_id":profile_id,"path":store.db_path(),
+                        "project_identity":quota_project_identity(key,
+                            (oauth.quota_project_identity(profile_id) or "oauth-project:unknown") if not key else "")}
+                    if quota_context:
+                        context.update(quota_context)
+                    if context.get("schedule_id") and not context.get("session_id"):
+                        context["session_id"]=context["schedule_id"]
+                    try:
+                        return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
+                                             page_token=page_token,return_page=True,order=order,
+                                             quota_context=context)
+                    finally:
+                        project_usage=quota_ledger.summary(context["project_identity"],store.db_path())
+                        profile_usage=quota_ledger.summary(context["project_identity"],store.db_path(),
+                                                           profile_id=profile_id)
+                        self.autopilot_events.put({"stage":"quota_status","profile":profile_usage,
+                                                   "project":project_usage})
                 if schedule_id:
                     outcome=self._autopilot_schedule_worker(schedule_id,profile_id,config,provider,
                         collect,resource_check,low_load_enabled)
@@ -2017,14 +2045,21 @@ class Studio(tk.Tk):
                         on_event=self.autopilot_events.put,continue_check=resource_check,
                         resource_check=resource_check)
                 self.autopilot_events.put({"stage":"result","result":outcome,"profile_id":profile_id})
-            except Exception:
+            except Exception as exc:
                 if schedule_id:
                     try:
                         pending=research_scheduler.get(schedule_id,profile_id)
                         if pending and pending["state"]=="running" and not pending["search_in_flight"]:
-                            research_scheduler.pause(schedule_id,profile_id)
+                            if isinstance(exc,(APIError,oauth.OAuthError)):
+                                research_scheduler.pause_for_api_error(schedule_id,profile_id,exc)
+                            else:
+                                research_scheduler.pause(schedule_id,profile_id)
                     except Exception:
                         pass
+                if isinstance(exc,(APIError,oauth.OAuthError)):
+                    self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
+                                               "exception":autopilot._safe_error(exc)})
+                    return
                 self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
                     "exception":{"type":"startup","impact":"조사를 시작하지 못했습니다.",
                                  "recommended_action":"프로필 연결·읽기 권한·저장 경로를 확인하세요. 개인 키는 로그에 기록하지 않았습니다.",
@@ -2151,7 +2186,18 @@ class Studio(tk.Tk):
             while True:
                 event=self.autopilot_events.get_nowait()
                 stage=event.get("stage")
-                if stage=="result":
+                if stage=="quota_status":
+                    profile_usage=event.get("profile",{})
+                    project_usage=event.get("project",{})
+                    self.autopilot_quota_text.set(
+                        "오늘 검색량(추정) · 프로필 {}/{}회 · 공유 프로젝트 {}/{}회 · 기타 API 예상 단위 {}/{} · 실제 잔여량은 Google Cloud에서 확인하세요.".format(
+                            profile_usage.get("search_calls_used_estimate",0),
+                            profile_usage.get("search_calls_limit_configured",0),
+                            project_usage.get("search_calls_used_estimate",0),
+                            project_usage.get("search_calls_limit_configured",0),
+                            project_usage.get("other_units_used_estimate",0),
+                            project_usage.get("other_units_limit_configured",0)))
+                elif stage=="result":
                     self.autopilot_result=event["result"]
                     self.profile_combo.configure(state="readonly")
                     self.autopilot_start_button.configure(state="normal")
@@ -2324,7 +2370,15 @@ class Studio(tk.Tk):
                     "recommended_action":"이전 외부 요청을 자동 재개하지 않았습니다. 예산을 확인하고 새 조사를 승인하세요.","retry_allowed":False})
                 return
             if schedule["state"]=="paused" and not str(schedule.get("pause_reason","")).startswith(("system_","process_")):
-                try: research_scheduler.resume(schedule["id"],profile["id"])
+                confirm_external=schedule.get("pause_reason") in {
+                    "auth_required","permission_denied","quota_exhausted","quota_local_limit","rate_limited"}
+                if confirm_external and not messagebox.askyesno(
+                        "연결 또는 검색 한도 확인",
+                        "Google 계정이나 검색 한도에 관한 대기 상태입니다. 문제가 해결됐는지 확인한 뒤, 저장된 예산 안에서만 이어갑니다. 계속할까요?",
+                        parent=self):
+                    return
+                try: research_scheduler.resume(schedule["id"],profile["id"],
+                    external_recovery_confirmed=confirm_external)
                 except (ValueError,research_scheduler.UnresolvedSearchCall): return
             self._autopilot_start((settings,autopilot_session_id,schedule["id"]))
             return
@@ -2871,12 +2925,19 @@ class Studio(tk.Tk):
         def worker():
             try:
                 token=oauth.get_access_token(profile_id) if not key else None
-                def collect(term,market,limit):
-                    return lookup_videos(key,term,market,limit=min(50,limit),access_token=token)
+                quota_base={"profile_id":profile_id,"path":store.db_path(),
+                    "project_identity":quota_project_identity(key,
+                        (oauth.quota_project_identity(profile_id) or "oauth-project:unknown") if not key else "")}
+                def collect(term,market,limit,page_token=None,order="relevance",quota_context=None):
+                    context={**quota_base,**(quota_context or {})}
+                    return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
+                                         page_token=page_token,order=order,quota_context=context)
                 if plan.get("target_mode") == "fit_target":
-                    def collect_page(term,market,limit,page_token=None):
+                    def collect_page(term,market,limit,page_token=None,quota_context=None,order="relevance"):
+                        context={**quota_base,**(quota_context or {})}
                         return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
-                                             page_token=page_token,return_page=True)
+                                             page_token=page_token,return_page=True,order=order,
+                                             quota_context=context)
                     run=ai_research.run_auto_recommendations(profile_id,collect_page,target=plan["target_candidates"],
                         max_search_calls=plan["max_search_calls"],provider=provider,cancel_event=self.ai_cancel_event,
                         session_id=plan.get("session_id"),pause_event=self.ai_pause_event,

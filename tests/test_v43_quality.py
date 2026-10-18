@@ -76,15 +76,13 @@ class APIResilienceTests(unittest.TestCase):
         response.__exit__ = lambda *args: None
         return response
 
-    def test_network_error_is_retried_then_recovers(self):
-        success = unittest.mock.MagicMock()
-        success.__enter__.return_value = io.BytesIO(b'{"items": []}')
-        success.__exit__.return_value = None
-        with patch.object(youtube_api, "urlopen", side_effect=[URLError("offline"), success]) as request:
-            with patch.object(youtube_api.time, "sleep"):
-                result = youtube_api._get("search", "key", retries=2, retry_delay=0, part="snippet")
-        self.assertEqual({"items": []}, result)
-        self.assertEqual(2, request.call_count)
+    def test_uncertain_network_error_is_not_retried(self):
+        with patch.object(youtube_api, "urlopen", side_effect=URLError("offline")) as request:
+            with self.assertRaises(youtube_api.APIError) as caught:
+                youtube_api._get("search", "key", retries=2, retry_delay=0, part="snippet")
+        self.assertEqual("connection_failed", caught.exception.code)
+        self.assertTrue(caught.exception.request_uncertain)
+        self.assertEqual(1, request.call_count)
 
     def test_quota_error_is_not_retried(self):
         body = io.BytesIO(json.dumps({
