@@ -1,5 +1,14 @@
 # ZISU Integrated Project Status
 
+### Latest batch — V4.6.0 packaged offline soak mode (2026-10-19)
+
+- Added `--qa-offline-soak --data-dir <new-qa-root/data> --report-dir <new-qa-root/reports> --duration-hours 6` for frozen Windows EXEs. Ordinary GUI startup remains on its previous branch. `--qa-short --short-duration-seconds 30..90` is a separate CI-only accelerated-clock regression and cannot satisfy the wall-clock criterion.
+- The QA runner initializes a new isolated SQLite DB, creates two synthetic channel profiles (one with a custom genre), creates a real six-hour schedule through `research_scheduler`, and calls the production `run_autopilot_block`/`AutopilotController` with a fixed offline collector. It exercises research/rest transitions, bounded search reservations, pause/resume, checkpointing and interrupted-session recovery. Network socket/DNS/HTTP entry points are blocked and counted. No OAuth/DPAPI lookup or browser profile is used.
+- Periodic report data includes UTC and monotonic timing, actual/virtual duration clearly separated, CPU/RSS/available memory/threads/handles, QA-owned process count, schedule phase, calls remaining, checkpoint state and DB/error counts. JSON/CSV/JSONL writes are atomic; a short run is named `SHORT_QA_PASS`, and a full run can be `PASS` only after at least 21,600 seconds of active schedule time plus schedule completion and DB/config/isolation checks.
+- New tests: **8/8 PASS**. Full suite: **288 run, 287 PASS / 1 opt-in actual-browser SKIP / 0 FAIL**. Offline acceptance: **29/29 PASS**. `GUI_SMOKE_PASS`, compileall, workflow YAML parsing, PowerShell parser, and `git diff --check` PASS.
+- Local packaged EXE could not be rebuilt because this environment lacks PyInstaller (`No module named PyInstaller`). Accordingly, actual onefile/onedir QA-short execution is **PENDING**; Windows CI now builds and runs each packaged EXE for a 30-second short-mode proof before artifact upload. Existing package SHA is from old source and must not be used for active soak. No six-hour run has started.
+- Progress estimates (not test results): overall ZISU **86.18%**, V4.5.9/release **90.83%**, V4.6.0 **79.20%** under the existing weighted denominator; new `V46-QA-SOAK-01` **60% estimated**, tracked at weight 0 until a backlog rebaseline. Actual six-hour EXE run remains pending artifact generation/download. No Push or install; PR #4 remains Draft, `main` and PR #2 untouched, V4.5.9 install and user data/credentials untouched.
+
 ### Latest state — V4.6.0 integrated offline implementation batch (2026-10-18)
 
 - The formerly Deferred V46-GENRE-FLEX-01 is implemented offline in this branch. It adds 11 genre presets and profile-local custom genres, independent core/related/subgenre and mood/era/audience/content-language/search-language facets, and connects these settings to profile UI, query planning, metadata rules, AI context/cache, candidate diversity, schedule snapshots and dashboard labels.

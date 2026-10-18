@@ -43,7 +43,7 @@ jobs:
         run: |
           pyi-archive_viewer -l -r dist\onefile\ZisuResearchStudio.exe | Out-File -Encoding utf8 onefile_archive_listing.txt
           pyi-archive_viewer -l -r dist\onedir\ZisuResearchStudio\ZisuResearchStudio.exe | Out-File -Encoding utf8 onedir_archive_listing.txt
-          foreach ($module in @('google_auth_oauthlib', 'google.oauth2.credentials', 'requests')) {
+          foreach ($module in @('google_auth_oauthlib', 'google.oauth2.credentials', 'requests', 'mcrs.offline_soak')) {
             if (-not (Select-String -LiteralPath onefile_archive_listing.txt -Pattern $module -Quiet)) {
               throw "Required module missing from onefile comparison: $module"
             }
@@ -122,6 +122,39 @@ jobs:
           $dirBytes = ($dirFiles | Measure-Object Length -Sum).Sum
           $zipBytes = (Get-Item dist/release/ZISU-SIGNAL-LAB-V4.6.0-Windows.zip).Length
           Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY "## EXE startup comparison`n`n- Onefile GUI ready average/min/max: $([math]::Round($oneTime.Average)) / $([math]::Round($oneTime.Minimum)) / $([math]::Round($oneTime.Maximum)) ms; EXE: $($oneExe.Length) bytes`n- Onedir GUI ready average/min/max: $([math]::Round($dirTime.Average)) / $([math]::Round($dirTime.Minimum)) / $([math]::Round($dirTime.Maximum)) ms; EXE+runtime: $dirBytes bytes; release ZIP: $zipBytes bytes`n- Measurements: 3 fresh-path and 3 warm-process launches per layout (plus one warm-up); OS: $($onedir.fresh_path_launches[0].os.product_name), build $($onedir.fresh_path_launches[0].os.os_build). OS file cache was not flushed.`n"
+      - name: Run packaged onefile and onedir offline scheduler QA (30 seconds each)
+        shell: pwsh
+        run: |
+          function Invoke-OfflineQaShort($name, $exe) {
+            $runRoot = Join-Path $env:RUNNER_TEMP ("zisu-qa-short-{0}-{1}" -f $name, [guid]::NewGuid().ToString('N'))
+            $data = Join-Path $runRoot 'data'
+            $reports = Join-Path $runRoot 'reports'
+            $arguments = @('--qa-offline-soak', '--qa-short', '--short-duration-seconds', '30', '--duration-hours', '6',
+              '--data-dir', ('"{0}"' -f $data), '--report-dir', ('"{0}"' -f $reports))
+            $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru -Wait -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) { throw "$name packaged offline QA exited with $($process.ExitCode). Report: $reports" }
+            $reportPath = Join-Path $reports 'offline-soak-report.json'
+            if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { throw "$name QA report is missing: $reportPath" }
+            $report = Get-Content -LiteralPath $reportPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($report.result -ne 'SHORT_QA_PASS' -or $report.mode -ne 'accelerated_virtual_6h' -or
+                -not $report.frozen_executable -or -not $report.pass_criteria.same_exe_process_active_scheduler -or
+                $report.pass_criteria.six_hour_wall_clock -or $report.external_network_attempts -ne 0 -or
+                $report.database_integrity -ne 'ok' -or -not $report.checkpoint_verified -or
+                -not $report.genre_configuration_preserved -or -not $report.profile_isolation_verified -or
+                -not $report.mock_search_only_in_research -or $report.mock_search_calls -lt 1 -or
+                -not $report.pass_criteria.no_missing_sample_intervals -or $report.sample_count -ne 73 -or
+                $report.database_errors -ne 0 -or $report.exception_count -ne 0 -or
+                $report.final_schedule_state -ne 'completed' -or -not $report.quota_not_exceeded -or
+                $report.phase_transition_observations.research -lt 1 -or
+                $report.phase_transition_observations.break -lt 1 -or
+                $report.actual_monotonic_elapsed_seconds -lt 30) {
+              throw "$name packaged offline QA evidence did not satisfy its short-mode contract: $reportPath"
+            }
+            Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY ("- {0} packaged QA: {1}, actual seconds {2}, virtual schedule seconds {3}, mock searches {4}`n" -f
+              $name, $report.result, $report.actual_monotonic_elapsed_seconds, $report.virtual_schedule_elapsed_seconds, $report.mock_search_calls)
+          }
+          Invoke-OfflineQaShort 'onefile' (Resolve-Path 'dist/onefile/ZisuResearchStudio.exe').Path
+          Invoke-OfflineQaShort 'onedir' (Resolve-Path (Join-Path $target 'ZisuResearchStudio.exe')).Path
       - name: Upload isolated EXE startup failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
@@ -151,4 +184,7 @@ jobs:
             WindowsSandbox_검증하기.cmd
             dist/startup-comparison.json
             dist/v46-offline-acceptance.json
+            ${{ runner.temp }}/zisu-qa-short-*/reports/offline-soak-report.json
+            ${{ runner.temp }}/zisu-qa-short-*/reports/metrics.csv
+            ${{ runner.temp }}/zisu-qa-short-*/reports/events.jsonl
           if-no-files-found: error
