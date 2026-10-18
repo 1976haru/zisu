@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from mcrs.resource_guard import ResourceGuard, ResourceLimits, ResourceSnapshot
 from mcrs import research_browser
+from mcrs.browser_verifier import browser_processes
 from tests.support import WorkspaceTemp
 
 
@@ -130,6 +131,66 @@ class ResearchBrowserTests(unittest.TestCase):
             self.assertEqual(4242, metrics.root_pid)
             self.assertTrue(profile.exists())
 
+    def test_last_window_closed_by_user_x_can_reopen_same_owned_profile(self):
+        app_root = self.root / "x-close-reopen"
+        app_root.mkdir()
+        executable = Path(app_root / "mock-chrome.exe")
+        manager = research_browser.ResearchBrowserManager(app_data_root=app_root,
+            executable=str(executable), resource_sampler=lambda: ResourceSnapshot(1, 2, 8 * 1024**3, 20, 1),
+            startup_stability_seconds=0)
+        process_state = {"alive": True, "windows": 1, "launches": 0}
+        created = 123457
+        def process_identity(pid):
+            return (created, str(executable), 32 * 1024**2) if int(pid) == 4242 and process_state["alive"] else None
+        def launch(*args, **kwargs):
+            process_state["launches"] += 1
+            process_state["windows"] = 1  # initial launch or Chromium single-instance handoff
+            return FakeProcess(*args, **kwargs)
+        with patch.object(Path, "is_file", return_value=True), \
+             patch.object(manager, "launcher", side_effect=launch) as launcher, \
+             patch.object(research_browser, "_process_identity", side_effect=process_identity), \
+             patch.object(research_browser, "_process_tree", side_effect=lambda pid: {4242} if process_state["alive"] else set()), \
+             patch.object(research_browser, "_window_count", side_effect=lambda _owned: process_state["windows"]), \
+             patch.object(research_browser, "_close_owned_windows"):
+            first = manager.open_selected("https://www.youtube.com/watch?v=abcdefghijk", user_approved=True)
+            profile = manager.session.profile_dir
+            process_state["windows"] = 0  # native WM_CLOSE / browser X, root stays alive
+            reopened = manager.open_selected("https://www.youtube.com/watch?v=lmnopqrstuv", user_approved=True)
+            self.assertEqual(first.root_pid, reopened.root_pid)
+            self.assertEqual(1, reopened.window_count)
+            self.assertEqual(profile, manager.session.profile_dir)
+            self.assertEqual(2, launcher.call_count)  # one owned tree; second launch only forwards to it
+
+    def test_saved_session_manifest_is_reconnected_before_open_after_app_restart(self):
+        root = self.root / "manifest-reopen"
+        root.mkdir()
+        executable = root / "chrome.exe"
+        first_manager = research_browser.ResearchBrowserManager(app_data_root=root, executable=str(executable),
+            resource_sampler=lambda: ResourceSnapshot(1, 2, 8 * 1024**3, 20, 1), startup_stability_seconds=0)
+        process_state = {"alive": True, "windows": 1, "launches": 0}
+        created = 123458
+        def process_identity(pid):
+            return (created, str(executable), 24 * 1024**2) if int(pid) == 4242 and process_state["alive"] else None
+        def launch(*args, **kwargs):
+            process_state["launches"] += 1
+            process_state["windows"] = 1
+            return FakeProcess(*args, **kwargs)
+        with patch.object(Path, "is_file", return_value=True), \
+             patch.object(first_manager, "launcher", side_effect=launch), \
+             patch.object(research_browser, "_process_identity", side_effect=process_identity), \
+             patch.object(research_browser, "_process_tree", side_effect=lambda pid: {4242} if process_state["alive"] else set()), \
+             patch.object(research_browser, "_window_count", side_effect=lambda _owned: process_state["windows"]):
+            first_manager.open_selected("https://www.youtube.com/watch?v=abcdefghijk", user_approved=True)
+            process_state["windows"] = 0
+            restarted_manager = research_browser.ResearchBrowserManager(app_data_root=root, executable=str(executable),
+                resource_sampler=lambda: ResourceSnapshot(1, 2, 8 * 1024**3, 20, 1), startup_stability_seconds=0)
+            self.assertTrue(restarted_manager.recovery_available)
+            with patch.object(restarted_manager, "launcher", side_effect=launch):
+                reopened = restarted_manager.open_selected("https://www.youtube.com/watch?v=lmnopqrstuv", user_approved=True)
+            self.assertEqual(4242, reopened.root_pid)
+            self.assertEqual(1, reopened.window_count)
+            self.assertEqual(2, process_state["launches"])
+
 
 class ResearchBrowserIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("ZISU_RUN_BROWSER_INTEGRATION") == "1",
@@ -141,6 +202,9 @@ class ResearchBrowserIntegrationTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             requested_paths=[]
             def do_GET(self):
+                if not self.path.startswith(("/first", "/second", "/reopen")):
+                    self.send_error(404)
+                    return
                 self.requested_paths.append(self.path)
                 body = b"<html><head><title>ZISU local browser test</title></head><body>offline</body></html>"
                 self.send_response(200); self.send_header("Content-Length", str(len(body)))
@@ -171,11 +235,40 @@ class ResearchBrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(1, again.window_count)
             self.assertIn("/first",Handler.requested_paths)
             self.assertIn("/second",Handler.requested_paths)
-            closed = manager.close_owned()
-            self.assertTrue(closed.closed)
-            self.assertEqual((), closed.residual_process_ids)
-            self.assertGreater(closed.rss_before_bytes, 0)
-            self.assertEqual(0, closed.rss_after_bytes)
+            baseline_browsers = browser_processes()
+            # Exercise five full reopen cycles, including native WM_CLOSE (the
+            # same message path as clicking X) and the ZISU close button.
+            for cycle in range(1, 6):
+                if cycle % 2:
+                    owned = dict(manager.session.owned_processes)
+                    research_browser._close_owned_windows(owned)
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        current = manager.metrics()
+                        if current.window_count == 0 or not manager._session_alive(manager.session):
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(0, manager.metrics().window_count,
+                        f"cycle {cycle}: the dedicated window did not close through WM_CLOSE")
+                else:
+                    close_result = manager.close_owned(grace_seconds=8)
+                    self.assertTrue(close_result.closed, f"cycle {cycle} close left owned processes: {close_result.residual_process_ids}")
+                    self.assertEqual((), close_result.residual_process_ids)
+                    self.assertEqual(0, close_result.rss_after_bytes)
+                opened = manager.open_selected(base + f"/reopen-{cycle}", user_approved=True)
+                self.assertEqual(1, opened.window_count)
+                deadline = time.monotonic() + 5
+                expected = f"/reopen-{cycle}"
+                while expected not in Handler.requested_paths and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertIn(expected, Handler.requested_paths)
+                self.assertTrue(baseline_browsers.issubset(browser_processes()))
+            close_result = manager.close_owned(grace_seconds=8)
+            self.assertTrue(close_result.closed)
+            self.assertEqual((), close_result.residual_process_ids)
+            self.assertGreater(close_result.rss_before_bytes, 0)
+            self.assertEqual(0, close_result.rss_after_bytes)
+            self.assertTrue(baseline_browsers.issubset(browser_processes()))
             self.assertTrue(manager.profile_root.exists())
         finally:
             manager.close_owned(grace_seconds=1)

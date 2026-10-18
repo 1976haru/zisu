@@ -159,31 +159,27 @@ class ResearchBrowserManager:
             raise BrowserError("연구용 인터넷 창을 열려면 사용자가 먼저 승인해야 합니다.")
         safe_url = validate_research_url(url, allow_local_test=self.allow_local_test)
         with self._lock:
+            # A previous application run can leave a manifest behind. Reattach only
+            # when the exact recorded PID, creation time and image still match.
+            # A stale PID record is cleared by recover_owned_session without ever
+            # touching a process that no longer proves ownership.
+            if self.session is None and self._recovery_record:
+                try:
+                    self.recover_owned_session()
+                except BrowserError:
+                    if self._recovery_record is not None:
+                        raise
             if self.session and self._session_alive(self.session):
                 self._refresh_owned_processes(self.session)
                 before = self.metrics()
-                if before.window_count != 1:
-                    raise BrowserOwnershipUncertain("전용 창을 정확히 하나로 확인하지 못해 다른 창을 열지 않았습니다.")
-                helper = self.launcher([self.session.executable,
-                    f"--user-data-dir={self.session.profile_dir}", "--no-first-run",
-                    "--no-default-browser-check", "--disable-sync",
-                    *( ["--no-proxy-server"] if _is_local_test_url(safe_url) else [] ), safe_url],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
-                helper_identity = _process_identity(helper.pid)
-                if helper_identity:
-                    self.session.owned_processes.setdefault(helper.pid, helper_identity[:2])
-                try:
-                    helper.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    helper_identity = _process_identity(helper.pid)
-                    if helper_identity:
-                        self.session.owned_processes.setdefault(helper.pid, helper_identity[:2])
-                self._refresh_owned_processes(self.session)
-                after = self.metrics()
-                if before.root_pid != after.root_pid or before.window_count != after.window_count or after.window_count != 1:
-                    raise BrowserOwnershipUncertain("기존 창을 재사용했는지 확인하지 못해 추가 탐색을 멈췄습니다.")
-                return after
+                if before.window_count > 1:
+                    raise BrowserOwnershipUncertain("전용 창이 여러 개 감지되어 중복 실행을 막았습니다. 전용 창을 하나만 남긴 뒤 다시 시도하세요.")
+                # Chromium may keep its isolated root alive after the user closes
+                # the last window with X. In that case the normal single-instance
+                # handoff opens a fresh window in the same owned profile. It is
+                # distinct from opening a second browser tree and remains scoped
+                # to the PID+creation-time+image recorded by this session.
+                return self._open_in_owned_session(safe_url, before)
             if self.session:
                 previous = self.close_owned(grace_seconds=1)
                 if not previous.closed:
@@ -253,6 +249,45 @@ class ResearchBrowserManager:
             except Exception:
                 self.close_owned(grace_seconds=2)
                 raise
+
+    def _open_in_owned_session(self, safe_url: str, before: BrowserMetrics) -> BrowserMetrics:
+        session = self.session
+        if session is None:
+            raise BrowserOwnershipUncertain("전용 브라우저 세션이 더 이상 연결되어 있지 않습니다.")
+        args = [session.executable, f"--user-data-dir={session.profile_dir}",
+                "--no-first-run", "--no-default-browser-check", "--disable-sync"]
+        if _is_local_test_url(safe_url):
+            args.append("--no-proxy-server")
+        args.append(safe_url)
+        try:
+            helper = self.launcher(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, close_fds=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
+        except (OSError, ValueError):
+            raise BrowserError("전용 브라우저를 다시 연결하지 못했습니다. 창을 닫은 뒤 다시 열거나 수동 브라우저를 사용하세요.") from None
+        helper_identity = _process_identity(helper.pid)
+        if helper_identity and _same_executable(helper_identity[1], session.executable):
+            session.owned_processes.setdefault(helper.pid, helper_identity[:2])
+        try:
+            helper.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            helper_identity = _process_identity(helper.pid)
+            if helper_identity and _same_executable(helper_identity[1], session.executable):
+                session.owned_processes.setdefault(helper.pid, helper_identity[:2])
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            self._refresh_owned_processes(session)
+            after = self.metrics()
+            if (after.root_pid == before.root_pid and after.window_count == 1
+                    and self._session_alive(session)):
+                self._write_manifest(session)
+                return after
+            if not self._alive_owned(session):
+                break
+            time.sleep(0.1)
+        raise BrowserOwnershipUncertain(
+            "기존 전용 창을 다시 연결하지 못했습니다. 브라우저 상태를 확인한 뒤 새로 열어 주세요.")
 
     def metrics(self) -> BrowserMetrics:
         with self._lock:

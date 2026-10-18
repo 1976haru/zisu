@@ -36,6 +36,26 @@ class BrowserVerifierTests(unittest.TestCase):
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
 
+    def test_verifier_replaces_stopped_local_server_before_next_open(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._server, app._server_thread = create_local_server()
+        old_server = app._server
+        old_thread = app._server_thread
+        old_server.shutdown()
+        old_server.server_close()
+        old_thread.join(timeout=2)
+        url = app._ensure_server()
+        self.assertIsNot(old_server, app._server)
+        self.assertTrue(app._server_thread.is_alive())
+        try:
+            with urlopen(url + "/open", timeout=2) as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn("ZISU SIGNAL LAB", response.read().decode("utf-8"))
+        finally:
+            app._stop_server()
+        self.assertFalse(app._server_thread)
+
     def test_report_never_claims_live_network_or_user_data_access(self):
         payload = build_report([{"step": "local", "state": "PASS"}], "Microsoft Edge")
         encoded = json.dumps(payload, ensure_ascii=False)

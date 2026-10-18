@@ -213,18 +213,37 @@ class BrowserVerifierApp:
                   wraplength=670, foreground="#555555").pack(anchor="w", pady=(8, 0))
 
     def _ensure_server(self):
-        if self._server is None:
+        server_usable = bool(self._server and self._server_thread and self._server_thread.is_alive()
+                             and self._server.fileno() >= 0)
+        if not server_usable:
+            self._stop_server()
             self._server, self._server_thread = create_local_server()
         return f"http://127.0.0.1:{self._server.server_port}"
 
-    def _run_async(self, label, function):
+    def _stop_server(self):
+        server, thread = self._server, self._server_thread
+        self._server = None
+        self._server_thread = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except (OSError, RuntimeError):
+                pass
+            try:
+                server.server_close()
+            except OSError:
+                pass
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+    def _run_async(self, label, function, running_message=None):
         if self._busy:
             return
         self._selected_browser = self.browser_var.get()
         self._busy = True
         for button in self._buttons:
             button.configure(state="disabled")
-        self.status_var.set(f"{label} 중입니다. 잠시만 기다려 주세요.")
+        self.status_var.set(running_message or f"{label} 중입니다. 잠시만 기다려 주세요.")
 
         def worker():
             try:
@@ -244,7 +263,12 @@ class BrowserVerifierApp:
                 event = {"step": label, "state": "PASS" if ok else "FAIL",
                          "timestamp_utc": datetime.now(timezone.utc).isoformat(), **result}
                 self.events.append(event)
-                self.status_var.set(("확인 완료: " if ok else "확인 실패: ") + label)
+                fallback_status = (("확인 완료: " if ok else "확인 실패: ") + label)
+                if not ok and "브라우저 열기" in label:
+                    fallback_status = "브라우저를 다시 열지 못했습니다. 아래 안내를 확인해 주세요."
+                elif not ok and "브라우저 재사용" in label:
+                    fallback_status = "열려 있는 전용 창을 확인하지 못했습니다. 안내에 따라 다시 시도해 주세요."
+                self.status_var.set(result.get("status_message") or fallback_status)
                 if "message" in result:
                     self.detail_var.set(result["message"])
                 elif "detail" in result:
@@ -272,7 +296,8 @@ class BrowserVerifierApp:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                if self._server.requested_paths.get(timeout=0.15) == path:
+                requested = self._server.requested_paths.get(timeout=0.15)
+                if requested == path:
                     return True
             except queue.Empty:
                 continue
@@ -281,11 +306,28 @@ class BrowserVerifierApp:
     def _open_test(self):
         def work():
             manager = self._manager_for_selected()
+            was_open = False
+            reopened_after_x = False
             if manager.session:
+                current = manager.metrics()
+                was_open = current.window_count == 1
+                reopened_after_x = current.window_count == 0 and current.running
+            elif manager.recovery_available:
+                try:
+                    recovered = manager.recover_owned_session()
+                    was_open = recovered.window_count == 1
+                    reopened_after_x = recovered.window_count == 0 and recovered.running
+                except BrowserError:
+                    # A stale, non-matching PID record is cleared by the manager;
+                    # malformed/uncertain ownership remains blocked there.
+                    if manager.recovery_available:
+                        raise
+            if was_open:
                 raise BrowserError("이미 전용 테스트 창이 있습니다. 같은 창 재사용 테스트를 선택해 주세요.")
             self._baseline_processes = browser_processes()
             before = _snapshot_pair()
-            first = manager.open_selected(self._ensure_server() + "/open", user_approved=True)
+            server_url = self._ensure_server()
+            first = manager.open_selected(server_url + "/open", user_approved=True)
             page_loaded = self._await_page("/open")
             after = sample_resources()
             self._first_pid = first.root_pid
@@ -298,9 +340,12 @@ class BrowserVerifierApp:
                 "browser": self._selected_browser}
             if not page_loaded or first.window_count != 1:
                 raise BrowserError("브라우저 창은 열렸지만 로컬 페이지 로드 또는 창 1개를 확인하지 못했습니다.")
-            return {"detail": "로컬 페이지 로드 PASS · 전용 창 1개 확인 · 사용자 브라우저 프로필과 분리됨",
+            return {"status_message": "브라우저 연결 성공",
+                    "detail": ("창 닫기 후 다시 열기 PASS · " if reopened_after_x else "")
+                    + "로컬 페이지 로드 PASS · 전용 창 1개 확인 · 사용자 브라우저 프로필과 분리됨",
+                    "reopened_after_user_close": reopened_after_x,
                     **detail}
-        self._run_async("브라우저 열기 테스트", work)
+        self._run_async("브라우저 열기 테스트", work, running_message="브라우저 실행 중...")
 
     def _reuse_test(self):
         def work():
@@ -342,13 +387,17 @@ class BrowserVerifierApp:
                 raise BrowserError("전용 창 또는 자식 프로세스가 남아 있습니다. 이 창을 닫지 말고 결과를 저장해 주세요.")
             if not preserved:
                 raise BrowserError("테스트 시작 때 있던 일반 브라우저 일부를 확인할 수 없습니다. 테스트 중 사용자가 닫았는지 확인해 주세요.")
-            return {"detail": "전용 창 정상 종료 PASS · 잔류 프로세스 0 · 시작 전 일반 브라우저 PID 보존",
+            self._first_page_loaded = False
+            self._first_pid = None
+            self._first_window_count = 0
+            return {"status_message": "브라우저를 안전하게 종료했습니다. 다시 실행할 준비가 완료됐습니다.",
+                "detail": "전용 창 정상 종료 PASS · 잔류 프로세스 0 · 시작 전 일반 브라우저 PID 보존",
                 "normal_close": not result.forced_process_ids, "residual_process_ids": list(result.residual_process_ids),
                 "owned_process_ids": sorted(owned_pids), "user_browsers_preserved": preserved,
                 "baseline_browser_count": len(self._baseline_processes), "browser_count_after": len(current_processes),
                 "browser_rss_before_bytes": result.rss_before_bytes, "browser_rss_after_bytes": result.rss_after_bytes,
                 "system_resource_before": _snapshot_json(before), "system_resource_after": _snapshot_json(after)}
-        self._run_async("전용 브라우저 닫기", work)
+        self._run_async("전용 브라우저 닫기", work, running_message="브라우저를 안전하게 종료하는 중...")
 
     def _save_report(self):
         try:
@@ -388,10 +437,7 @@ class BrowserVerifierApp:
         self._destroy()
 
     def _destroy(self):
-        if self._server:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
+        self._stop_server()
         self.root.destroy()
 
 
