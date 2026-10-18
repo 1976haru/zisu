@@ -1171,7 +1171,9 @@ class BrowserVerifierApp:
         summary_failure_reason = fatal_reason or next((item.get("failure_reason") for item in events
             if item.get("state") == "FAIL" and item.get("failure_reason")), None)
         final_verdict = ("CANCELLED" if cancelled else
-                         "PASS" if completed == cycles and successful == cycles and failure_count == 0 else "INCOMPLETE_OR_FAIL")
+                         "PASS" if completed == cycles and successful == cycles and failure_count == 0
+                         and stage_failure_count == 0 and not fatal_reason and residual_count == 0
+                         else "INCOMPLETE_OR_FAIL")
         summary = {"requested_cycles": cycles, "completed_cycles": completed,
                    "run_id": run_id,
                    "success_count": successful, "failure_count": failure_count,

@@ -215,6 +215,39 @@ class BrowserVerifierTests(unittest.TestCase):
             app._auto_summary = None
             app._save_report()
             self.assertEqual(json.loads(report_path.read_text(encoding="utf-8")), payload)
+            # Run the full lifecycle a second time at the UI's larger preset.
+            # This exercises the same owned-profile checks and atomic report
+            # path over 20 cycles without launching a real browser.
+            with patch("mcrs.browser_verifier.browser_processes", return_value={("chrome.exe", 999)}), \
+                    patch("mcrs.browser_verifier._process_handle_count", return_value=4):
+                result_20 = app._run_full_auto_test(20)
+            self.assertEqual("PASS", result_20["final_verdict"])
+            self.assertEqual((20, 20, 20, 0), (
+                result_20["auto_summary"]["requested_cycles"],
+                result_20["auto_summary"]["completed_cycles"],
+                result_20["auto_summary"]["success_count"],
+                result_20["auto_summary"]["failure_count"],
+            ))
+            report_20 = json.loads(Path(result_20["auto_summary"]["report_path"]).read_text(encoding="utf-8"))
+            cycle_summaries_20 = [event for event in report_20["events"]
+                                  if event.get("event_stage") == "CYCLE_SUMMARY"]
+            self.assertEqual(20, len(cycle_summaries_20))
+            self.assertTrue(all(event["same_isolated_profile"] and event["profile_ownership_verified"]
+                                and event["same_window_reuse"] and event["reopened_after_close"]
+                                and event["dedicated_browser_closed"] and event["residual_process_count"] > 0
+                                for event in cycle_summaries_20))
+            self.assertEqual(0, result_20["auto_summary"]["residual_process_count"])
+            self.assertEqual(report_20, json.loads(Path(result_20["auto_summary"]["report_path"]).read_text(encoding="utf-8")))
+            # If the process inventory is unavailable at final cleanup, the
+            # report must fail closed instead of passing the completed cycles.
+            with patch("mcrs.browser_verifier.browser_processes", return_value=None), \
+                    patch("mcrs.browser_verifier._process_handle_count", return_value=4):
+                cleanup_unknown = app._run_full_auto_test(1)
+            self.assertEqual("INCOMPLETE_OR_FAIL", cleanup_unknown["final_verdict"])
+            cleanup_report = json.loads(Path(cleanup_unknown["auto_summary"]["report_path"]).read_text(encoding="utf-8"))
+            self.assertEqual("FAIL", next(event["state"] for event in cleanup_report["events"]
+                                            if event.get("event_stage") == "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK"))
+            self.assertTrue(cleanup_report["automatic_test"]["failure_reason"])
             class Root:
                 destroyed = False
                 def destroy(self): self.destroyed = True
