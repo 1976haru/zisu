@@ -54,6 +54,15 @@ class BrowserVerifierTests(unittest.TestCase):
         self.assertEqual(result["browser_exit_code"], 4294930433)
         self.assertNotIn("token", json.dumps(result).casefold())
 
+    def test_build_script_declares_project_path_and_bundled_modules(self):
+        script = Path(__file__).resolve().parents[1] / "scripts" / "build_v46_03_browser_verifier.ps1"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("'--paths', $repoRoot", text)
+        for module in ("mcrs.browser_verifier", "mcrs.branding", "mcrs.research_browser", "mcrs.resource_guard"):
+            self.assertIn(module, text)
+        self.assertIn("'--onedir'", text)
+        self.assertNotIn("'--onefile'", text)
+
 
 if __name__ == "__main__":
     unittest.main()
