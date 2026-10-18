@@ -23,9 +23,9 @@ jobs:
       - name: Install packager
         run: python -m pip install -r requirements-oauth.txt pyinstaller
       - name: Build onefile comparison executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --name ZisuResearchStudio --distpath dist/onefile --workpath build/onefile --specpath build/onefile main.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --collect-all tzdata --name ZisuResearchStudio --distpath dist/onefile --workpath build/onefile --specpath build/onefile main.py
       - name: Build onedir release executable
-        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --name ZisuResearchStudio --distpath dist/onedir --workpath build/onedir --specpath build/onedir main.py
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --collect-all tzdata --name ZisuResearchStudio --distpath dist/onedir --workpath build/onedir --specpath build/onedir main.py
       - name: Verify packaged OAuth modules
         shell: pwsh
         run: |
@@ -37,6 +37,11 @@ jobs:
             }
             if (-not (Select-String -LiteralPath onedir_archive_listing.txt -Pattern $module -Quiet)) {
               throw "Required module missing from onedir release: $module"
+            }
+          }
+          foreach ($listing in @('onefile_archive_listing.txt', 'onedir_archive_listing.txt')) {
+            if (-not (Select-String -LiteralPath $listing -Pattern 'tzdata[\\/]zoneinfo[\\/]America[\\/]Los_Angeles' -Quiet)) {
+              throw "Pacific timezone data missing from package archive: $listing"
             }
           }
       - name: Write SHA-256 manifest
