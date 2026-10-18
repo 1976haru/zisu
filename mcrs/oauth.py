@@ -17,7 +17,7 @@ SCOPES = [READONLY_SCOPE, "openid", EMAIL_SCOPE]
 
 _EMAIL_SCOPE_ALIASES = {"email", EMAIL_SCOPE}
 _SAFE_FAILURES = {
-    "access_denied": "Google 로그인이 취소되었거나 권한 승인이 거부되었습니다. 다시 연결하려면 실제 연결할 계정으로 승인하세요.",
+    "access_denied": "Google 연결이 취소되었거나 만료되었습니다. 다시 연결하려면 실제 연결할 계정으로 승인하세요.",
     "test_user_required": "테스트 모드에서는 Google Auth Platform > Audience > Test users에 연결할 계정을 추가해야 할 수 있습니다.",
     "scope_mismatch": "요청한 권한과 발급된 권한이 다릅니다. YouTube 읽기 권한이 포함되는지 확인하고 다시 연결하세요.",
     "redirect_uri_mismatch": "로컬 127.0.0.1 콜백이 승인되지 않았습니다. Desktop 앱 OAuth JSON을 다시 확인하세요.",

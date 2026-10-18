@@ -16,7 +16,7 @@ from .work_slots import SEARCH_SLOT, WorkSlotBusy, occupy
 
 class APIError(Exception):
     SAFE_MESSAGES = {
-        "auth_required": "Google 계정 연결이 필요합니다. 이 프로필의 읽기 전용 연결을 확인하세요.",
+        "auth_required": "Google 계정 연결이 필요하거나 만료되었습니다. 이 프로필의 읽기 전용 연결을 다시 연결하세요.",
         "permission_denied": "YouTube API 권한 또는 사용 설정을 확인하세요.",
         "quota_exhausted": "Google Cloud의 YouTube 검색 할당량이 소진되었습니다.",
         "quota_local_limit": "설정한 예상 할당량 한도에 도달했습니다. Google Cloud 사용량을 확인하세요.",
