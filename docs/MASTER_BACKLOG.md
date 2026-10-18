@@ -1,5 +1,10 @@
 # ZISU Master Backlog
 
+### Windows CI onedir startup failure diagnosis (2026-10-18)
+
+- Runs `39117703604` and `39117699436` both passed unit/stress/GUI/acceptance/compile, onefile and onedir builds, archive validation, and release ZIP creation, then failed during startup measurement. The available failure artifact for `39117703604` shows onefile fresh runs 1–3 completed `offline_smoke_complete`; onedir fresh run 1 reached `database_initialized`, then recorded `startup_failed` with `PermissionError` and left a native `Unhandled exception in script` dialog, which caused the smoke harness timeout. This is an application-constructor permission failure, not a startup-speed threshold or GUI-close timing failure. Two other fresh onedir runs completed; the warm series did not start after the failure.
+- Existing smoke diagnostics deliberately omitted exception message/traceback. Add a safe source location (module basename, function and line only) to the startup report so the next failure pinpoints the throwing operation without exposing exception text, tokens, paths, or request data. Expand the failure artifact glob to include fresh, warm and warmup reports. The underlying PermissionError remains unresolved pending its safe source location from a rerun; do not mark startup gate complete.
+
 ### V4.6.0 offline acceptance automation (2026-10-18)
 
 - Added `scripts/v46_offline_acceptance.py`: 8 scoped Mock/fake-clock areas, 23 representative acceptance cases, local `tests` namespace binding, JSON evidence with explicit failure/skipped test names, and no direct live API/account/browser calls. The script writes `dist/v46-offline-acceptance.json` and fails closed if a required test fails or skips.

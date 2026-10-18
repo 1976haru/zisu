@@ -1,11 +1,19 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V4.6.0 23-case offline acceptance PASS in Windows GitHub CI; V46-03 real Chrome gate unchanged)
+Last checked: 2026-10-18 (latest Windows CI runs 39117703604 and 39117699436 failed in onedir startup measurement; local diagnosis and safer diagnostics are in progress)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
-Working source on user's Windows: `D:\03 zisu\.test_tmp\history_audit` (not accessed in this GitHub-only task; its last local HEAD predates the new remote CI commits and must fast-forward before further Codex changes; parent checkout was not touched)
+Working source: `D:\03 zisu\.test_tmp\history_audit` (the requested workspace; separate parent checkout `D:\03 zisu` was not changed)
 V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implementation is committed on the requested feature branch (see current Git HEAD).
 Remote status: last tested code commit `9f18e9fec524e093109b04da3867d44bafc8a441` (followed by documentation-only commits); PR #4 checked open/Draft. Always re-fetch current feature-branch HEAD before new writes. Push Actions `39117316473` and PR Actions `39117319193` both completed successfully (including new offline acceptance, Windows packaging and startup smoke). PR #2 and `main` were not touched.
+
+### Windows onedir startup CI incident (2026-10-18)
+
+- Latest remote source base for this repair: `365b60d8929c4db9c85c0ac9b80b4324e95ed742`; the local branch was safely fast-forwarded to that commit before edits.
+- Runs `39117703604` and `39117699436` failed in `Measure cold-path and warm-process launches`. For `39117703604`, onefile fresh runs 1–3 completed, while the first onedir fresh run recorded `startup_failed` with `PermissionError` immediately after DB initialization; the app's unhandled-exception window remained open, so the harness mislabeled it as a timeout after waiting. This is not evidence of a slow startup or close-timing issue. The captured old report omitted safe stack location, so the exact failing operation is not yet known.
+- Local repair adds sanitized module/function/line diagnostics (never exception messages or absolute paths), captures fresh/warm/warmup diagnostics, and makes the smoke distinguish `STARTUP_FAILED` from `GUI_CLOSE_TIMEOUT` and stop waiting when Python explicitly reports startup failure. No failure is being marked resolved until a new Windows CI run verifies it.
+- Earlier local Windows onedir smoke: PASS in isolated data; launch-to-ready 1015.5 ms, ready-to-exit 216.6 ms, zero residual app processes. This does not reproduce GitHub-hosted runner's intermittent PermissionError and is not a fix confirmation.
+- Current confirmed regression results for this repair: full unit suite **265 run, 264 PASS / 1 SKIP / 0 FAIL**; launcher suite **11/11 PASS**; offline acceptance **23/23 PASS**; compileall PASS; workflow YAML parse PASS; PowerShell parser PASS; `git diff --check` PASS. No push attempted (prior Codex Git push was blocked by Win32 error 5 and user policy says not to repeat it).
 
 Latest estimates recomputed from the fixed backlog weights: overall ZISU **86.18%**; V4.5.9 stabilization/release scope **90.83%** across STAB-01/02/REL-01; V4.6.0 **79.20%** across its eight weighted rows; V46-03 **91%**; P0 V46-01/V46-02/V46-RESOURCE-01 **81.11%**. These are weighted implementation-maturity estimates, not test pass rates. The value changed because the current backlog row values supersede the stale 85%/76% summary; no external/real-world gate is being counted as passed.
 

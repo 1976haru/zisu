@@ -6,10 +6,25 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import traceback
 
 _STARTED = time.perf_counter()
 _EVENTS = []
 _REPORT_TARGET = None
+
+
+def safe_exception_details(exc: BaseException) -> dict:
+    """Return exception type and code location without message or full paths."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    details = {"error_type": type(exc).__name__[:80]}
+    if frames:
+        frame = frames[-1]
+        details["error_location"] = {
+            "module": Path(frame.filename).stem[:80],
+            "function": frame.name[:80],
+            "line": int(frame.lineno),
+        }
+    return details
 
 
 def write_stage(stage: str, **details) -> None:

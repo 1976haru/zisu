@@ -1,6 +1,7 @@
 import os
 import sys
 from mcrs.startup_probe import write_stage as _write_smoke_report
+from mcrs.startup_probe import safe_exception_details as _safe_exception_details
 
 
 def _apply_offline_smoke_arguments(arguments):
@@ -38,5 +39,5 @@ if __name__ == '__main__':
         app.mainloop()
     except Exception as exc:
         if smoke:
-            _write_smoke_report("startup_failed", error_type=type(exc).__name__)
+            _write_smoke_report("startup_failed", **_safe_exception_details(exc))
         raise

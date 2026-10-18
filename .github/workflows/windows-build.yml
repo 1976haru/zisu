@@ -130,6 +130,10 @@ jobs:
           path: |
             ${{ runner.temp }}/zisu-*-fresh-run-*/exe-smoke-failure.json
             ${{ runner.temp }}/zisu-*-fresh-run-*/exe-smoke-report.json
+            ${{ runner.temp }}/zisu-*-warm-run-*/exe-smoke-failure.json
+            ${{ runner.temp }}/zisu-*-warm-run-*/exe-smoke-report.json
+            ${{ runner.temp }}/zisu-*-warmup/exe-smoke-failure.json
+            ${{ runner.temp }}/zisu-*-warmup/exe-smoke-report.json
           if-no-files-found: ignore
       - name: Upload Windows release package
         uses: actions/upload-artifact@v7

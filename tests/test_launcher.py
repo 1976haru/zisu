@@ -6,9 +6,22 @@ from pathlib import Path
 from unittest.mock import patch
 import main
 ROOT=Path(__file__).resolve().parents[1]
-from mcrs.startup_probe import write_stage
+from mcrs.startup_probe import write_stage, safe_exception_details
 from support import WorkspaceTemp
 class LauncherTests(unittest.TestCase):
+    def test_startup_exception_diagnostic_records_safe_location_not_message_or_path(self):
+        try:
+            raise PermissionError(r"C:\private\client_secret.json should not be logged")
+        except PermissionError as exc:
+            details=safe_exception_details(exc)
+        self.assertEqual("PermissionError",details["error_type"])
+        self.assertEqual("test_startup_exception_diagnostic_records_safe_location_not_message_or_path",
+                         details["error_location"]["function"])
+        self.assertEqual("test_launcher",details["error_location"]["module"])
+        self.assertIsInstance(details["error_location"]["line"],int)
+        self.assertNotIn("private",repr(details).casefold())
+        self.assertNotIn("client_secret",repr(details).casefold())
+
     def test_offline_smoke_arguments_are_explicit_and_validated(self):
         with patch.dict(os.environ, {}, clear=True):
             main._apply_offline_smoke_arguments([
@@ -54,6 +67,17 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("actions/setup-python@v7",workflow)
         self.assertIn("actions/upload-artifact@v7",workflow)
         self.assertIn("windows_exe_smoke.ps1",workflow)
+        self.assertIn("zisu-*-fresh-run-*/exe-smoke-report.json",workflow)
+        self.assertIn("zisu-*-fresh-run-*/exe-smoke-failure.json",workflow)
+        self.assertIn("zisu-*-warm-run-*/exe-smoke-report.json",workflow)
+        self.assertIn("zisu-*-warm-run-*/exe-smoke-failure.json",workflow)
+        self.assertIn("zisu-*-warmup/exe-smoke-report.json",workflow)
+        self.assertIn("zisu-*-warmup/exe-smoke-failure.json",workflow)
+        smoke=Path(ROOT,"scripts","windows_exe_smoke.ps1").read_text(encoding="utf-8")
+        self.assertIn("$current.stage -eq 'startup_failed'",smoke)
+        self.assertIn("result = 'STARTUP_FAILED'",smoke)
+        self.assertIn("result = 'GUI_CLOSE_TIMEOUT'",smoke)
+        self.assertIn("startup_error_location = $startupFailure.error_location",smoke)
         self.assertIn("python tests/smoke_gui.py",workflow)
         self.assertIn("package_windows.ps1",workflow)
         self.assertIn("--onedir",workflow)
