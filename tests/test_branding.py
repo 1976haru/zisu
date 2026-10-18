@@ -9,6 +9,13 @@ from mcrs import branding
 
 
 class BrandingTests(unittest.TestCase):
+    def test_beginner_manual_uses_official_brand(self):
+        manual = Path(__file__).resolve().parents[1] / "사용설명서_초보자.html"
+        text = manual.read_text(encoding="utf-8")
+        self.assertIn("ZISU SIGNAL LAB", text)
+        self.assertIn("지수 시그널 랩", text)
+        self.assertIn("채널 성장의 신호를 발견하다.", text)
+
     def test_official_brand_identity_and_slogan_are_stable(self):
         self.assertEqual("ZISU SIGNAL LAB", branding.DISPLAY_NAME)
         self.assertEqual("지수 시그널 랩", branding.KOREAN_NAME)
