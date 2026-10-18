@@ -188,18 +188,26 @@ class AutopilotController:
                 provider = FailClosedProvider(provider)
             emit("validate", message="프로필, 연결, 승인된 예산 확인")
 
-            def collect(term, market, limit, page_token=None):
+            def collect(term, market, limit, page_token=None, order="relevance"):
                 actual_queries.append({"keyword": term, "market": market,
                                        "page": len(actual_queries) + 1,
-                                       "continued_page": bool(page_token)})
+                                       "continued_page": bool(page_token), "order": order})
                 emit("search", keyword=term, market=market,
-                     search_call=len(actual_queries), search_limit=config.max_search_calls)
+                     search_call=len(actual_queries), search_limit=config.max_search_calls, order=order)
                 try:
                     parameters = inspect.signature(collector).parameters
-                    accepts_page = "page_token" in parameters or len(parameters) >= 4
                 except (TypeError, ValueError):
-                    accepts_page = True
-                return collector(term, market, limit, page_token) if accepts_page else collector(term, market, limit)
+                    parameters = {}
+                accepts_page = "page_token" in parameters or len(parameters) >= 4 or not parameters
+                accepts_order = "order" in parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+                if accepts_page and accepts_order:
+                    return collector(term, market, limit, page_token, order=order)
+                if accepts_page:
+                    return collector(term, market, limit, page_token)
+                if accepts_order:
+                    return collector(term, market, limit, order=order)
+                return collector(term, market, limit)
 
             def session_ready(new_session_id, resumed):
                 nonlocal session_id

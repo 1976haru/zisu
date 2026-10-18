@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 from .work_slots import AI_REQUEST_SLOT, WorkSlotBusy, occupy
 
 from . import genres, store
+from . import candidate_diversity
 from .credential_store import CredentialStore, CredentialError
 
 PROMPT_VERSION = "genre-review-v2"
@@ -727,11 +728,12 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
     profile = store.get_profile(profile_id, path)
     if not profile:
         raise ValueError("Research profile not found.")
-    terms, _core, _related = _profile_query_plan(profile, max_search_calls, path)
+    terms, core_count, _related = _profile_query_plan(profile, max_search_calls, path)
     settings_hash = _profile_settings_hash(profile, path, max_search_calls) + ":fit-target-v1"
     cancel_event = cancel_event or threading.Event()
     pause_event = pause_event or threading.Event()
     resuming = bool(session_id)
+    diversity_version = "channel-diversity-v1"
     recovery_warning = ""
     if session_id:
         session = store.get_research_session(session_id, profile_id, path)
@@ -740,6 +742,7 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
             (profile["market"], profile["genre"], target, max_search_calls, settings_hash)):
             raise ValueError("Saved research settings changed; start a new search to avoid mixing results.")
         candidates = {str(row.get("video_id")): row for row in json.loads(session["candidates_json"])}
+        diversity_version = session.get("diversity_version", "legacy") or "legacy"
         reviews = [_review_from_payload(row) for row in json.loads(session["reviews_json"])]
         processed = set(json.loads(session["processed_json"]))
         query_index = int(session["query_index"])
@@ -759,9 +762,11 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
                 in_flight=False, path=path)
     else:
         session_id = store.start_research_session(profile_id, profile["market"], profile["genre"],
-            target, max_search_calls, path, settings_hash, target_mode="fit_target")
+            target, max_search_calls, path, settings_hash, target_mode="fit_target",
+            diversity_version=diversity_version)
         candidates, reviews, processed = {}, [], set()
         query_index, page_token, calls_used, duplicate_count = 0, "", 0, 0
+    exposure_counts = store.channel_exposure_counts(profile_id, path) if diversity_version == "channel-diversity-v1" else {}
     if session_ready:
         session_ready(session_id, resuming)
 
@@ -784,6 +789,10 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
         if not current or _profile_settings_hash(current, path, max_search_calls) + ":fit-target-v1" != settings_hash:
             raise ValueError("Profile search settings changed. Start a new search to keep results separate.")
         term = terms[query_index]
+        order = "date" if diversity_version == "channel-diversity-v1" and query_index < core_count and query_index % 3 == 2 else "relevance"
+        search_category = candidate_diversity.classify_search_category(term, profile, path)
+        if order == "date" and search_category != candidate_diversity.RELATED:
+            search_category = candidate_diversity.CORE_RECENT
         next_call = calls_used + 1
         store.checkpoint_research_session(session_id, profile_id, state="running", query_index=query_index,
             page_token=page_token, calls_used=next_call, duplicate_count=duplicate_count,
@@ -794,8 +803,14 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
         except (TypeError, ValueError):
             parameters = {}
         try:
-            if "page_token" in parameters or len(parameters) >= 4:
+            supports_order = "order" in parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+            supports_page = "page_token" in parameters or len(parameters) >= 4
+            if supports_page and supports_order:
+                payload = collector(term, profile["market"], 50, page_token or None, order=order)
+            elif supports_page:
                 payload = collector(term, profile["market"], 50, page_token or None)
+            elif supports_order:
+                payload = collector(term, profile["market"], 50, order=order)
             else:
                 payload = collector(term, profile["market"], 50)
         except Exception:
@@ -812,15 +827,34 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
         rows = payload.get("items", []) if isinstance(payload, dict) else (payload or [])
         following = payload.get("nextPageToken", "") if isinstance(payload, dict) else ""
         fresh = []
+        existing_ids = (store.known_research_video_ids(profile_id,
+            [str(row.get("video_id", "")) for row in rows], path)
+            if diversity_version == "channel-diversity-v1" else set())
+        if existing_ids:
+            # A previously reviewed video is normally suppressed. A saved real
+            # listening note is an explicit user action, so allow that item to
+            # re-enter only for note-based draft preparation (the note itself
+            # remains in the candidate row and is never inferred by AI).
+            existing_ids.difference_update(store.candidate_video_ids_with_observation(
+                profile_id,[str(row.get("video_id", "")) for row in rows],path))
+        page_seen = set()
         for row in rows:
             video_id = str(row.get("video_id", ""))
             if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
                 continue
-            if video_id in candidates:
+            if video_id in page_seen or video_id in candidates or video_id in existing_ids:
                 duplicate_count += 1
                 continue
+            page_seen.add(video_id)
+            row = dict(row)
+            row["keyword"] = term
             candidates[video_id] = row
             fresh.append(row)
+        if diversity_version == "channel-diversity-v1":
+            fresh, page_duplicates = candidate_diversity.diversify_page(
+                fresh, genre_id=profile["genre"], exposure_counts=exposure_counts,
+                seed=f"{profile_id}|{session_id}|{query_index}|{term}|{order}")
+            duplicate_count += page_duplicates
         if fresh:
             store.save_candidates(profile_id, fresh, path)
             for row in fresh:
@@ -839,6 +873,13 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
                     evidence=" | ".join(ai.evidence_from_metadata) if ai else review.rule_reason,
                     uncertainty=ai.uncertainty if ai else review.warning,
                     model_version=f"{review.provider}/{review.model}", path=path)
+                if diversity_version == "channel-diversity-v1":
+                    store.record_research_discovery(profile_id,session_id,row,
+                        search_category=search_category,search_order=order,
+                        rule_verdict=review.rule_verdict,ai_source=review.ai_source,path=path)
+                    channel_id=str(row.get("channel_id", ""))
+                    if channel_id:
+                        exposure_counts[channel_id]=exposure_counts.get(channel_id,0)+1
         if following and fit_count() < target:
             page_token = following
         else:
@@ -850,6 +891,7 @@ def run_auto_recommendations(profile_id: str, collector, *, target: int = 10,
             reviews=[_review_to_payload(item) for item in reviews], in_flight=False, path=path)
         if progress:
             progress({"stage": "search", "calls_used": calls_used, "budget_remaining": max_search_calls-calls_used,
+                "search_category": search_category, "search_order": order,
                 "candidate_count": len(candidates), "duplicate_count": duplicate_count,
                 "recommended_fit_count": fit_count(), "ai_review_count": sum(1 for item in reviews if item.ai_opinion),
                 "human_reviewed_count": sum(1 for item in store.list_genre_audit(profile_id, labeled=True, path=path)),

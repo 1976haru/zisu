@@ -62,14 +62,16 @@ def _get(endpoint, key, access_token=None, retries=2, retry_delay=0.25, **kwargs
     raise APIError("API 요청을 완료하지 못했습니다.")
 
 
-def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False):
+def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False, order="relevance"):
     if market not in ("KR", "JP"):
         raise ValueError("시장 코드는 KR 또는 JP입니다.")
     lang = "ko" if market == "KR" else "ja"
+    if order not in {"relevance", "date"}:
+        raise ValueError("Search order must be relevance or date.")
     credentials = {"access_token": access_token} if access_token else {}
     results = _get(
         "search", key, part="snippet", type="video", q=keyword,
-        regionCode=market, relevanceLanguage=lang, order="relevance",
+        regionCode=market, relevanceLanguage=lang, order=order,
         maxResults=max(1, min(50, limit)), retries=0,
         **({"pageToken": page_token} if page_token else {}), **credentials,
     )
@@ -107,10 +109,10 @@ def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token
     return {"items": rows, "nextPageToken": results.get("nextPageToken", "")} if return_page else rows
 
 
-def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False):
+def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None, return_page=False, order="relevance"):
     """Serialize a complete search + metadata-enrichment operation process-wide."""
     try:
         with occupy(SEARCH_SLOT):
-            return _lookup_videos(key, keyword, market, limit, access_token, page_token, return_page)
+            return _lookup_videos(key, keyword, market, limit, access_token, page_token, return_page, order)
     except WorkSlotBusy:
         raise APIError("다른 검색을 정리하는 중입니다. 잠시 뒤 저장된 작업을 이어가세요.") from None

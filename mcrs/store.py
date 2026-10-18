@@ -192,6 +192,17 @@ def initialize(path=None):
           calls_used INTEGER NOT NULL DEFAULT 0, duplicate_count INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS research_discoveries (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '',
+          channel_title TEXT NOT NULL DEFAULT '', first_session_id TEXT NOT NULL DEFAULT '',
+          source_keyword TEXT NOT NULL DEFAULT '', search_category TEXT NOT NULL DEFAULT 'core',
+          search_order TEXT NOT NULL DEFAULT 'relevance',
+          rule_verdict TEXT NOT NULL DEFAULT '검토', ai_source TEXT NOT NULL DEFAULT 'rules_only',
+          first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_research_discoveries_channel
+          ON research_discoveries(profile_id,channel_id,first_seen_at);
         CREATE TABLE IF NOT EXISTS research_schedules (
           id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
           market TEXT NOT NULL CHECK(market IN ('JP','KR')),
@@ -249,6 +260,7 @@ def initialize(path=None):
             _add_column(db, "profiles", definition)
         _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "research_sessions", "diversity_version TEXT NOT NULL DEFAULT 'legacy'")
         _add_column(db, "research_schedules", "pause_reason TEXT NOT NULL DEFAULT ''")
         _add_column(db, "research_schedules", "research_extension_cycle INTEGER NOT NULL DEFAULT -1")
         _add_column(db, "research_schedules", "research_extension_seconds INTEGER NOT NULL DEFAULT 0")
@@ -359,8 +371,14 @@ def dashboard_summary(profile_id, path=None):
             (SELECT COUNT(*) FROM ai_reviews WHERE profile_id=?) AS ai_reviews,
             (SELECT COUNT(*) FROM ai_reviews WHERE profile_id=? AND date(created_at)=date('now')) AS today_ai_reviews,
             (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND human_label<>'') AS human_labels,
-            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND review_status='needs_review') AS needs_review""",
-            (profile_id, profile_id, profile_id, profile_id, profile_id, profile_id)).fetchone()
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND review_status='needs_review') AS needs_review,
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND review_status='needs_review' AND ai_verdict='') AS ai_pending,
+            (SELECT COUNT(DISTINCT channel_id) FROM research_discoveries WHERE profile_id=? AND channel_id<>'' AND date(first_seen_at,'localtime')=date('now','localtime')) AS new_channels_today,
+            (SELECT COALESCE(SUM(duplicate_count),0) FROM research_sessions WHERE profile_id=?) AS duplicate_candidates_total,
+            (SELECT COUNT(*) FROM candidates WHERE profile_id=? AND genre_decision='적합') AS genre_fit_candidates,
+            (SELECT COALESCE(SUM(calls_used),0) FROM research_sessions WHERE profile_id=?) AS search_calls_total""",
+            (profile_id, profile_id, profile_id, profile_id, profile_id, profile_id,
+             profile_id, profile_id, profile_id, profile_id, profile_id)).fetchone()
         account = None
         if profile["google_account_id"]:
             row = db.execute("SELECT email FROM google_accounts WHERE id=?", (profile["google_account_id"],)).fetchone()
@@ -374,6 +392,66 @@ def dashboard_summary(profile_id, path=None):
     result["account_email"] = account or profile["connected_email"] or ""
     result["schedule_state"] = dict(active_schedule) if active_schedule else None
     return result
+
+def known_research_video_ids(profile_id, video_ids, path=None):
+    """Look up only IDs in the current API page; no profile-wide candidate materialization."""
+    ids=list(dict.fromkeys(str(value) for value in video_ids if value))
+    if not profile_id or not ids:return set()
+    found=set()
+    with connect(path) as db:
+        # YouTube pages are capped at 50; chunk to remain below SQLite bind limits.
+        for start in range(0,len(ids),400):
+            chunk=ids[start:start+400];marks=",".join("?" for _ in chunk)
+            rows=db.execute(f"SELECT video_id FROM candidates WHERE profile_id=? AND video_id IN ({marks}) "
+                f"UNION SELECT video_id FROM research_discoveries WHERE profile_id=? AND video_id IN ({marks})",
+                [profile_id,*chunk,profile_id,*chunk])
+            found.update(row[0] for row in rows)
+    return found
+
+def candidate_video_ids_with_observation(profile_id, video_ids, path=None):
+    """Return only this page's candidates with an existing real-listening note."""
+    ids=list(dict.fromkeys(str(value) for value in video_ids if value))
+    if not profile_id or not ids:return set()
+    found=set()
+    with connect(path) as db:
+        for start in range(0,len(ids),400):
+            chunk=ids[start:start+400];marks=",".join("?" for _ in chunk)
+            rows=db.execute(f"SELECT video_id FROM candidates WHERE profile_id=? AND video_id IN ({marks}) "
+                "AND length(trim(notes))>=10",[profile_id,*chunk])
+            found.update(row[0] for row in rows)
+    return found
+
+def channel_exposure_counts(profile_id, path=None):
+    """Unique previously surfaced videos per channel, scoped to one profile."""
+    with connect(path) as db:
+        rows=db.execute("""SELECT channel_id,COUNT(DISTINCT video_id) AS exposures FROM (
+          SELECT channel_id,video_id FROM candidates WHERE profile_id=? AND channel_id<>''
+          UNION ALL
+          SELECT channel_id,video_id FROM research_discoveries WHERE profile_id=? AND channel_id<>''
+        ) GROUP BY channel_id""",(profile_id,profile_id))
+        return {row["channel_id"]:int(row["exposures"]) for row in rows}
+
+def record_research_discovery(profile_id, session_id, row, *, search_category="core",
+                              search_order="relevance", rule_verdict="검토", ai_source="rules_only", path=None):
+    """Record metadata discovery provenance; never writes or infers a human label."""
+    video_id=str(row.get("video_id", ""))
+    if len(video_id)!=11 or not all(char.isalnum() or char in "-_" for char in video_id):
+        return False
+    allowed_categories={"user_core","core","core_recent","related"}
+    allowed_verdicts={"적합","검토","제외","수동 승인"}
+    allowed_ai={"success","failure","cache","budget_blocked","rules_only","resource_blocked"}
+    if search_category not in allowed_categories or search_order not in {"relevance","date"} or rule_verdict not in allowed_verdicts or ai_source not in allowed_ai:
+        raise ValueError("Discovery provenance is outside the supported categories.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?",(session_id,profile_id)).fetchone():
+            raise ValueError("Research discovery does not match the owning profile session.")
+        result=db.execute("""INSERT OR IGNORE INTO research_discoveries(
+          profile_id,video_id,channel_id,channel_title,first_session_id,source_keyword,
+          search_category,search_order,rule_verdict,ai_source) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+          (profile_id,video_id,str(row.get("channel_id", ""))[:200],
+           str(row.get("channel_title", ""))[:500],session_id,
+           str(row.get("keyword", ""))[:200],search_category,search_order,rule_verdict,ai_source))
+        return result.rowcount==1
 
 def bind_google_account_channel(profile_id, channel_id, channel_title, email="", *, allow_account_change=False, path=None):
     """Bind a profile to an account and one authenticated channel in one DB transaction."""
@@ -743,7 +821,7 @@ def ai_usage_for_session(profile_id, session_id, path=None):
             "estimated_cost_usd": float(row["estimated_cost_usd"] or 0.0),
             "unknown_cost": int(row["unknown_cost"] or 0)}
 
-def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash="", target_mode="candidate_count"):
+def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash="", target_mode="candidate_count", diversity_version="legacy"):
     session_id = uuid.uuid4().hex
     with connect(path) as db:
         # Serialize the check + insert across processes. The in-process GUI lock
@@ -758,8 +836,8 @@ def start_research_session(profile_id, market, genre, target, max_search_calls, 
         if not row or row["market"] != market or row["genre"] != genre:
             raise ValueError("조사 프로필이 변경되었습니다. 새 계획을 만드세요.")
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
-        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls,settings_hash,target_mode) VALUES(?,?,?,?,?,?,?,?,?)",
-                   (session_id, profile_id, market, genre, "running", target, max_search_calls, settings_hash,target_mode))
+        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls,settings_hash,target_mode,diversity_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (session_id, profile_id, market, genre, "running", target, max_search_calls, settings_hash,target_mode,diversity_version))
     return session_id
 
 def get_research_session(session_id, profile_id, path=None):

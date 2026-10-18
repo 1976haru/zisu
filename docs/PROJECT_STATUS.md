@@ -1,6 +1,6 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-04 beginner dashboard implementation and scoped regression)
+Last checked: 2026-10-18 (V46-05 scheduled candidate diversification implementation and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
@@ -11,12 +11,13 @@ Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 83% estimated (82.5 weighted points using the existing backlog scoring; rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
+- **Overall ZISU:** 84% estimated (83.55 weighted points using the existing backlog scoring, rounded to the nearest percent; this includes remaining V4.6 scope and is not a test-pass percentage).
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 72% estimated (72.25% weighted across its backlog). Schedule state, offline account/channel registry, resource sampling/admission, dashboard and browser lifecycle control are present; browser page navigation/clean process shutdown, dashboard visual DPI, and actual APIs remain incomplete.
+- **V4.6.0:** 75% estimated (74.875% weighted across its backlog after V46-05 progress update). Schedule state, offline account/channel registry, resource sampling/admission, dashboard, browser lifecycle control and offline candidate diversification are present; browser page navigation/clean process shutdown, dashboard visual DPI, live discovery quality and actual APIs remain incomplete.
 - **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 81% estimated (21.9/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth and wall-clock EXE runtime remain.
 - **Current V46-03:** 65% estimated and unchanged. Edge produced a visible top-level frame, but the local test page did not load and the isolated process needed a verified cleanup fallback; Chrome failed during startup. End-to-end browser use is not complete.
 - **Current V46-04:** 65% estimated. Dashboard grouping and profile-scoped counts/scheduler/resource status are implemented and scoped tests pass; real Windows DPI appearance remains unverified.
+- **Current V46-05:** 65% estimated. Profile-scoped discovery provenance, query categories, bounded recent-first searches, within-page/history duplicate suppression and deterministic genre-first/channel-exposure ordering are implemented. Scoped Mock suite passes; live recommendation quality and human-reviewed KR/JP precision are not measured.
 
 ## Verified and unverified state
 
@@ -74,7 +75,7 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
 ## Immediate constraints and next order
 
-No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Next: diagnose why installed Chrome/Edge exited before creating a visible isolated window; then continue V46-04 dashboard/DPI work. V46-RESOURCE-01 long-run validation remains. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
+No data-loss or credential issue was found; prior tasks did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Browser live navigation/clean-close and dashboard visual DPI checks remain incomplete gates. V46-RESOURCE-01 long-run validation remains. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
 
 ### V46-RESOURCE-01 continuation (2026-10-18)
 
@@ -86,6 +87,22 @@ No data-loss or credential issue was found; this task did not open or modify the
 - Isolated virtual stability experiment: 12 simulated six-hour sessions and 12 pause/resume cycles; RSS milestones 34,959,360 → 35,319,808 → 35,323,904 → 35,328,000 bytes (net +368,640 bytes during this bounded test); `tracemalloc` current 56,031 bytes / peak 74,532 bytes; thread count 1→1; Windows process handles 114→114. These virtual-clock cycles do not represent 72 hours of wall-clock operation or a built EXE. The final process CPU field was unavailable on one sampled cycle, so no sustained CPU average is claimed.
 - Deferred: full regression suite/final QA, real six-hour Windows EXE operation, high-load contention on a user workstation, GUI visual/DPI verification, and browser lifecycle. V4.5.9 install/user DB/OAuth/DPAPI stores remain untouched; no external APIs were called.
 - GitHub `gh auth status` was checked during this continuation and reports the stored credential invalid. Push/CI were not attempted; local source remains on the requested feature branch.
+
+### V46-05 scheduled candidate diversification (2026-10-18)
+
+- Reused the existing Autopilot query plan, genre rules, AI review/cache/budget path, profile checkpoints, scheduler, resource work slots and dashboard. New fit-target sessions snapshot `channel-diversity-v1`; previously saved/resumable sessions default to `legacy`, so their candidate sequence is not silently changed.
+- Added profile-scoped `research_discoveries` provenance (source term/category, relevance/date ordering, rule verdict and AI source) plus an additive `diversity_version` column. Existing candidates, AI opinions, human labels and notes are not rewritten. A prior candidate is suppressed from repeat discovery unless the user already saved a real listening note; that explicit note may re-enter for note-based draft preparation, while notes/drafts remain stored as before.
+- Query allocation still spends within the user's existing ceiling and keeps core terms first. Core terms use relevance ordering, with a bounded date-ordered pass for recent uploads; selected related-genre terms remain contextual. Search API caps remain 50, pagination is passed through, and URL/read-only behavior is unchanged. No Japanese text alone is a genre signal.
+- New ordering keeps rule-fit candidates ahead of review/excluded candidates, suppresses repeated video IDs, then balances prior and within-page channel exposure with recency and seeded tie-breaking. Video view counts are only a weak popularity tie-break, not a verified channel-size measure or quality score. The algorithm changes order only; AI opinion, human label and actual listening truth remain separate.
+- Dashboard now reports channels newly discovered today (local date), cumulative duplicate exclusions, rule-fit candidates, AI review queue and cumulative search-call usage. It uses count-only/profile-scoped database queries. The displayed call count is a session sum, not a billing or per-day quota meter.
+- Regression discovery during the first run: the pre-existing Autopilot test for drafts from a saved listening note failed because V46-05 correctly filtered already-known videos before note handling. Fixed the boundary to let only explicitly noted prior candidates back into draft preparation; the actual observation and human label are never fabricated. A bad test fixture API call was also corrected. This is intentional compatibility behavior, not a production-data change.
+- Final scoped run: diversity **6/6**, Autopilot **12/12**, V4.5.7 AI/genre **12/12**, scheduler **18/18**, resource lifecycle **7/7**, dashboard data **3/3** = **58/58 PASS**. `python -m compileall -q mcrs tests`, `python tests/smoke_gui.py` (`GUI_SMOKE_PASS`), and `git diff --check` pass. This is scoped regression only; full final QA was not started as instructed.
+- Comparative Mock page: original top 8 had one channel (8/8); diversified top 8 included three channels, with the largest contributing 4/8, given only four non-dominant rows in that 12-row fixture. This is a fixture-level ordering comparison, not proof of real-world discovery quality.
+- Resource lifecycle sample emitted by the scoped suite: system CPU 2.63%, available RAM 11.29 GB, system memory load 66%, Python test process RSS 35.28 MB and process CPU 0.0% (one incidental sample only). Twelve virtual six-hour sessions/12 pause-resume cycles showed RSS change −917,504 bytes, tracemalloc current 54,793 / peak 74,456 bytes, threads 1→1, handles 114→114. These figures are not a live API workload or sustained EXE benchmark.
+- No external API, real user DB, OAuth/DPAPI store or V4.5.9 installed package was accessed. V46-03 actual browser page/close and V46-04 visual DPI gates remain incomplete. No EXE build/install or full-suite QA was performed. Working source remains nested at `D:\03 zisu\.test_tmp\history_audit`; parent checkout and existing V4.5.9 install were not changed by this task.
+- GitHub authentication was not retried; the previously observed Codex credential failure remains a remote blocker. No push/CI attempt. Local commit remains pending final staged-file/security review.
+
+Next in backlog order after this task: implement V46-06 safe-stop handling for network, authentication and quota errors; keep browser live navigation and dashboard visual DPI as open verification gates.
 
 ### V46-03 dedicated research browser (2026-10-18)
 

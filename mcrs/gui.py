@@ -328,14 +328,18 @@ class Studio(tk.Tk):
             ttk.Label(cards,textvariable=var,wraplength=1000).grid(row=index,column=0,sticky="ew",padx=5,pady=4)
         cards.columnconfigure(0,weight=1)
         self.dashboard_schedule_text=tk.StringVar(value="연구 일정: 아직 설정되지 않았습니다")
+        self.dashboard_discovery_text=tk.StringVar(value="오늘 새 채널: 0 · 누적 중복 제외: 0 · 규칙 적합 후보: 0")
+        self.dashboard_ai_queue_text=tk.StringVar(value="AI 검토 대기: 0 · 조사 검색 호출 누계: 0회")
         self.dashboard_resource_text=tk.StringVar(value="컴퓨터 여유 있음 · 저부하 모드 권장")
         self.dashboard_browser_text=tk.StringVar(value="연구용 창: 전용 모드 또는 직접 여는 수동 모드를 선택할 수 있어요")
         ttk.Label(content,textvariable=self.dashboard_schedule_text,wraplength=1000).grid(row=6,column=0,columnspan=2,sticky="w",pady=3)
-        ttk.Label(content,textvariable=self.dashboard_resource_text,wraplength=1000).grid(row=7,column=0,columnspan=2,sticky="w",pady=3)
-        ttk.Label(content,textvariable=self.dashboard_browser_text,wraplength=1000).grid(row=8,column=0,columnspan=2,sticky="w",pady=3)
+        ttk.Label(content,textvariable=self.dashboard_discovery_text,wraplength=1000).grid(row=7,column=0,columnspan=2,sticky="w",pady=3)
+        ttk.Label(content,textvariable=self.dashboard_ai_queue_text,wraplength=1000).grid(row=8,column=0,columnspan=2,sticky="w",pady=3)
+        ttk.Label(content,textvariable=self.dashboard_resource_text,wraplength=1000).grid(row=9,column=0,columnspan=2,sticky="w",pady=3)
+        ttk.Label(content,textvariable=self.dashboard_browser_text,wraplength=1000).grid(row=10,column=0,columnspan=2,sticky="w",pady=3)
         self.easy_next=ttk.Button(content,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
-        self.easy_next.grid(row=9,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
-        actions=ttk.Frame(content);actions.grid(row=10,column=0,columnspan=2,sticky="ew",pady=4)
+        self.easy_next.grid(row=11,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
+        actions=ttk.Frame(content);actions.grid(row=12,column=0,columnspan=2,sticky="ew",pady=4)
         actions.columnconfigure(0,weight=1)
         for index,(label,command,style_name) in enumerate((
             ("Google 계정 연결",lambda:self.tabs.select(self.frames[0]),"TButton"),
@@ -345,7 +349,7 @@ class Studio(tk.Tk):
             ("결과 확인",lambda:self.tabs.select(self.frames[2]),"TButton"),
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
-        browser_row=ttk.Frame(content);browser_row.grid(row=11,column=0,columnspan=2,sticky="ew",pady=4)
+        browser_row=ttk.Frame(content);browser_row.grid(row=13,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
             ("연구용 인터넷 창 열기",self._research_browser_open),
@@ -354,7 +358,7 @@ class Studio(tk.Tk):
             ("도움말",lambda:self.tabs.select(self.frames[5])))):
             ttk.Button(browser_row,text=label,command=command).grid(row=index,column=0,sticky="ew",padx=3,pady=2)
         ttk.Label(content,text="수동 모드로 연 일반 브라우저는 ZISU가 자동으로 닫지 않습니다. 영상 재생·댓글·좋아요·구독은 직접 수행합니다.",
-                  wraplength=1000).grid(row=12,column=0,columnspan=2,sticky="w",pady=(5,12))
+                  wraplength=1000).grid(row=14,column=0,columnspan=2,sticky="w",pady=(5,12))
         self._easy_enter_button=None
         self.bind_all("<Return>",self._easy_enter,add="+")
         self.bind_all("<Escape>",self._easy_escape,add="+")
@@ -432,6 +436,8 @@ class Studio(tk.Tk):
             self.dashboard_today_text.set("오늘 저장·갱신한 후보: 0");self.dashboard_ai_text.set("AI 분석: 아직 없음")
             self.dashboard_review_text.set("사람 확인 필요: 0 · 사람 검증: 0")
             self.dashboard_schedule_text.set("연구 일정: 아직 설정되지 않았습니다")
+            self.dashboard_discovery_text.set("오늘 새 채널: 0 · 누적 중복 제외: 0 · 규칙 적합 후보: 0")
+            self.dashboard_ai_queue_text.set("AI 검토 대기: 0 · 조사 검색 호출 누계: 0회")
             self.dashboard_resource_text.set("컴퓨터 상태: 조사 채널을 선택하세요")
             self.dashboard_browser_text.set("연구용 창: 전용 모드 또는 직접 여는 수동 모드를 선택할 수 있어요")
             return
@@ -446,6 +452,8 @@ class Studio(tk.Tk):
         self.dashboard_ai_text.set(f"AI 분석 결과: 전체 {profile['ai_reviews']} · 오늘 {profile['today_ai_reviews']} · 분석은 사람의 청취 정답과 별도")
         self.dashboard_review_text.set(f"사람 확인 필요: {profile['needs_review']} · 사람 검증 완료: {profile['human_labels']}")
         self.dashboard_schedule_text.set(self._dashboard_schedule_label(profile))
+        self.dashboard_discovery_text.set(f"오늘 새로 발견한 채널: {profile['new_channels_today']} · 누적 중복 제외: {profile['duplicate_candidates_total']} · 규칙 적합 후보: {profile['genre_fit_candidates']}")
+        self.dashboard_ai_queue_text.set(f"AI 검토 대기 후보: {profile['ai_pending']} · 조사 검색 호출 누계: {profile['search_calls_total']}회")
         self.dashboard_resource_text.set("컴퓨터 상태: "+getattr(self,"resource_status_text",tk.StringVar(value="컴퓨터 여유 있음")).get())
         browser=getattr(self,"research_browser_status",None)
         dedicated=browser.get() if browser else "전용 창 상태 확인 전"
@@ -1998,9 +2006,9 @@ class Studio(tk.Tk):
                         "status":labels.get(decision.status,"리소스 상태를 확인할 수 없습니다"),
                         "allow":decision.allow_new_work})
                     return decision.allow_new_work
-                def collect(term,market,limit,page_token=None):
+                def collect(term,market,limit,page_token=None,order="relevance"):
                     return lookup_videos(key,term,market,limit=min(50,limit),access_token=token,
-                                         page_token=page_token,return_page=True)
+                                         page_token=page_token,return_page=True,order=order)
                 if schedule_id:
                     outcome=self._autopilot_schedule_worker(schedule_id,profile_id,config,provider,
                         collect,resource_check,low_load_enabled)

@@ -488,7 +488,7 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
             return False
         return True
 
-    def scheduled_collector(term, market, limit, page_token=None):
+    def scheduled_collector(term, market, limit, page_token=None, order="relevance"):
         claim_search_call(session_id, profile_id, path, now=clock())
         try:
             try:
@@ -496,7 +496,11 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
                 params = inspect.signature(collector).parameters
             except (TypeError, ValueError):
                 params = {}
-            if "page_token" in params or len(params) >= 4:
+            accepts_order = "order" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            if accepts_order:
+                result = collector(term, market, limit, page_token, order=order) if ("page_token" in params or len(params)>=4) else collector(term, market, limit, order=order)
+            elif "page_token" in params or len(params) >= 4:
                 result = collector(term, market, limit, page_token)
             else:
                 result = collector(term, market, limit)
