@@ -1,6 +1,19 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (latest Windows CI runs 39117703604 and 39117699436 failed in onedir startup measurement; local diagnosis and safer diagnostics are in progress)
+### P1/P2 offline verification batch (2026-10-18)
+
+- Scope: V46-03 verifier report correctness, V46-04 mechanical UI accessibility/scaling, V46-05 synthetic JP/KR genre-evaluation tooling, V46-06 HTTP 500 coverage, and V46-07 country/traffic Analytics fixture checks. No actual Chrome session, live Google/YouTube/Gemini call, user database, OAuth/DPAPI store, V4.5.9 install, final integration QA, or wall-clock six-hour run was used.
+- V46-03 defect found and fixed: cycle success alone was sufficient for an overall PASS even when final owned-process inventory was unavailable and shutdown emitted a FAIL. PASS now additionally requires zero stage failures, no fatal cleanup condition, and zero residual owned processes. The verifier suite ran 33/33 PASS, including full Mock 5-cycle and 20-cycle reports plus injected unknown final process inventory; the unknown inventory yields `INCOMPLETE_OR_FAIL`.
+- V46-04 GUI smoke checks canvas width/scroll reachability and button geometry at Tk scaling 100/125/150/200%, and exercises Return/Escape/focus navigation. `GUI_SMOKE_PASS`; this is not screenshot or human visual verification.
+- V46-05 added 24 balanced synthetic JP/KR Morning Chill Rap/Chill Rap cases, an atomic evaluation report, and a human-review CSV generator. Fixture match was 17/24 (70.8%); this is only synthetic regression agreement, not real-search precision/recall. Human labels: 0; audio verification: none. Generated artifacts stay under ignored `dist/`.
+- V46-06 added an HTTP 500 server-error case while retaining HTTP-body/secret redaction, budget reservation and no-retry behavior. Network/quota suite: 9/9 PASS.
+- V46-07 Analytics tests now assert country and `insightTrafficSourceType` dimension output from fixtures. Analytics suite: 15/15 PASS; no live metric was fetched.
+- Verification: full suite **269 run, 268 PASS / 1 opt-in installed-browser SKIP / 0 FAIL** (80.3 s); offline acceptance **23/23 PASS**; browser verifier **33/33**, Analytics **15/15**, network/quota **9/9**, genre-evaluation **3/3**; GUI smoke PASS; compileall, PowerShell parser, workflow YAML parse, and `git diff --check` PASS. The one skip is specifically the installed-browser integration test, intentionally not enabled.
+- Virtual resource sample from the full suite: 12 simulated six-hour runs and 12 pause/resume cycles; Python RSS milestones 40,370,176 → 40,415,232 bytes, final RSS 39,559,168 bytes (−811,008 bytes relative to initial), tracemalloc current/peak 85,252/89,533 bytes, threads 2→2, Windows handles 246→238. These simulated figures are not a sustained real six-hour process guarantee.
+- Existing backlog maturity estimates are unchanged pending real-world gates: overall 86.18%, V4.5.9/release 90.83%, V4.6.0 79.20%; V46-03 91%, V46-04 66%, V46-05 65%, V46-06 65%, V46-07 65%. No score was raised based solely on synthetic fixtures or mechanical smoke.
+- Local implementation commits: `66f32744bfbc30e03a9e23730cc648ac6476b3be` (browser cleanup fail-closed), `0d6341ac18b081b47496eb470f05060a65a7bc5b` (dashboard mechanics), `a7ac811ada807988fc29cfaaf319dba2be06c4a1` (genre evaluation tool/fixture), and `e0d03b0bf880ce227e9d4d797bca08fb1a6cb31f` (network/Analytics regressions). No push or CI run was attempted. The last confirmed remote feature-branch SHA is `9b9f1e0927419c914e961596b546b3a7dd8d66d3`; before this batch the local branch was already 2 commits ahead. PR #4 remains Draft; main and PR #2 were not touched.
+
+Last checked: 2026-10-18 (P1/P2 offline verification batch complete locally; latest remote CI status remains the separate 39117703604/39117699436 startup-measurement failure)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (the requested workspace; separate parent checkout `D:\03 zisu` was not changed)
