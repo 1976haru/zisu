@@ -26,7 +26,7 @@ from . import autopilot
 from . import research_scheduler
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .research_browser import (ResearchBrowserManager, BrowserError, BrowserResourceDeferred,
-                               BrowserOwnershipUncertain)
+                               BrowserOwnershipUncertain, open_manual_research_url)
 from .credential_store import CredentialStore, CredentialError
 from .oauth_clients import OAuthClientRegistry, OAuthClientRegistryError
 from .startup_probe import write_stage as _write_smoke_stage
@@ -212,8 +212,10 @@ class Studio(tk.Tk):
         now=time.monotonic()
         if now-getattr(self,"_browser_metrics_checked_at",0)>=15 and getattr(self,"research_browser",None):
             self._browser_metrics_checked_at=now
-            try:self._research_browser_show_metrics(self.research_browser.metrics())
-            except Exception:pass
+            if not getattr(self,"_browser_metrics_running",False):
+                self._browser_metrics_running=True
+                threading.Thread(target=self._research_browser_metrics_probe,
+                    name="zisu-browser-metrics",daemon=True).start()
         self.after(1000,self._tick)
         self.after(14000,self._scheduled_tick)
         if smoke_report:
@@ -1551,6 +1553,7 @@ class Studio(tk.Tk):
         self.research_browser_status=tk.StringVar(value="전용 인터넷 창: 닫힘 · 연구 시간에만 열 수 있어요")
         self._browser_alerted_schedules=set()
         self._browser_metrics_checked_at=0.0
+        self._browser_metrics_running=False
         self._browser_schedule_checked_at=0.0
         self.resource_status_text=tk.StringVar(value="컴퓨터 여유 있음 · 저부하 모드 권장")
         self._resource_was_waiting=False
@@ -1573,6 +1576,7 @@ class Studio(tk.Tk):
         browser_panel.grid(row=11,column=0,sticky="ew",pady=4)
         browser_buttons=ttk.Frame(browser_panel); browser_buttons.pack(fill="x",padx=4,pady=3)
         ttk.Button(browser_buttons,text="연구용 인터넷 창 열기",command=self._research_browser_open).pack(side="left",padx=3)
+        ttk.Button(browser_buttons,text="기본 브라우저에서 수동 열기",command=self._research_browser_manual_open).pack(side="left",padx=3)
         ttk.Button(browser_buttons,text="인터넷 창 닫기",command=self._research_browser_close).pack(side="left",padx=3)
         if self.research_browser.recovery_available:
             ttk.Button(browser_buttons,text="이전 연구 창 확인/닫기",command=self._research_browser_recover).pack(side="left",padx=3)
@@ -1988,15 +1992,21 @@ class Studio(tk.Tk):
                     if error:
                         messages={"resource":"컴퓨터가 바빠 새 연구 창을 열지 않았습니다.",
                             "ownership":"창 소유권을 확인하지 못해 다른 브라우저는 건드리지 않았습니다.",
-                            "unavailable":"Edge/Chrome 연구 창을 사용할 수 없습니다. 설치 상태를 확인하세요.",
+                            "unavailable":"전용 창을 열지 못했습니다. ‘기본 브라우저에서 수동 열기’를 선택할 수 있습니다.",
                             "unknown":"연구 창을 안전하게 처리하지 못했습니다. 다른 창은 종료하지 않았습니다."}
                         self.research_browser_status.set(messages.get(error,"연구 창 상태를 확인할 수 없습니다."))
                     elif event.get("operation")=="open":
                         self._research_browser_show_metrics(event["result"])
+                    elif event.get("operation")=="manual":
+                        self.research_browser_status.set(
+                            "기본 브라우저를 열었습니다. 이 창은 ZISU가 자동으로 닫지 않으며, 감상 메모는 ZISU에 저장됩니다."
+                            if event["result"] else "기본 브라우저를 열지 못했습니다. 브라우저를 직접 열거나 영상을 복사해 주세요.")
                     else:
                         result=event["result"]
+                        close_label=("정상 종료" if result.closed and not result.forced_process_ids else
+                            "소유한 응답 없는 프로세스 정리" if result.closed else "종료 확인 필요")
                         self.research_browser_status.set(
-                            f"전용 창 {'정상 종료' if result.closed else '종료 확인 필요'} · "
+                            f"전용 창 {close_label} · "
                             f"닫기 전 프로세스 메모리 {result.rss_before_bytes/(1024**2):.0f} MB · "
                             f"남은 프로세스 {len(result.residual_process_ids)}개 · "
                             f"현재 할 일: 휴식 또는 다음 연구 구간을 기다리세요.")
@@ -2006,6 +2016,9 @@ class Studio(tk.Tk):
                         self.research_browser_status.set(
                             f"연구 구간 종료 · 전용 창 {'정리 완료' if result.closed else '잔류 확인 필요'} · "
                             f"남은 프로세스 {len(result.residual_process_ids)}개 · 새 창은 휴식 중 열리지 않습니다.")
+                elif stage=="browser_metrics":
+                    if event.get("metrics") is not None:
+                        self._research_browser_show_metrics(event["metrics"])
                 elif stage=="resource_status":
                     self.resource_status_text.set(event.get("status","리소스 상태를 확인할 수 없습니다"))
                     if not event.get("allow",True):
@@ -2185,6 +2198,27 @@ class Studio(tk.Tk):
     def _research_browser_close(self):
         self._browser_operation("close")
 
+    def _research_browser_manual_open(self):
+        profile=self.current_profile()
+        if not profile or not self.selected_video:
+            messagebox.showinfo("영상 선택 필요","후보 영상 하나를 먼저 선택해 주세요.",parent=self)
+            return
+        schedule_id=getattr(self,"autopilot_schedule_id",None)
+        schedule=research_scheduler.get(schedule_id,profile["id"]) if schedule_id else None
+        if not schedule or schedule["state"]!="running" or schedule["phase"]!="research":
+            messagebox.showinfo("연구 시간 필요","영상은 연구 구간에 열 수 있어요. 먼저 연구를 시작해 주세요.",parent=self)
+            return
+        candidate=store.get_candidate(profile["id"],self.selected_video)
+        video_id=extract_video_id((candidate or {}).get("video_url") or self.selected_video)
+        if not video_id:
+            messagebox.showwarning("영상 주소 확인","선택한 후보의 YouTube 영상 주소를 확인할 수 없습니다.",parent=self)
+            return
+        if not messagebox.askyesno("기본 브라우저에서 수동 열기",
+                "선택한 영상 주소를 기본 브라우저에서 엽니다.\n"
+                "이 창은 ZISU가 관리하거나 자동으로 닫지 않습니다. 감상과 메모는 직접 진행해 주세요.\n\n계속할까요?",parent=self):
+            return
+        self._browser_operation("manual",f"https://www.youtube.com/watch?v={video_id}")
+
     def _research_browser_recover(self):
         try:
             metrics=self.research_browser.recover_owned_session()
@@ -2207,8 +2241,15 @@ class Studio(tk.Tk):
         self._browser_operation_running=True
         def work():
             try:
-                result=(self.research_browser.open_selected(url,user_approved=True) if operation=="open"
-                        else self.research_browser.close_owned())
+                if operation=="open":
+                    result=self.research_browser.open_selected(url,user_approved=True)
+                elif operation=="manual":
+                    decision=self.resource_guard.browser_allowed(self.research_browser.resource_sampler())
+                    if not decision.allow_new_work:
+                        raise BrowserResourceDeferred("resource limited")
+                    result=open_manual_research_url(url)
+                else:
+                    result=self.research_browser.close_owned()
                 self.autopilot_events.put({"stage":"browser","operation":operation,"result":result})
             except BrowserResourceDeferred:
                 self.autopilot_events.put({"stage":"browser","error":"resource"})
@@ -2228,6 +2269,15 @@ class Studio(tk.Tk):
             f"ZISU 소유 프로세스 {metrics.owned_process_count}개 · 메모리 {metrics.owned_rss_bytes/(1024**2):.0f} MB · "
             f"연구 구간 변화 {metrics.rss_change_bytes/(1024**2):+.0f} MB · "
             f"현재 할 일: 후보 영상을 선택해 직접 확인하거나 연구 구간을 마치세요.")
+
+    def _research_browser_metrics_probe(self):
+        try:
+            metrics=self.research_browser.metrics()
+            self.autopilot_events.put({"stage":"browser_metrics","metrics":metrics})
+        except Exception:
+            pass
+        finally:
+            self._browser_metrics_running=False
 
     def _research_browser_boundary_close(self, reason):
         if not self.research_browser.session:

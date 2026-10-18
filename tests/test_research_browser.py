@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
@@ -47,6 +48,22 @@ class ResearchBrowserTests(unittest.TestCase):
     def test_local_http_requires_explicit_integration_test_mode(self):
         self.assertEqual("http://127.0.0.1:8765/test",
             research_browser.validate_research_url("http://127.0.0.1:8765/test", allow_local_test=True))
+
+    def test_manual_browser_fallback_validates_url_without_taking_ownership(self):
+        opened=[]
+        result=research_browser.open_manual_research_url(
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            opener=lambda url,**kwargs: opened.append((url,kwargs)) or True)
+        self.assertTrue(result)
+        self.assertEqual("https://www.youtube.com/watch?v=abcdefghijk",opened[0][0])
+        self.assertEqual({"new":2,"autoraise":True},opened[0][1])
+        with self.assertRaises(ValueError):
+            research_browser.open_manual_research_url("https://example.com/")
+
+    def test_browser_frame_filter_ignores_uac_and_helper_windows(self):
+        self.assertTrue(research_browser._is_browser_main_window("Chrome_WidgetWin_1"))
+        self.assertFalse(research_browser._is_browser_main_window("UAC_InputIndicatorOverlayWnd"))
+        self.assertFalse(research_browser._is_browser_main_window("Chrome_RenderWidgetHostHWND"))
 
     def test_explicit_approval_and_resource_gate_precede_launch(self):
         executable = self.root / "mock-edge.exe"
@@ -122,7 +139,9 @@ class ResearchBrowserIntegrationTests(unittest.TestCase):
         if not executable:
             self.skipTest("Edge/Chrome is not installed")
         class Handler(BaseHTTPRequestHandler):
+            requested_paths=[]
             def do_GET(self):
+                self.requested_paths.append(self.path)
                 body = b"<html><head><title>ZISU local browser test</title></head><body>offline</body></html>"
                 self.send_response(200); self.send_header("Content-Length", str(len(body)))
                 self.end_headers(); self.wfile.write(body)
@@ -140,10 +159,18 @@ class ResearchBrowserIntegrationTests(unittest.TestCase):
             self.assertTrue(first.running)
             self.assertGreaterEqual(first.owned_process_count, 1)
             self.assertGreater(first.owned_rss_bytes, 0)
+            deadline=time.monotonic()+5
+            while "/first" not in Handler.requested_paths and time.monotonic()<deadline:
+                time.sleep(0.05)
             again = manager.open_selected(base + "/second", user_approved=True)
+            deadline=time.monotonic()+5
+            while "/second" not in Handler.requested_paths and time.monotonic()<deadline:
+                time.sleep(0.05)
             self.assertEqual(first.root_pid, again.root_pid)
             self.assertEqual(first.window_count, again.window_count)
             self.assertEqual(1, again.window_count)
+            self.assertIn("/first",Handler.requested_paths)
+            self.assertIn("/second",Handler.requested_paths)
             closed = manager.close_owned()
             self.assertTrue(closed.closed)
             self.assertEqual((), closed.residual_process_ids)

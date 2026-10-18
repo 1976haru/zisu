@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import webbrowser
 from urllib.parse import urlparse, parse_qs
 
 from .resource_guard import ResourceGuard, ResourceSnapshot, sample_resources
@@ -101,8 +102,8 @@ def validate_research_url(url: str, *, allow_local_test: bool = False) -> str:
 
 
 def find_browser() -> str | None:
-    """Find installed Edge or Chrome without installing or downloading a browser."""
-    candidates = [shutil.which("msedge"), shutil.which("chrome")]
+    """Prefer installed Edge, then Chrome; never install or download a browser."""
+    candidates = []
     if os.name == "nt":
         roots = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
                  os.environ.get("LOCALAPPDATA")]
@@ -110,10 +111,22 @@ def find_browser() -> str | None:
             if root:
                 candidates.extend((os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
                     os.path.join(root, "Google", "Chrome", "Application", "chrome.exe")))
+    candidates.extend((shutil.which("msedge"), shutil.which("chrome")))
+    seen = set()
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
-            return str(Path(candidate).resolve())
+            resolved = str(Path(candidate).resolve())
+            key = os.path.normcase(resolved)
+            if key not in seen:
+                seen.add(key)
+                return resolved
     return None
+
+
+def open_manual_research_url(url: str, *, opener=None) -> bool:
+    """Open a user-approved video in the default browser without claiming ownership."""
+    safe_url = validate_research_url(url)
+    return bool((opener or webbrowser.open)(safe_url, new=2, autoraise=True))
 
 
 class ResearchBrowserManager:
@@ -122,7 +135,7 @@ class ResearchBrowserManager:
     def __init__(self, *, app_data_root: str | os.PathLike | None = None,
                  executable: str | None = None, resource_guard: ResourceGuard | None = None,
                  resource_sampler=sample_resources, launcher=subprocess.Popen,
-                 allow_local_test: bool = False):
+                 allow_local_test: bool = False, startup_stability_seconds: float = 1.5):
         root = app_data_root or _default_app_data_root()
         self.root = Path(root)
         self.profile_root = self.root / "research-browser-profiles"
@@ -132,6 +145,7 @@ class ResearchBrowserManager:
         self.resource_sampler = resource_sampler
         self.launcher = launcher
         self.allow_local_test = bool(allow_local_test)
+        self.startup_stability_seconds = max(0.0, min(5.0, float(startup_stability_seconds)))
         self._lock = threading.RLock()
         self.session: BrowserSession | None = None
         self._recovery_record = self._load_recovery_record()
@@ -152,7 +166,8 @@ class ResearchBrowserManager:
                     raise BrowserOwnershipUncertain("전용 창을 정확히 하나로 확인하지 못해 다른 창을 열지 않았습니다.")
                 helper = self.launcher([self.session.executable,
                     f"--user-data-dir={self.session.profile_dir}", "--no-first-run",
-                    "--no-default-browser-check", "--disable-sync", safe_url],
+                    "--no-default-browser-check", "--disable-sync",
+                    *( ["--no-proxy-server"] if _is_local_test_url(safe_url) else [] ), safe_url],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
                 helper_identity = _process_identity(helper.pid)
@@ -187,7 +202,10 @@ class ResearchBrowserManager:
             command = [self.executable, f"--user-data-dir={profile}",
                        "--no-first-run", "--no-default-browser-check", "--disable-sync",
                        "--disable-background-mode", "--disable-background-networking",
-                       "--disable-component-update", "--new-window", safe_url]
+                       "--disable-component-update", "--new-window"]
+            if _is_local_test_url(safe_url):
+                command.append("--no-proxy-server")
+            command.append(safe_url)
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             try:
                 process = self.launcher(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -210,6 +228,16 @@ class ResearchBrowserManager:
                     self._refresh_owned_processes(self.session)
                     metrics = self.metrics()
                     if metrics.window_count == 1:
+                        stable_until = time.monotonic() + self.startup_stability_seconds
+                        while time.monotonic() < stable_until:
+                            self._refresh_owned_processes(self.session)
+                            if not self._alive_owned(self.session):
+                                exit_code = process.poll()
+                                detail = f" (종료 코드 {exit_code})" if exit_code is not None else ""
+                                raise BrowserError("연구용 브라우저가 창을 표시한 직후 종료되었습니다." + detail)
+                            if self.metrics().window_count != 1:
+                                raise BrowserError("연구용 브라우저 창이 계속 표시되는지 확인하지 못했습니다.")
+                            time.sleep(0.1)
                         break
                     if not self._alive_owned(self.session):
                         exit_code=process.poll()
@@ -246,7 +274,7 @@ class ResearchBrowserManager:
                                   _window_count(alive), tuple(sorted(set(alive) - {session.pid})),
                                   rss - session.initial_rss_bytes)
 
-    def close_owned(self, *, grace_seconds: float = 4.0) -> BrowserCloseResult:
+    def close_owned(self, *, grace_seconds: float = 10.0) -> BrowserCloseResult:
         with self._lock:
             session = self.session
             if session is None:
@@ -273,6 +301,11 @@ class ResearchBrowserManager:
                             and _same_executable(current[1], identity[1])):
                         if _terminate_owned_process(pid, identity):
                             forced.append(pid)
+                if session.process and session.pid in forced:
+                    try:
+                        session.process.wait(timeout=2)
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline and self._alive_owned(session):
                     self._refresh_owned_processes(session)
@@ -612,6 +645,8 @@ def _window_count(owned):
         get_pid = kernel.GetWindowThreadProcessId
         get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         get_pid.restype = wintypes.DWORD
+        kernel.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        kernel.GetClassNameW.restype = ctypes.c_int
         kernel.IsWindowVisible.argtypes = [wintypes.HWND]
         kernel.IsWindowVisible.restype = wintypes.BOOL
         found = []
@@ -619,7 +654,10 @@ def _window_count(owned):
         def visit(hwnd, _lparam):
             pid = wintypes.DWORD()
             get_pid(hwnd, ctypes.byref(pid))
-            if int(pid.value) in owned and kernel.IsWindowVisible(hwnd):
+            class_name = ctypes.create_unicode_buffer(128)
+            kernel.GetClassNameW(hwnd, class_name, len(class_name))
+            if (int(pid.value) in owned and kernel.IsWindowVisible(hwnd)
+                    and _is_browser_main_window(class_name.value)):
                 found.append(hwnd)
             return True
         kernel.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
@@ -639,6 +677,8 @@ def _close_owned_windows(pids):
         get_pid = kernel.GetWindowThreadProcessId
         get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         get_pid.restype = wintypes.DWORD
+        kernel.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        kernel.GetClassNameW.restype = ctypes.c_int
         kernel.IsWindowVisible.argtypes = [wintypes.HWND]
         kernel.IsWindowVisible.restype = wintypes.BOOL
         kernel.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
@@ -648,7 +688,10 @@ def _close_owned_windows(pids):
         def visit(hwnd, _lparam):
             pid = wintypes.DWORD()
             get_pid(hwnd, ctypes.byref(pid))
-            if int(pid.value) in pid_set and kernel.IsWindowVisible(hwnd):
+            class_name = ctypes.create_unicode_buffer(128)
+            kernel.GetClassNameW(hwnd, class_name, len(class_name))
+            if (int(pid.value) in pid_set and kernel.IsWindowVisible(hwnd)
+                    and _is_browser_main_window(class_name.value)):
                 kernel.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
             return True
         kernel.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
@@ -656,6 +699,16 @@ def _close_owned_windows(pids):
         kernel.EnumWindows(callback_type(visit), 0)
     except Exception:
         pass
+
+
+def _is_browser_main_window(class_name: str) -> bool:
+    # Chromium's top-level browser frame; excludes UAC/input overlays and helper windows.
+    return class_name == "Chrome_WidgetWin_1"
+
+
+def _is_local_test_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "http" and (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
 
 
 def _terminate_owned_process(pid, expected_identity=None):
