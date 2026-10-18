@@ -1,5 +1,11 @@
 # ZISU Integrated Project Status
 
+### Deferred feature registered: V46-GENRE-FLEX-01 (2026-10-18)
+
+- The requested generic, channel/profile-scoped genre and facet configuration has been added to `MASTER_BACKLOG.md` as **Deferred / not started**. It is sequenced after the existing active V4.6.0 P0/P1/P2 implementation and before the final cross-version consistency/security and six-hour QA phase.
+- Scope recorded: preserve the six existing genre IDs and user data; genre presets and custom genre CRUD/aliases/include/exclude terms; separate mood/audience/era/language/market facets; remove hard-coded genre-ID dependence from query/evaluation/diversification; fail closed for unsupported genre rules; additive SQLite migration; account/channel isolation; human-label-only evidence-based quality metrics; KR/JP/EN plus extensible search languages.
+- No feature code or tests were added for this deferred item; current progress score excludes it. Existing V4.6.0 work and user data are unchanged.
+
 ### P1/P2 offline verification batch (2026-10-18)
 
 - Scope: V46-03 verifier report correctness, V46-04 mechanical UI accessibility/scaling, V46-05 synthetic JP/KR genre-evaluation tooling, V46-06 HTTP 500 coverage, and V46-07 country/traffic Analytics fixture checks. No actual Chrome session, live Google/YouTube/Gemini call, user database, OAuth/DPAPI store, V4.5.9 install, final integration QA, or wall-clock six-hour run was used.
