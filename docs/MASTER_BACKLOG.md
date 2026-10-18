@@ -1,5 +1,12 @@
 # ZISU Master Backlog
 
+### V4.6.0 offline acceptance automation (2026-10-18)
+
+- Added `scripts/v46_offline_acceptance.py`: 8 scoped Mock/fake-clock areas, 23 representative acceptance cases, local `tests` namespace binding, JSON evidence with explicit failure/skipped test names, and no direct live API/account/browser calls. The script writes `dist/v46-offline-acceptance.json` and fails closed if a required test fails or skips.
+- The feature-branch Windows Actions now run this check before packaging, and include its JSON alongside the Windows release artifact. Commit `9f18e9fec524e093109b04da3867d44bafc8a441` passed Push CI `39117316473` and PR #4 CI `39117319193`: 23/23 offline acceptance PASS, existing unit/stress/GUI gates PASS, PyInstaller onefile/onedir, package verification, startup smoke and artifact upload PASS.
+- Report explicitly keeps real five-cycle Chrome, visual DPI, live OAuth/Google API, human-labeled search precision, live Analytics, six-hour wall-clock Windows EXE run and final cross-version stress/consistency **PENDING**. This is not a real-world verification upgrade or final release approval. Do not ask the user for repeated intermediate manual checks; run the final real-desktop acceptance only after remaining code and final regression/stress work.
+- Installed V4.5.9/user DB/OAuth/DPAPI and PR #2/`main` are not touched by these remote feature-branch changes. Local Codex worktree must fast-forward from the feature branch before editing it again.
+
 ### Windows CI timezone archive-check correction (2026-10-18)
 
 - Push/PR runs `39115099975` / `39115103718` failed in the onefile Pacific timezone archive gate, after tests, stress, GUI smoke, compile and both PyInstaller builds passed.
@@ -50,7 +57,7 @@ Each row has a fixed share of 100 effort points. Overall project progress is the
 
 | ID | Work | Version | Priority | State | Depends on | Done when | Tests / evidence | Progress |
 |---|---|---|---|---|---|---|---|---:|
-| V46-BRAND-01 | Apply the official ZISU SIGNAL LAB identity and slogan before final packaging | V4.6.0 | Source, onedir package and isolated Windows smoke verified; remote CI and installed-product visual review pending | V46-01 through V46-07; REL-01 | Display name `ZISU SIGNAL LAB`, Korean name `지수 시그널 랩`, slogan `채널 성장의 신호를 발견하다.` applied to title/start screen/icon/shortcut/EXE/help/package without changing internal modules, OAuth storage, DB or user-data paths | Brand/launcher tests 16/16; compileall, GUI smoke, Windows 10 onedir build, PE metadata/icon/archive checks, package ZIP SHA/manifest, isolated package validator 6/6 GUI runs pass. No actual install, GitHub CI, DPI screenshot, or V46-03 browser run | 95% estimated |
+| V46-BRAND-01 | Apply the official ZISU SIGNAL LAB identity and slogan before final packaging | V4.6.0 | Source, onedir package and Windows CI verified; installed-product visual review pending | V46-01 through V46-07; REL-01 | Display name `ZISU SIGNAL LAB`, Korean name `지수 시그널 랩`, slogan `채널 성장의 신호를 발견하다.` applied to title/start screen/icon/shortcut/EXE/help/package without changing internal modules, OAuth storage, DB or user-data paths | Brand/launcher tests 16/16; compileall, GUI smoke, Windows 10 onedir build, PE metadata/icon/archive checks, package ZIP SHA/manifest, isolated package validator 6/6 GUI runs pass. Remote Windows Push/PR CI PASS at 9f18e9f; no actual install, DPI screenshot, or V46-03 real browser run | 95% estimated |
 
 New requests are matched to these IDs first. Existing rows are extended instead of creating parallel implementations. No merge to `main` or PR #2 is authorized; PR #4 remains Draft.
 ### V46-03 latest lifecycle failure analysis (2026-10-18)

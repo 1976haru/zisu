@@ -1,13 +1,19 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-BRAND-01 Windows onedir/package smoke verified; V46-03 user Chrome gate unchanged)
+Last checked: 2026-10-18 (V4.6.0 23-case offline acceptance PASS in Windows GitHub CI; V46-03 real Chrome gate unchanged)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
-Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
+Working source on user's Windows: `D:\03 zisu\.test_tmp\history_audit` (not accessed in this GitHub-only task; its last local HEAD predates the new remote CI commits and must fast-forward before further Codex changes; parent checkout was not touched)
 V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implementation is committed on the requested feature branch (see current Git HEAD).
-Remote status: not refreshed; no push or CI was attempted in this local-only branding batch. PR #4 remains expected Draft from prior user-provided state; not checked live in this run. PR #2 and `main` were not touched.
+Remote status: feature-branch HEAD `9f18e9fec524e093109b04da3867d44bafc8a441`; PR #4 checked open/Draft. Push Actions `39117316473` and PR Actions `39117319193` both completed successfully (including new offline acceptance, Windows packaging and startup smoke). PR #2 and `main` were not touched.
 
 Latest estimates recomputed from the fixed backlog weights: overall ZISU **86.18%**; V4.5.9 stabilization/release scope **90.83%** across STAB-01/02/REL-01; V4.6.0 **79.20%** across its eight weighted rows; V46-03 **91%**; P0 V46-01/V46-02/V46-RESOURCE-01 **81.11%**. These are weighted implementation-maturity estimates, not test pass rates. The value changed because the current backlog row values supersede the stale 85%/76% summary; no external/real-world gate is being counted as passed.
+
+### New code-only CI acceptance gate
+
+- `scripts/v46_offline_acceptance.py`: 8 Mock/fake-clock suites, 23/23 PASS in both Windows Actions; machine-readable `dist/v46-offline-acceptance.json` uploaded inside the release artifact.
+- The JSON explicitly marks Chrome desktop X-close/reopen, DPI visual, real OAuth/Analytics/project quota, human search-quality scoring, six-hour real EXE and final full consistency/stress as PENDING. Neither these results nor the CI package replaces final real-desktop review.
+- Implementation-maturity estimates remain **86.18% overall / 79.20% V4.6.0**; code-only checks do not earn missing real-world verification points.
 
 ## Progress
 
