@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .store import db_path
+from .version import APP_VERSION
 
 
 def _module_available(name):
@@ -22,7 +23,7 @@ def _module_available(name):
 def collect(database=None):
     target = Path(database or db_path())
     report = {
-        "app_version": "4.5.9",
+        "app_version": APP_VERSION,
         "python": platform.python_version(),
         "platform": platform.platform(),
         "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -60,7 +61,7 @@ def format_report(report):
 
 
 def main():
-    print("ZISU Research Studio 안전 진단 (비밀정보 제외)")
+    print("ZISU SIGNAL LAB 안전 진단 (비밀정보 제외)")
     print(format_report(collect()))
 
 

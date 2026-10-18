@@ -5,6 +5,8 @@ import base64
 import math
 import struct
 
+from .version import DISPLAY_VERSION
+
 DISPLAY_NAME = "ZISU SIGNAL LAB"
 KOREAN_NAME = "지수 시그널 랩"
 SLOGAN = "채널 성장의 신호를 발견하다."
@@ -111,7 +113,7 @@ def ico_bytes(sizes=(16, 32, 48, 256)) -> bytes:
 
 def apply_window_branding(root) -> None:
     """Set the user-facing window title and a compact native Tk icon."""
-    root.title(f"{DISPLAY_NAME} · {KOREAN_NAME}")
+    root.title(f"{DISPLAY_NAME} · {KOREAN_NAME} · {DISPLAY_VERSION}")
     try:
         import tkinter as tk
         image = tk.PhotoImage(master=root, data=ppm_data(), format="PPM")

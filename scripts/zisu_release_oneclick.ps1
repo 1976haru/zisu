@@ -10,7 +10,7 @@ param(
     [string]$CommitMessage = 'chore: prepare verified ZISU release',
     [string]$PackageZip,
     [string]$ZipManifestPath,
-    [string]$ArtifactName = 'ZisuResearchStudio-Windows',
+    [string]$ArtifactName = 'ZISU-SIGNAL-LAB-V4.6.0-Windows',
     [string]$InstallDirectory = 'D:\03 zisu\ZISU_APP',
     [string]$DatabasePath = (Join-Path $env:LOCALAPPDATA 'ZisuResearchStudio\zisu_v2.db'),
     [string]$ResumeRunId,
@@ -232,7 +232,7 @@ try {
     $report.ci_run_id=$run.databaseId;Report-Step 'github_actions' 'PASS' "CI succeeded for commit $head."
     $artifact=Join-Path $script:RunRoot 'artifact'
     if(!(Test-Path -LiteralPath $artifact)){New-Item -ItemType Directory -Path $artifact|Out-Null;Invoke-GH gh @('run','download',[string]$run.databaseId,'--name',$ArtifactName,'--dir',$artifact)}
-    $z=Get-ChildItem -LiteralPath $artifact -Filter 'ZISU-Research-Studio-V*-Windows.zip' -File -Recurse|Select-Object -First 1
+    $z=Get-ChildItem -LiteralPath $artifact -Filter 'ZISU-SIGNAL-LAB-V*-Windows.zip' -File -Recurse|Select-Object -First 1
     $m=Get-ChildItem -LiteralPath $artifact -Filter 'RELEASE_SHA256SUMS.txt' -File -Recurse|Select-Object -First 1
     if(!$z -or !$m){throw 'CI artifact missing release ZIP or manifest.'};$facts=Get-PackageFacts $z.FullName $m.FullName;$report.package=$facts
     Report-Step 'artifact_download_hash' 'PASS' 'CI artifact ZIP and embedded EXE hash verified.'

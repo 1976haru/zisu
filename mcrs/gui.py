@@ -34,6 +34,7 @@ from .analytics import (AnalyticsClient, AnalyticsCredentialManager, AnalyticsEr
                         AnalyticsRepository, dashboard_view, project_scope_hash,
                         begin_analytics_consent)
 from .branding import DISPLAY_NAME, KOREAN_NAME, SLOGAN, apply_window_branding
+from .version import APP_VERSION, DISPLAY_VERSION
 from .dashboard_tree_state import snapshot as snapshot_dashboard_tree, restore as restore_dashboard_tree
 from .startup_probe import write_stage as _write_smoke_stage
 
@@ -237,7 +238,7 @@ class Studio(tk.Tk):
         """CI-only startup probe. It never performs OAuth or network requests."""
         self.update_idletasks()
         payload = {
-            "app_version": "4.5.9",
+            "app_version": APP_VERSION,
             "gui_initialized": len(self.frames) == 8 and len(self.tabs.tabs()) == 9 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
@@ -293,7 +294,7 @@ class Studio(tk.Tk):
             ttk.Label(identity,image=brand_icon).pack(side="left",padx=(0,10))
         brand_text=ttk.Frame(identity)
         brand_text.pack(side="left",anchor="w")
-        ttk.Label(brand_text,text=f"{DISPLAY_NAME} · {KOREAN_NAME}",
+        ttk.Label(brand_text,text=f"{DISPLAY_NAME} · {KOREAN_NAME} · {DISPLAY_VERSION}",
                   font=("Malgun Gothic",17,"bold")).pack(anchor="w")
         ttk.Label(brand_text,text=SLOGAN,font=("Malgun Gothic",9)).pack(anchor="w")
         bar=ttk.Frame(self,padding=(18,0))
@@ -319,7 +320,7 @@ class Studio(tk.Tk):
         content.bind("<Configure>",lambda _e:canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>",lambda event:canvas.itemconfigure(self._easy_canvas_window,width=event.width))
         content.columnconfigure(0,weight=1); content.columnconfigure(1,weight=1)
-        ttk.Label(content,text=f"{DISPLAY_NAME} · {KOREAN_NAME}",font=("Malgun Gothic",20,"bold")).grid(row=0,column=0,sticky="w",pady=(3,4))
+        ttk.Label(content,text=f"{DISPLAY_NAME} · {KOREAN_NAME} · {DISPLAY_VERSION}",font=("Malgun Gothic",20,"bold")).grid(row=0,column=0,sticky="w",pady=(3,4))
         ttk.Label(content,text=f"{SLOGAN}  Google 계정과 채널은 구분되며, 채널별 조사 기록과 인증은 서로 섞이지 않습니다.",
                   wraplength=1000).grid(row=1,column=0,columnspan=2,sticky="w",pady=(0,8))
         self.easy_progress=tk.StringVar(value="먼저 조사 채널을 만들거나 기존 채널을 선택하세요.")
@@ -1653,10 +1654,16 @@ class Studio(tk.Tk):
 
     def _help_ui(self,tab):
         tab.columnconfigure(0,weight=1)
-        tab.rowconfigure(2,weight=1)
-        ttk.Label(tab,text="각 채널별 검색 예약 · 프로그램이 켜져 있을 때만 동작").grid(row=0,column=0,sticky="w",pady=8)
+        tab.rowconfigure(3,weight=1)
+        identity=ttk.LabelFrame(tab,text="제품 정보",padding=8)
+        identity.grid(row=0,column=0,sticky="ew",pady=(0,8))
+        ttk.Label(identity,text=f"{DISPLAY_NAME} · {KOREAN_NAME} · {DISPLAY_VERSION}",
+                  font=("Malgun Gothic",12,"bold")).pack(anchor="w")
+        ttk.Label(identity,text=SLOGAN).pack(anchor="w")
+        ttk.Button(identity,text="정보 보기",command=self._show_about).pack(anchor="e",pady=(3,0))
+        ttk.Label(tab,text="각 채널별 검색 예약 · 프로그램이 켜져 있을 때만 동작").grid(row=1,column=0,sticky="w",pady=8)
         bar=ttk.Frame(tab)
-        bar.grid(row=1,column=0,sticky="ew",pady=6)
+        bar.grid(row=2,column=0,sticky="ew",pady=6)
         ttk.Label(bar,text="현재 채널 시간 (쉼표 구분)").pack(side="left")
         self.schedule_text=tk.StringVar(value="07:00,20:00")
         ttk.Entry(bar,textvariable=self.schedule_text,width=30).pack(side="left",padx=8)
@@ -1680,9 +1687,12 @@ class Studio(tk.Tk):
                "공식 정책: https://support.google.com/youtube/answer/3399767\n"
                "API 검색: https://developers.google.com/youtube/v3/docs/search/list")
         self.help_text=tk.Text(tab,font=("Malgun Gothic",11),wrap="word",bg="white",padx=16,pady=16)
-        self.help_text.grid(row=2,column=0,sticky="nsew",pady=10)
+        self.help_text.grid(row=3,column=0,sticky="nsew",pady=10)
         self.help_text.insert("1.0",guide)
         self.help_text.configure(state="disabled")
+
+    def _show_about(self):
+        messagebox.showinfo("제품 정보",f"{DISPLAY_NAME}\n{KOREAN_NAME}\n{SLOGAN}\n\n버전 {DISPLAY_VERSION}\n읽기 전용 조사 도구",parent=self)
 
     def _ai_research_ui(self,tab):
         tab.columnconfigure(0,weight=1)
