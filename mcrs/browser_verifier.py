@@ -118,7 +118,8 @@ def build_report(events, browser="", auto_summary=None):
                   if isinstance(item.get("owned_rss_bytes"), int)]
     payload = {"product": f"{DISPLAY_NAME} · {KOREAN_NAME}",
         "slogan": SLOGAN, "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "result": "PASS" if events and failures == 0 and all(item.get("state") == "PASS" for item in events) else "INCOMPLETE_OR_FAIL",
+        "result": ("CANCELLED" if (auto_summary or {}).get("final_verdict") == "CANCELLED" else
+                   "PASS" if events and failures == 0 and all(item.get("state") == "PASS" for item in events) else "INCOMPLETE_OR_FAIL"),
         "browser": browser, "events": events,
         "lifecycle_checks": ["A_INITIAL_OPEN", "B_REUSE", "C_USER_CLOSE_OBSERVED",
                              "D_REOPEN_AFTER_CLOSE", "E_DEDICATED_CLOSE", "F_RESIDUAL_PROCESS_CHECK"],
@@ -255,6 +256,13 @@ class BrowserVerifierApp:
         self.events: list[dict] = []
         self.messages: queue.Queue = queue.Queue()
         self._busy = False
+        self._closing = False
+        self._cancel_event = threading.Event()
+        self._worker_thread = None
+        self._close_deadline = None
+        self._event_lock = threading.RLock()
+        self._active_events = []
+        self._active_summary = None
         self._server = None
         self._server_thread = None
         self._manager = None
@@ -312,6 +320,9 @@ class BrowserVerifierApp:
         auto_button = ttk.Button(auto_row, text="전체 자동 테스트 시작", command=self._start_full_auto_test)
         auto_button.pack(side="left", fill="x", expand=True, ipady=8)
         self._buttons.append(auto_button)
+        self._cancel_button = ttk.Button(buttons, text="\uac80\uc0ac \uc911\ub2e8", command=self._request_cancel,
+                                         state="disabled")
+        self._cancel_button.pack(fill="x", pady=(4, 2), ipady=5)
         actions = (
             ("브라우저 열기 테스트", self._open_test),
             ("같은 창 재사용 테스트", self._reuse_test),
@@ -338,39 +349,109 @@ class BrowserVerifierApp:
             self._server, self._server_thread = create_local_server()
         return f"http://127.0.0.1:{self._server.server_port}"
 
-    def _stop_server(self):
+    def _stop_server(self, *, wait: bool = True):
         server, thread = self._server, self._server_thread
         self._server = None
         self._server_thread = None
         if server is not None:
-            try:
-                server.shutdown()
-            except (OSError, RuntimeError):
-                pass
-            try:
-                server.server_close()
-            except OSError:
-                pass
-        if thread and thread is not threading.current_thread():
-            thread.join(timeout=2)
+            def stop():
+                try:
+                    server.shutdown()
+                except (OSError, RuntimeError):
+                    pass
+                try:
+                    server.server_close()
+                except OSError:
+                    pass
+                if thread and thread is not threading.current_thread():
+                    thread.join(timeout=1)
+            if wait:
+                stop()
+            else:
+                threading.Thread(target=stop, name="zisu-local-server-shutdown", daemon=True).start()
 
     def _run_async(self, label, function, running_message=None):
-        if self._busy:
+        if self._busy or self._closing:
             return
         self._selected_browser = self.browser_var.get()
+        self._cancel_event = threading.Event()
+        cancel_event = self._cancel_event
         self._busy = True
         for button in self._buttons:
             button.configure(state="disabled")
+        self._cancel_button.configure(state="normal")
         self.status_var.set(running_message or f"{label} 중입니다. 잠시만 기다려 주세요.")
 
         def worker():
+            result = None
             try:
                 result = function()
                 passed = result.get("state") == "PASS" if isinstance(result, dict) and "state" in result else True
-                self.messages.put((passed, label, result))
             except Exception as exc:
-                self.messages.put((False, label, _safe_error_result(exc)))
-        threading.Thread(target=worker, name="zisu-browser-verifier", daemon=True).start()
+                result = _safe_error_result(exc)
+                passed = False
+            if cancel_event.is_set():
+                cleanup = {"ownership_verified": False, "closed": False, "residual_process_count": None}
+                manager = getattr(self, "_manager", None)
+                if manager and manager.session:
+                    try:
+                        evidence = manager.profile_ownership_evidence()
+                        cleanup["ownership_verified"] = bool(evidence.get("verified"))
+                        if evidence.get("verified"):
+                            closed = manager.close_owned(grace_seconds=3)
+                            cleanup.update({"closed": bool(closed.closed),
+                                            "residual_process_count": len(closed.residual_process_ids),
+                                            "residual_process_ids": list(closed.residual_process_ids)})
+                        else:
+                            cleanup["warning"] = "ownership_unverified_not_terminated"
+                    except Exception as exc:
+                        cleanup["warning"] = _safe_error_result(exc).get("error_type", "cleanup_failed")
+                if isinstance(result, dict):
+                    result["cancelled"] = True
+                    result["cancel_cleanup"] = cleanup
+                with self._event_lock:
+                    self._active_events.append({"step": "CANCEL_CLEANUP", "state": "PASS" if cleanup["closed"] or not getattr(getattr(self, "_manager", None), "session", None) else "INCOMPLETE",
+                        "event_stage": "SHUTDOWN", "timestamp_utc": datetime.now(timezone.utc).isoformat(), **cleanup})
+                    self._active_summary = {**(self._active_summary or {}), "final_verdict": "CANCELLED",
+                        "cancel_requested": True}
+                self._write_interrupted_report()
+                passed = False
+            self.messages.put((passed, label, result or {}))
+        self._worker_thread = threading.Thread(target=worker, name="zisu-browser-verifier", daemon=True)
+        self._worker_thread.start()
+
+    def _request_cancel(self):
+        if not self._busy:
+            return
+        self._cancel_event.set()
+        self._cancel_button.configure(state="disabled")
+        self.status_var.set("\uac80\uc0ac\ub97c \uc911\ub2e8\ud558\uace0 \uae30\ub85d\uc744 \uc800\uc7a5\ud558\uace0 \uc788\uc2b5\ub2c8\ub2e4.")
+        self._write_interrupted_report()
+
+    def _write_interrupted_report(self):
+        """Persist a bounded-time cancellation checkpoint without touching browser processes."""
+        try:
+            self.test_root.mkdir(parents=True, exist_ok=True)
+            report_path = self.test_root / "browser-verification-report.json"
+            with self._event_lock:
+                events = list(getattr(self, "events", [])) + list(self._active_events)
+                summary = dict(self._active_summary or {})
+            summary.update({"final_verdict": "CANCELLED", "cancel_requested": True,
+                            "report_path": str(report_path), "browser": self._selected_browser})
+            summary.setdefault("requested_cycles", 0)
+            summary.setdefault("completed_cycles", 0)
+            summary.setdefault("success_count", 0)
+            summary.setdefault("failure_count", 0)
+            summary.setdefault("residual_process_count", None)
+            summary.setdefault("max_owned_rss_bytes", 0)
+            summary.setdefault("max_owned_process_handle_count", 0)
+            temp = report_path.with_name(report_path.name + f".{threading.get_ident()}.tmp")
+            temp.write_text(json.dumps(build_report(events, self._selected_browser, summary),
+                                       ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+            os.replace(temp, report_path)
+        except Exception:
+            # GUI close/cancel must remain available even if diagnostics storage fails.
+            pass
 
     def _poll_messages(self):
         try:
@@ -380,6 +461,8 @@ class BrowserVerifierApp:
                     self.status_var.set(result.get("status_message", label))
                     continue
                 self._busy = False
+                self._worker_thread = None
+                self._cancel_button.configure(state="disabled")
                 for button in self._buttons:
                     button.configure(state="normal")
                 event = {"step": label, "state": "PASS" if ok else "FAIL",
@@ -436,6 +519,9 @@ class BrowserVerifierApp:
                         f"최대 메모리: {summary.get('max_owned_rss_bytes', 0)} bytes\n"
                         f"최종 판정: {summary['final_verdict']} · 보고서 저장 위치: {summary['report_path']}")
                 if result.get("close_app"):
+                    self._destroy()
+                    return
+                if self._closing:
                     self._destroy()
                     return
         except queue.Empty:
@@ -507,8 +593,10 @@ class BrowserVerifierApp:
             return True
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if getattr(self, "_cancel_event", None) and self._cancel_event.is_set():
+                return False
             try:
-                requested = self._server.requested_paths.get(timeout=0.15)
+                requested = self._server.requested_paths.get(timeout=min(0.15, max(0.01, deadline - time.monotonic())))
                 self._seen_paths.add(requested)
                 if requested == path:
                     return True
@@ -644,6 +732,15 @@ class BrowserVerifierApp:
 
     def _run_full_auto_test(self, cycles):
         """Run open/reuse/X-close/reopen cycles on a private loopback profile."""
+        cancel_event = getattr(self, "_cancel_event", None)
+        cancelled = False
+        lock = getattr(self, "_event_lock", None)
+        if lock:
+            with lock:
+                self._active_events = []
+                self._active_summary = {"requested_cycles": cycles, "completed_cycles": 0,
+                    "success_count": 0, "failure_count": 0, "residual_process_count": None,
+                    "max_owned_rss_bytes": 0, "max_owned_process_handle_count": 0}
         try:
             manager = self._manager_for_selected()
             base_url = self._ensure_server()
@@ -659,7 +756,7 @@ class BrowserVerifierApp:
             self.test_root.mkdir(parents=True, exist_ok=True)
             report_path = self.test_root / "browser-verification-report.json"
             summary["report_path"] = str(report_path)
-            temp = report_path.with_suffix(".tmp")
+            temp = report_path.with_name(report_path.name + f".{threading.get_ident()}.tmp")
             temp.write_text(json.dumps(build_report([event], self._selected_browser, summary),
                                         ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
             os.replace(temp, report_path)
@@ -680,6 +777,7 @@ class BrowserVerifierApp:
         baseline_profile_identity = None
 
         def emit(cycle, stage, state, **details):
+            nonlocal max_rss, max_handles
             metrics = manager.metrics() if manager.session else None
             profile_evidence = (manager.profile_ownership_evidence()
                                 if manager.session and hasattr(manager, "profile_ownership_evidence") else {})
@@ -719,24 +817,41 @@ class BrowserVerifierApp:
             }
             events.append(event)
             if isinstance(event.get("owned_rss_bytes"), int):
-                nonlocal max_rss
                 max_rss = max(max_rss, event["owned_rss_bytes"])
             if isinstance(event.get("owned_process_handle_count"), int):
-                nonlocal max_handles
                 max_handles = max(max_handles, event["owned_process_handle_count"])
+            lock = getattr(self, "_event_lock", None)
+            if lock:
+                with lock:
+                    self._active_events = list(events)
+                    self._active_summary = {"requested_cycles": cycles, "completed_cycles": completed,
+                        "success_count": successful, "failure_count": max(0, completed - successful),
+                        "residual_process_count": residual_count, "max_owned_rss_bytes": max_rss,
+                        "max_owned_process_handle_count": max_handles}
             return event
 
         try:
             for cycle in range(1, cycles + 1):
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
                 self.messages.put(("progress", "진행 중", {
                     "status_message": f"전체 자동 테스트 진행 중: {cycle}/{cycles}회 · 로컬 페이지 열기/재사용/닫기/재실행"}))
                 cycle_event_start = len(events)
                 cycle_ok = True
                 for action, stage in (("open", "A_INITIAL_OPEN"), ("reuse", "B_REUSE")):
+                    if cancel_event and cancel_event.is_set():
+                        cancelled = True
+                        break
                     route = f"/auto/{run_key}/{cycle}/{action}"
                     try:
                         initial = manager.open_selected(base_url + route, user_approved=True)
                         page_loaded = self._await_page(route, timeout=12.0)
+                        if cancel_event and cancel_event.is_set():
+                            cancelled = True
+                            emit(cycle, stage, "CANCELLED", page_load_confirmed=page_loaded,
+                                 failure_reason="검사 중단 요청을 반영했습니다.")
+                            break
                         stable = wait_for_window_state(manager.metrics, 1, timeout=8.0, stable_for=0.45)
                         ok = bool(page_loaded and stable and stable.window_count == 1)
                         evidence = manager.profile_ownership_evidence()
@@ -766,6 +881,10 @@ class BrowserVerifierApp:
                                 if not evidence.get("verified") or identity != baseline_profile_identity else None)
                             break
                     except Exception as exc:
+                        if cancel_event and cancel_event.is_set():
+                            cancelled = True
+                            emit(cycle, stage, "CANCELLED", failure_reason="검사 중단 요청을 반영했습니다.")
+                            break
                         err = _safe_error_result(exc)
                         # The manager can time out while Chromium has already
                         # loaded the loopback page. Reconcile using independent
@@ -798,6 +917,8 @@ class BrowserVerifierApp:
                                 or bool(manager.session and not evidence.get("verified")))
                             fatal_reason = err.get("message", "브라우저 소유권을 확인할 수 없습니다.") if ownership_uncertain else None
                             break
+                if cancelled:
+                    break
                 completed += 1
                 if cycle_ok:
                     try:
@@ -805,6 +926,11 @@ class BrowserVerifierApp:
                         close_pids = manager.request_close_owned_windows()
                         closed = wait_for_window_state(manager.metrics, 0, timeout=8.0, stable_for=0.35)
                         close_ok = bool(closed and closed.window_count == 0)
+                        if cancel_event and cancel_event.is_set():
+                            cancelled = True
+                            completed = max(0, completed - 1)
+                            emit(cycle, "SHUTDOWN_CANCEL_REQUESTED", "CANCELLED",
+                                 failure_reason="\uac80\uc0ac \uc911\ub2e8 \uc694\uccad\uc744 \ubc18\uc601\ud588\uc2b5\ub2c8\ub2e4.")
                         emit(cycle, "C_USER_CLOSE_OBSERVED", "PASS" if close_ok else "FAIL",
                              close_requested_pids=list(close_pids),
                              window_count_before_close=before_close.window_count,
@@ -812,10 +938,17 @@ class BrowserVerifierApp:
                              close_exit_code=closed.last_exit_code if closed else None,
                              close_reason=closed.last_close_reason if closed else "not_observed",
                              failure_reason=None if close_ok else "전용 창의 정상 닫힘을 제한 시간 안에 확인하지 못함")
-                        if close_ok:
+                        if close_ok and not cancelled:
                             route = f"/auto/{run_key}/{cycle}/reopen"
                             reopened = manager.open_selected(base_url + route, user_approved=True)
                             page_loaded = self._await_page(route, timeout=12.0)
+                            if cancel_event and cancel_event.is_set():
+                                cancelled = True
+                                completed = max(0, completed - 1)
+                                emit(cycle, "D_REOPEN_AFTER_CLOSE", "CANCELLED",
+                                     page_load_confirmed=page_loaded,
+                                     failure_reason="\uac80\uc0ac \uc911\ub2e8 \uc694\uccad\uc744 \ubc18\uc601\ud588\uc2b5\ub2c8\ub2e4.")
+                                break
                             stable = wait_for_window_state(manager.metrics, 1, timeout=8.0, stable_for=0.45)
                             evidence = manager.profile_ownership_evidence()
                             identity = _canonical_profile_identity(evidence.get("profile_path"))
@@ -942,16 +1075,18 @@ class BrowserVerifierApp:
                          failure_reason=err.get("message", "최종 정리 실패"), error_type=err.get("error_type"))
                     fatal_reason = fatal_reason or err.get("message", "최종 정리 실패")
 
-        failure_count = max(0, completed - successful)
+        failure_count = max(0, completed - successful - (1 if cancelled and completed > successful else 0))
         stage_failure_count = sum(item["state"] == "FAIL" for item in events
                                   if item.get("event_stage") in {"A_INITIAL_OPEN", "B_REUSE", "C_USER_CLOSE_OBSERVED", "D_REOPEN_AFTER_CLOSE"})
         if residual_count is None and manager.session is None:
             residual_count = 0
         summary_failure_reason = fatal_reason or next((item.get("failure_reason") for item in events
             if item.get("state") == "FAIL" and item.get("failure_reason")), None)
-        final_verdict = "PASS" if completed == cycles and successful == cycles and failure_count == 0 else "INCOMPLETE_OR_FAIL"
+        final_verdict = ("CANCELLED" if cancelled else
+                         "PASS" if completed == cycles and successful == cycles and failure_count == 0 else "INCOMPLETE_OR_FAIL")
         summary = {"requested_cycles": cycles, "completed_cycles": completed,
                    "success_count": successful, "failure_count": failure_count,
+                   "cancelled": cancelled,
                    "stage_failure_count": stage_failure_count,
                    "residual_process_count": residual_count, "max_owned_rss_bytes": max_rss,
                    "max_owned_process_handle_count": max_handles,
@@ -963,7 +1098,7 @@ class BrowserVerifierApp:
         all_events = list(self.events) + events
         all_events.append({"step": "AUTOMATIC_RUN_SUMMARY", "state": "PASS" if final_verdict == "PASS" else "FAIL",
                            "timestamp_utc": datetime.now(timezone.utc).isoformat(), **summary})
-        temp = report_path.with_suffix(".tmp")
+        temp = report_path.with_name(report_path.name + f".{threading.get_ident()}.tmp")
         temp.write_text(json.dumps(build_report(all_events, self._selected_browser, summary),
                                    ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
         os.replace(temp, report_path)
@@ -1015,7 +1150,7 @@ class BrowserVerifierApp:
             self.test_root.mkdir(parents=True, exist_ok=True)
             path = self.test_root / "browser-verification-report.json"
             payload = build_report(self.events, self._selected_browser or self.browser_var.get(), self._auto_summary)
-            temp = path.with_suffix(".tmp")
+            temp = path.with_name(path.name + f".{threading.get_ident()}.tmp")
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
             os.replace(temp, path)
             self.detail_var.set(f"보고서 저장 완료: {path}")
@@ -1026,7 +1161,7 @@ class BrowserVerifierApp:
                 "error_type": type(exc).__name__, "timestamp_utc": datetime.now(timezone.utc).isoformat()})
             messagebox.showerror("보고서 저장 실패", "테스트 폴더에 보고서를 저장하지 못했습니다. 사용자 문서 폴더 권한을 확인해 주세요.", parent=self.root)
 
-    def _on_close(self):
+    def _on_close_legacy(self):
         if self._busy:
             messagebox.showinfo("검증 진행 중", "현재 확인이 끝난 뒤 창을 닫아 주세요.", parent=self.root)
             return
@@ -1047,8 +1182,61 @@ class BrowserVerifierApp:
             return
         self._destroy()
 
-    def _destroy(self):
+    def _destroy_legacy(self):
         self._stop_server()
+        self.root.destroy()
+
+
+    def _on_close(self):
+        if self._busy:
+            self._closing = True
+            self._cancel_event.set()
+            self._close_deadline = time.monotonic() + 20.0
+            try:
+                self._cancel_button.configure(state="disabled")
+                self.status_var.set("\uC911\uB2E8 \uC694\uCCAD\uC744 \uBC18\uC601\uD558\uACE0 \uC548\uC804\uD558\uAC8C \uB2EB\uB294 \uC911\uC785\uB2C8\uB2E4.")
+            except Exception:
+                pass
+            self._write_interrupted_report()
+            self.root.after(100, self._finish_close_when_ready)
+            return
+        if self._manager and self._manager.session:
+            if not messagebox.askyesno("\uC804\uC6A9 \uBE0C\uB77C\uC6B0\uC800", "ZISU\uAC00 \uB9CC\uB4E0 \uC804\uC6A9 \uCC3D\uB9CC \uC815\uC0C1 \uC885\uB8CC\uD569\uB2C8\uB2E4. \uC77C\uBC18 Chrome/Edge\uB294 \uC885\uB8CC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.", parent=self.root):
+                return
+            def close_owned():
+                evidence = self._manager.profile_ownership_evidence()
+                if not evidence.get("verified"):
+                    self.events.append({"step": "SHUTDOWN_OWNERSHIP_UNCERTAIN", "state": "INCOMPLETE",
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat()})
+                    return {"close_app": True, "detail": "\uC18C\uC720\uAD8C\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC5B4 \uBE0C\uB77C\uC6B0\uC800\uB294 \uC885\uB8CC\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."}
+                result = self._manager.close_owned(grace_seconds=5)
+                return {"close_app": True, "detail": "\uC804\uC6A9 \uBE0C\uB77C\uC6B0\uC800 \uC815\uB9AC \uACB0\uACFC: " + ("PASS" if result.closed else "INCOMPLETE")}
+            self._run_async("\uC885\uB8CC \uC815\uB9AC", close_owned)
+            return
+        self._destroy()
+
+    def _finish_close_when_ready(self):
+        worker = getattr(self, "_worker_thread", None)
+        if worker is None or not worker.is_alive():
+            self._destroy()
+            return
+        if self._close_deadline is not None and time.monotonic() >= self._close_deadline:
+            with self._event_lock:
+                self._active_events.append({"step": "SHUTDOWN_DEADLINE", "state": "INCOMPLETE",
+                    "event_stage": "SHUTDOWN", "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "failure_reason": "\uC885\uB8CC \uC81C\uD55C \uC2DC\uAC04 \uC548\uC5D0 \uC791\uC5C5\uC774 \uB05D\uB098\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uC18C\uC720\uAD8C\uC774 \uBD88\uD655\uC2E4\uD55C \uBE0C\uB77C\uC6B0\uC800\uB294 \uC885\uB8CC\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."})
+            self._write_interrupted_report()
+            self._destroy()
+            return
+        self.root.after(100, self._finish_close_when_ready)
+
+    def _destroy(self):
+        if not getattr(self, "_busy", False) and getattr(self, "events", None):
+            try:
+                self._save_report()
+            except Exception:
+                pass
+        self._stop_server(wait=False)
         self.root.destroy()
 
 

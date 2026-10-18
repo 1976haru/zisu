@@ -1,5 +1,12 @@
 # ZISU Master Backlog
 
+### V46-03 verifier shutdown recovery (2026-10-18)
+
+- Root cause confirmed in the verifier UI: while `_busy`, the window-close handler rejected X and told the user to wait; the auto-run had no cancellation event, and app destruction synchronously shut down/joined the loopback server.
+- Added an explicit stop action and cooperative cancellation at loopback-page wait/stage boundaries. X requests cancellation, writes an atomic `CANCELLED` checkpoint immediately, then waits up to 20 seconds while the daemon worker safely finishes. At the deadline the GUI exits and records `INCOMPLETE`; it does not force-stop the worker or any browser.
+- Cleanup runs only after independent browser ownership verification. Unclear ownership is logged without termination. The local HTTP server shutdown now runs off the Tk thread on app exit. The existing profile-path/executable/PID ownership proof and ordinary-failure continuation rules are unchanged.
+- Focused verifier tests: **29/29 PASS** and browser-manager tests **15 PASS / 1 opt-in live-browser SKIP**; GUI smoke, compileall and diff checks pass. Final onedir verifier build on Windows 10 build 19045 launched with isolated LOCALAPPDATA and Python environment paths removed; title appeared, CloseMainWindow succeeded, process exited 0. Package manifest matches EXE; ZIP has 986 entries, 983 `_internal` files, zero unsafe paths or sensitive filenames. EXE SHA-256 `19f94cc0791e079d12ccb8f550bbb8fd715ebc2bb660cdf84c1fb226d7d987c0`; ZIP SHA-256 `7f813827639915e3066062efcbf6fa0e75d7dd81f4c5b9f711373ee4c6114ee4`. This confirms verifier GUI startup/idle shutdown only, not Chrome page lifecycle. Real user-desktop Chrome 5-cycle retest remains an external verification gate; V4.5.9 install and user data are untouched.
+
 This is the single prioritized implementation queue. Detailed scheduler requirements remain in [V4.6.0_RESEARCH_SCHEDULER.md](V4.6.0_RESEARCH_SCHEDULER.md); the historical [ROADMAP.md](ROADMAP.md) is retained and linked, not replaced. Current evidence and score are in [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 ## Progress method

@@ -1,6 +1,6 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 (V46-03 final verifier built and launched; 40 scoped tests; actual isolated Chrome 5/5 attempts failed before page load in this Codex session)
+Last checked: 2026-10-18 (V46-03 shutdown fix; 45 scoped checks: 44 PASS and 1 opt-in browser SKIP; final verifier GUI/package checks PASS)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
@@ -8,6 +8,13 @@ V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implem
 Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
+
+### Latest V46-03 shutdown correction
+
+- Confirmed cause: the previous close handler blocked X during `_busy` and instructed the user to wait; the automated run lacked a cooperative stop event. Final UI destruction also performed loopback server shutdown/join synchronously on the Tk thread.
+- Added a stop button, cancellation checkpoints, atomic `CANCELLED` report checkpoint, and X-close cancellation. Shutdown gives the worker up to 20 seconds to complete safe cleanup, then closes the GUI with an `INCOMPLETE` diagnostic rather than waiting indefinitely. Browser cleanup remains strictly gated on exact ownership verification; uncertain browser processes are never forcibly ended.
+- Loopback server shutdown is dispatched off the UI thread on final close. Focused verifier suite: 29/29 PASS; browser-manager suite: 15 PASS / 1 opt-in live-browser SKIP; `compileall`, GUI smoke, and `git diff --check` PASS. New onedir EXE was run on Windows 10 build 19045 with isolated `LOCALAPPDATA`, `PYTHONPATH`/`PYTHONHOME` removed and PATH limited to Windows system folders; its V46-03 window title appeared, normal close succeeded and exit code was 0. This does not validate the Chrome page lifecycle.
+- Final replacement verifier EXE: `D:\03 zisu\.test_tmp\history_audit\_local_backups\V46-03_ShutdownFixRelease_20261018_171459\dist\ZISU_V46-03_Browser_Verifier\ZISU_V46-03_Browser_Verifier.exe`; SHA-256 `19f94cc0791e079d12ccb8f550bbb8fd715ebc2bb660cdf84c1fb226d7d987c0`. ZIP SHA-256 `7f813827639915e3066062efcbf6fa0e75d7dd81f4c5b9f711373ee4c6114ee4`; manifest matches, 986 archive entries / 983 `_internal`, zero unsafe paths or sensitive filenames. The EXE GUI launched on Windows 10 build 19045, displayed its title, accepted normal close, and exited 0 with isolated `LOCALAPPDATA` and Python paths removed. Not installed over V4.5.9. Actual user-desktop 5-cycle Chrome test remains pending.
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 

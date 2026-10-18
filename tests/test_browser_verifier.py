@@ -180,7 +180,7 @@ class BrowserVerifierTests(unittest.TestCase):
         app.test_root = Path.cwd() / ".test_tmp" / f"auto-verifier-{uuid.uuid4().hex}"
         app.events = []
         app.messages = __import__("queue").Queue()
-        with patch("mcrs.browser_verifier.browser_processes", return_value=set()), \
+        with patch("mcrs.browser_verifier.browser_processes", return_value={("chrome.exe", 999)}), \
                 patch("mcrs.browser_verifier._process_handle_count", return_value=4):
             result = app._run_full_auto_test(5)
         try:
@@ -195,11 +195,22 @@ class BrowserVerifierTests(unittest.TestCase):
             self.assertTrue(any(event["event_stage"] == "D_REOPEN_AFTER_CLOSE"
                                 for event in payload["events"]))
             self.assertEqual(app._manager.open_count, 15)
+            shutdown = next(event for event in payload["events"]
+                            if event.get("event_stage") == "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK")
+            self.assertTrue(shutdown["baseline_browser_pids_preserved"])
+            self.assertEqual(0, shutdown["residual_process_count"])
             cycles = [event for event in payload["events"] if event.get("event_stage") == "CYCLE_SUMMARY"]
             self.assertEqual(len(cycles), 5)
             self.assertTrue(all(event["same_isolated_profile"] and event["profile_ownership_verified"]
                                 for event in cycles))
             self.assertTrue(all(event["profile_path"] for event in cycles))
+            class Root:
+                destroyed = False
+                def destroy(self): self.destroyed = True
+            app._busy = False; app._closing = False; app._server = app._server_thread = None
+            app.root = Root()
+            app._on_close()
+            self.assertTrue(app.root.destroyed)
         finally:
             app._stop_server()
             # Test profile is disposable test data, not a user/browser profile.
@@ -396,6 +407,122 @@ class BrowserVerifierTests(unittest.TestCase):
             self.assertIn(module, text)
         self.assertIn("'--onedir'", text)
         self.assertNotIn("'--onefile'", text)
+
+    def test_close_during_busy_check_requests_cancel_and_saves_report_without_waiting(self):
+        import threading, time
+        from mcrs.browser_verifier import BrowserVerifierApp
+
+        class Root:
+            def __init__(self): self.callbacks = []; self.destroyed = False
+            def after(self, delay, callback): self.callbacks.append((delay, callback))
+            def destroy(self): self.destroyed = True
+        class Widget:
+            def configure(self, **kwargs): self.options = kwargs
+            def set(self, value): self.value = value
+        class Worker:
+            def is_alive(self): return True
+
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._busy = True; app._closing = False; app._cancel_event = threading.Event()
+        app._worker_thread = Worker(); app._close_deadline = None
+        app._server = app._server_thread = None
+        app._event_lock = threading.RLock(); app._active_events = []; app._active_summary = None
+        app._selected_browser = "Google Chrome"; app.events = []
+        app.test_root = Path(".test_tmp") / f"cancel-report-{uuid.uuid4().hex}"
+        app.root = Root(); app._cancel_button = Widget(); app.status_var = Widget()
+        started = __import__("time").monotonic()
+        app._on_close()
+        elapsed = __import__("time").monotonic() - started
+        try:
+            self.assertTrue(app._cancel_event.is_set())
+            self.assertTrue(app._closing)
+            self.assertLess(elapsed, 1.0)
+            report = app.test_root / "browser-verification-report.json"
+            self.assertTrue(report.is_file())
+            self.assertEqual("CANCELLED", json.loads(report.read_text(encoding="utf-8"))["final_verdict"])
+            app._close_deadline = time.monotonic() - 1
+            app._finish_close_when_ready()
+            self.assertTrue(app.root.destroyed)
+        finally:
+            import shutil
+            if app.test_root.exists(): shutil.rmtree(app.test_root)
+
+    def test_close_before_check_and_after_browser_failure_does_not_block(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+
+        class Root:
+            destroyed = False
+            def destroy(self): self.destroyed = True
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._busy = False; app._server = app._server_thread = None
+        app.root = Root(); app._closing = False; app._manager = None
+        app._on_close()
+        self.assertTrue(app.root.destroyed)
+
+        # A failed worker has already completed: closing must not ask for manual browser X.
+        app.root = Root(); app._busy = False; app._server = app._server_thread = None
+        app._manager = None
+        app._on_close()
+        self.assertTrue(app.root.destroyed)
+
+    def test_cancel_button_stops_auto_loop_and_final_report_is_saved(self):
+        import threading, queue
+        from mcrs.browser_verifier import BrowserVerifierApp
+
+        class FakeManager:
+            def __init__(self, event):
+                self.event = event; self.profile_dir = Path(".test_tmp") / f"owned-{uuid.uuid4().hex}"
+                self.profile_dir.mkdir(parents=True); self.session = SimpleNamespace(profile_dir=str(self.profile_dir))
+                self.close_calls = 0
+            def metrics(self): return BrowserMetrics(bool(self.session), 400 if self.session else None, 1, 100,
+                1 if self.session else 0, (401,) if self.session else (), lifecycle_state="OPEN" if self.session else "CLOSED")
+            def profile_ownership_evidence(self): return {"verified": True, "profile_path": str(self.profile_dir), "owned_pids": [400]}
+            def open_selected(self, *_args, **_kwargs): self.event.set(); return self.metrics()
+            def close_owned(self, **_kwargs):
+                self.close_calls += 1; self.session = None
+                return SimpleNamespace(closed=True, forced_process_ids=(), residual_process_ids=(),
+                    rss_before_bytes=100, rss_after_bytes=0)
+
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._selected_browser = "Google Chrome"; app._server = app._server_thread = None
+        app.test_root = Path(".test_tmp") / f"cancel-auto-{uuid.uuid4().hex}"
+        app.events = []; app.messages = queue.Queue(); app._seen_paths = set()
+        app._baseline_processes = set(); app._cancel_event = threading.Event()
+        app._event_lock = threading.RLock(); app._active_events = []; app._active_summary = None
+        manager = FakeManager(app._cancel_event); app._manager = manager
+        app._manager_for_selected = lambda: manager
+        try:
+            result = app._run_full_auto_test(5)
+            self.assertEqual("CANCELLED", result["final_verdict"])
+            self.assertEqual(0, result["auto_summary"]["success_count"])
+            self.assertEqual(1, manager.close_calls)
+            report = json.loads(Path(result["auto_summary"]["report_path"]).read_text(encoding="utf-8"))
+            self.assertEqual("CANCELLED", report["final_verdict"])
+        finally:
+            app._stop_server()
+            import shutil
+            if app.test_root.exists(): shutil.rmtree(app.test_root)
+
+    def test_interrupted_report_is_explicitly_cancelled_not_pass(self):
+        payload = build_report([], "Google Chrome", {"final_verdict": "CANCELLED", "completed_cycles": 1})
+        self.assertEqual("CANCELLED", payload["result"])
+        self.assertEqual("CANCELLED", payload["final_verdict"])
+
+    def test_gui_destroy_never_waits_for_local_server_shutdown(self):
+        import threading, time
+        from mcrs.browser_verifier import BrowserVerifierApp
+        class SlowServer:
+            def shutdown(self): time.sleep(2)
+            def server_close(self): pass
+        class Root:
+            destroyed = False
+            def destroy(self): self.destroyed = True
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._server = SlowServer(); app._server_thread = None; app.root = Root()
+        started = time.monotonic()
+        app._destroy()
+        self.assertTrue(app.root.destroyed)
+        self.assertLess(time.monotonic() - started, 0.5)
 
 
 if __name__ == "__main__":
