@@ -26,7 +26,8 @@ _SAFE_FAILURES = {
     "local_callback": "브라우저 인증 후 로컬 127.0.0.1 콜백에 연결할 수 없습니다. 방화벽/VPN/로컬 보안 정책을 확인하세요.",
     "network_timeout": "Google 인증 요청이 시간 초과되었습니다. 네트워크를 확인하고 다시 시도하세요.",
     "token_storage": "인증 토큰을 로컬 사용자 폴더에 저장하지 못했습니다. 폴더 권한과 사용 가능한 공간을 확인하세요.",
-    "account_mismatch": "이미 연결된 Google 계정 또는 YouTube 채널과 다릅니다. 프로필 연결 변경을 명시적으로 확인하세요.",
+    "account_mismatch": "기존 Google 계정/채널 연결과 다르거나 이 프로필에 진행·저장 자료가 있어 변경하지 않았습니다. 자료를 분리하려면 새 프로필을 사용하세요.",
+    "account_identity": "Google 계정 이메일을 확인하지 못했습니다. 계정 확인이 끝날 때까지 연결을 저장하지 않았습니다.",
     "client_config": "Desktop OAuth JSON 형식이 올바르지 않습니다. 원본 파일을 확인하고 다시 선택하세요.",
     "unknown": "Google 인증을 완료하지 못했습니다. 계정, 네트워크, 테스트 사용자 및 OAuth 설정을 확인하세요.",
 }
@@ -307,15 +308,24 @@ def save_connection(profile_id, channel, token_json, *, allow_account_change=Fal
     new_email=(channel.get("email") or "").strip().casefold()
     old_channel=(profile.get("youtube_channel_id") or "").strip()
     new_channel=(channel.get("channel_id") or "").strip()
-    if previous_token and ((old_email and new_email and old_email != new_email) or
-                           (old_channel and old_channel != new_channel)) and not allow_account_change:
+    if not new_email:
+        raise OAuthError(code="account_identity", stage="account_binding")
+    if ((old_email and old_email != new_email) or
+        (old_channel and old_channel != new_channel)) and not allow_account_change:
         raise OAuthError(code="account_mismatch", stage="account_binding")
     try:
         _write_token(path, token_json)
     except OSError:
         raise OAuthError(code="token_storage", stage="token_storage") from None
     try:
-        store.bind_youtube_channel(profile_id, channel.get('channel_id',''), channel['channel_title'], channel.get('email',''))
+        store.bind_youtube_channel(profile_id, channel.get('channel_id',''), channel['channel_title'],
+                                   channel.get('email',''), allow_account_change=allow_account_change)
+    except ValueError:
+        if previous_token is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write_token(path, previous_token)
+        raise OAuthError(code="account_mismatch", stage="account_binding") from None
     except Exception:
         if previous_token is None:
             path.unlink(missing_ok=True)

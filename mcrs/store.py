@@ -120,6 +120,16 @@ def initialize(path=None):
           market TEXT NOT NULL CHECK(market IN ('JP','KR')), genre TEXT NOT NULL,
           schedule TEXT NOT NULL DEFAULT '07:00,20:00',
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS google_accounts (
+          id TEXT PRIMARY KEY, email TEXT NOT NULL DEFAULT '', normalized_email TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_google_accounts_email
+          ON google_accounts(normalized_email) WHERE normalized_email<>'';
+        CREATE TABLE IF NOT EXISTS google_account_channels (
+          account_id TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '', channel_title TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(account_id,channel_id),
+          FOREIGN KEY(account_id) REFERENCES google_accounts(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS candidates (
           profile_id TEXT NOT NULL, video_id TEXT NOT NULL, video_title TEXT NOT NULL,
           channel_title TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL DEFAULT '',
@@ -227,6 +237,7 @@ def initialize(path=None):
             "youtube_channel_title TEXT NOT NULL DEFAULT ''",
             "connected_at TEXT NOT NULL DEFAULT ''",
             "connected_email TEXT NOT NULL DEFAULT ''",
+            "google_account_id TEXT NOT NULL DEFAULT ''",
             "subgenre TEXT NOT NULL DEFAULT ''",
             "related_genres_json TEXT NOT NULL DEFAULT '[]'",
             "comment_persona_name TEXT NOT NULL DEFAULT ''",
@@ -255,6 +266,23 @@ def initialize(path=None):
             _add_column(db, "research_sessions", definition)
         db.execute("UPDATE genre_audit SET rule_verdict=predicted_decision WHERE rule_verdict=''")
         db.execute("UPDATE genre_audit SET review_status='human_reviewed' WHERE human_label<>'' AND review_status='needs_review'")
+        # Additive migration: link existing profile identities to an account and
+        # channel registry without moving, copying, or rewriting OAuth tokens.
+        rows = db.execute("SELECT id,connected_email,youtube_channel_id,youtube_channel_title,google_account_id "
+                          "FROM profiles WHERE connected_email<>''").fetchall()
+        for row in rows:
+            normalized = (row["connected_email"] or "").strip().casefold()
+            account = db.execute("SELECT id FROM google_accounts WHERE normalized_email=?", (normalized,)).fetchone()
+            account_id = account["id"] if account else uuid.uuid4().hex
+            if not account:
+                db.execute("INSERT INTO google_accounts(id,email,normalized_email) VALUES(?,?,?)",
+                           (account_id,row["connected_email"],normalized))
+            db.execute("UPDATE profiles SET google_account_id=? WHERE id=? AND google_account_id=''",
+                       (account_id,row["id"]))
+            db.execute("INSERT INTO google_account_channels(account_id,channel_id,channel_title) VALUES(?,?,?) "
+                       "ON CONFLICT(account_id,channel_id) DO UPDATE SET "
+                       "channel_title=CASE WHEN excluded.channel_title='' THEN channel_title ELSE excluded.channel_title END",
+                       (account_id,row["youtube_channel_id"] or "",row["youtube_channel_title"] or ""))
 
 def create_profile(name, market, genre, path=None, subgenre="", related_genres=None):
     initialize(path)
@@ -291,6 +319,85 @@ def get_profile(profile_id, path=None):
     with connect(path) as db:
         row = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
         return dict(row) if row else None
+
+def list_google_accounts(path=None):
+    """List account/channel relationships without exposing credentials."""
+    initialize(path)
+    with connect(path) as db:
+        accounts = [dict(row) for row in db.execute(
+            "SELECT * FROM google_accounts ORDER BY lower(email),id")]
+        for account in accounts:
+            account["channels"] = [dict(row) for row in db.execute(
+                "SELECT channel_id,channel_title FROM google_account_channels WHERE account_id=? "
+                "ORDER BY channel_title,channel_id", (account["id"],))]
+            account["profiles"] = [dict(row) for row in db.execute(
+                "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title "
+                "FROM profiles WHERE google_account_id=? ORDER BY name,id", (account["id"],))]
+    return accounts
+
+def list_account_profiles(account_id, path=None):
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(
+            "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title "
+            "FROM profiles WHERE google_account_id=? ORDER BY name,id", (account_id,))]
+
+def bind_google_account_channel(profile_id, channel_id, channel_title, email="", *, allow_account_change=False, path=None):
+    """Bind a profile to an account and one authenticated channel in one DB transaction."""
+    email = (email or "").strip()
+    normalized = email.casefold()
+    if not normalized:
+        raise ValueError("Google 계정 이메일을 확인하지 못했습니다. 계정 확인 전에는 연결을 저장하지 않았습니다.")
+    if channel_id and not (channel_id.startswith("UC") and len(channel_id) > 4):
+        raise ValueError("올바르지 않은 YouTube 채널 ID입니다.")
+    if not (channel_title or "").strip():
+        raise ValueError("표시할 Google 계정 또는 채널 이름이 필요합니다.")
+    with connect(path) as db:
+        profile = db.execute("SELECT google_account_id,connected_email,youtube_channel_id FROM profiles WHERE id=?",
+                             (profile_id,)).fetchone()
+        if not profile:
+            raise ValueError("연결할 프로필을 찾을 수 없습니다.")
+        account = db.execute("SELECT id FROM google_accounts WHERE normalized_email=?", (normalized,)).fetchone()
+        account_id = account["id"] if account else uuid.uuid4().hex
+        if not account:
+            db.execute("INSERT INTO google_accounts(id,email,normalized_email) VALUES(?,?,?)",
+                       (account_id,email,normalized))
+        old_account = profile["google_account_id"] or ""
+        old_email = (profile["connected_email"] or "").strip().casefold()
+        old_channel = profile["youtube_channel_id"] or ""
+        changed = ((old_account and old_account != account_id) or
+                   (old_email and old_email != normalized) or
+                   (old_channel and old_channel != (channel_id or "")))
+        if changed and not allow_account_change:
+            raise ValueError("이미 연결된 Google 계정 또는 채널과 다릅니다. 기존 연결 변경을 명시적으로 확인하세요.")
+        if changed:
+            has_history = any(db.execute(sql,(profile_id,)).fetchone() for sql in (
+                "SELECT 1 FROM candidates WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM genre_audit WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM ai_reviews WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM metrics WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM research_sessions WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM research_schedules WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM autopilot_reports WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM autopilot_comment_drafts WHERE profile_id=? LIMIT 1",
+            ))
+            if has_history:
+                raise ValueError("이 프로필에는 기존 조사 자료가 있어 다른 계정/채널로 바꾸지 않았습니다. 자료 격리를 위해 새 프로필을 사용하세요.")
+            active_session = db.execute(
+                "SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('running','paused','interrupted') LIMIT 1",
+                (profile_id,)).fetchone()
+            active_schedule = db.execute(
+                "SELECT 1 FROM research_schedules WHERE profile_id=? AND state IN ('scheduled','running','paused') LIMIT 1",
+                (profile_id,)).fetchone()
+            if active_session or active_schedule:
+                raise ValueError("진행 중이거나 이어하기 대기 중인 조사가 있어 계정 연결을 바꾸지 않았습니다. 먼저 해당 작업을 안전하게 중단하거나 완료하세요.")
+        db.execute("INSERT INTO google_account_channels(account_id,channel_id,channel_title) VALUES(?,?,?) "
+                   "ON CONFLICT(account_id,channel_id) DO UPDATE SET channel_title=excluded.channel_title, "
+                   "updated_at=CURRENT_TIMESTAMP", (account_id,channel_id or "",channel_title.strip()))
+        db.execute("UPDATE google_accounts SET email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (email,account_id))
+        db.execute("UPDATE profiles SET google_account_id=?,youtube_channel_id=?,youtube_channel_title=?, "
+                   "connected_email=?,connected_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (account_id,channel_id or "",channel_title.strip(),email,profile_id))
+    return account_id
 
 def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None, related_genres=None):
     name = (name or "").strip()
@@ -439,19 +546,13 @@ def backup(target, path=None):
     with connect(path) as source, closing(sqlite3.connect(target)) as destination:
         source.backup(destination)
 
-def bind_youtube_channel(profile_id, channel_id, channel_title, email="", path=None):
-    if channel_id and not (channel_id.startswith("UC") and len(channel_id) > 4):
-        raise ValueError("올바르지 않은 YouTube 채널 ID입니다.")
-    if not channel_title.strip():
-        raise ValueError("표시할 Google 계정 또는 채널 이름이 필요합니다.")
-    with connect(path) as db:
-        result = db.execute("UPDATE profiles SET youtube_channel_id=?,youtube_channel_title=?,connected_email=?,connected_at=CURRENT_TIMESTAMP WHERE id=?", (channel_id,channel_title,email,profile_id))
-        if result.rowcount != 1:
-            raise ValueError("연결할 프로필을 찾을 수 없습니다.")
+def bind_youtube_channel(profile_id, channel_id, channel_title, email="", path=None, *, allow_account_change=False):
+    return bind_google_account_channel(profile_id,channel_id,channel_title,email,
+                                       allow_account_change=allow_account_change,path=path)
 
 def unbind_youtube_channel(profile_id, path=None):
     with connect(path) as db:
-        db.execute("UPDATE profiles SET youtube_channel_id='',youtube_channel_title='',connected_email='',connected_at='' WHERE id=?", (profile_id,))
+        db.execute("UPDATE profiles SET google_account_id='',youtube_channel_id='',youtube_channel_title='',connected_email='',connected_at='' WHERE id=?", (profile_id,))
 
 def list_genre_audit(profile_id, decision="전체", labeled=None, path=None):
     sql, args = "SELECT * FROM genre_audit WHERE profile_id=?", [profile_id]

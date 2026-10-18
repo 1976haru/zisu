@@ -613,7 +613,7 @@ class Studio(tk.Tk):
         ttk.Button(panel,text="연결 상태 새로고침",command=self.refresh_account_status).grid(row=3,column=0,sticky="w",pady=8)
         ttk.Button(panel,text="선택 프로필 연결 해제",command=self.disconnect_google).grid(row=3,column=1,sticky="w",pady=8,padx=15)
         ttk.Label(panel,textvariable=self.oauth_client_file,wraplength=800,foreground="#697A88").grid(row=4,column=0,columnspan=3,sticky="w",pady=7)
-        ttk.Label(panel,text="프로필별 Google 계정 / 채널 목록 (프로필 전환은 상단 선택기에서)").grid(row=5,column=0,columnspan=3,sticky="w",pady=(8,2))
+        ttk.Label(panel,text="Google 계정 → 인증된 YouTube 채널 → 연결 프로필 (각 프로필 토큰은 별도 저장)").grid(row=5,column=0,columnspan=3,sticky="w",pady=(8,2))
         ttk.Label(panel,textvariable=self.oauth_accounts_summary,wraplength=950,justify="left").grid(row=6,column=0,columnspan=3,sticky="w",pady=3)
         ttk.Button(panel,text="Google Cloud 없이 먼저 유튜브 열기 (브라우저 로그인만)",
                    command=lambda:webbrowser.open("https://www.youtube.com/",new=2)).grid(row=7,column=0,columnspan=3,sticky="w",pady=7)
@@ -628,7 +628,7 @@ class Studio(tk.Tk):
                       "    (유튜브 채널을 아직 만들지 않은 조사 전용 구글 계정도 연결 가능)\n\n"
                       "간편 체험: 위 '유튜브 열기'로 새 계정에 로그인하고 웹 검색만 먼저 써도 됩니다.\n"
                       "(브라우저 로그인은 앱의 OAuth 계정 연결과 별개입니다.)\n"
-                      "계정별 토큰은 프로필별로 따로 저장됩니다. 같은 계정을 여러 프로필에서 쓸 때도 각각 연결해야 하며 토큰을 자동 복사하지 않습니다.\n"
+                      "한 Google 계정에 접근 가능한 여러 채널은 각각 별도 프로필에 연결할 수 있습니다. 같은 계정의 각 프로필도 다시 승인해야 하며 토큰은 프로필별로 따로 저장됩니다. 토큰을 자동 복사하지 않습니다.\n"
                       "중요: JP/KR 지역 검색은 해당 지역에서 볼 수 있는 영상을 찾는 것으로, 현지 운영자 인증이 아닙니다.\n"
                       "계정 연결은 유튜브 홈 추천, 접속 IP, 시청자 지역을 변경하지 않습니다.\n"
                       "댓글·좋아요·구독·영상 자동재생은 실행되지 않습니다.")
@@ -695,9 +695,17 @@ class Studio(tk.Tk):
             self.oauth_status.set("미연결: " + profile['name'] + " · " + profile['market']
                 + " · " + GENRES[profile['genre']].title)
         accounts=[]
-        for item in store.list_profiles():
-            if oauth.is_connected(item["id"]):
-                accounts.append(f"{item['name']} — {item.get('connected_email') or '이메일 확인 안 됨'} — {item.get('youtube_channel_title') or '채널명 없음'}")
+        for account_row in store.list_google_accounts():
+            connected_profiles=[row for row in account_row["profiles"] if oauth.is_connected(row["id"])]
+            if not connected_profiles:
+                continue
+            channel_rows=account_row["channels"]
+            channel_text="; ".join(
+                f"{item.get('channel_title') or '이름 없음'} [{item.get('channel_id') or '채널 없음'}]"
+                for item in channel_rows) or "채널 정보 없음"
+            profile_text=", ".join(
+                f"{item['name']} ({item['market']})" for item in connected_profiles)
+            accounts.append(f"{account_row.get('email') or '이메일 확인 안 됨'}\n  채널: {channel_text}\n  연결 프로필: {profile_text}")
         self.oauth_accounts_summary.set("\n".join(accounts) if accounts else "연결된 Google 계정 없음 · 프로필을 선택하고 Google 계정 추가 / 연결을 누르세요.")
 
     def connect_google(self):

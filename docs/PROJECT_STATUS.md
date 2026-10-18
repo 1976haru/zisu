@@ -1,20 +1,20 @@
 # ZISU Integrated Project Status
 
-Last checked: 2026-10-18 11:40 KST (offline schedule GUI integration, recovery and host resource sample)
+Last checked: 2026-10-18 11:47 KST (V46-02 account/channel mapping and scoped regression)
 Current installed version: **V4.5.9**
 Development branch: `feature/v4.5-ai-research-manager`
 Working source: `D:\03 zisu\.test_tmp\history_audit` (matches the requested branch/SHA; the parent `D:\03 zisu` checkout is a separate, dirty repository and was left untouched)
-Latest V4.6.0 scheduler/resource code commit: `bdb20b678e7dcde71389a50f057fbd24ac7b1c16` (local, not pushed)
+Latest V4.6.0 code before this work: `476cdae9a15031e6178eb59fce314db0d3d18161`; V46-02 changes are being committed locally (not pushed)
 Remote status: not refreshed; Codex `gh auth status` reports the stored 1976haru credential is invalid, so no push was attempted. PR #4 is expected to remain Draft based on previous user-provided state; not checked live in this run. PR #2 and `main` were not touched.
 
 ## Progress
 
 See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
-- **Overall ZISU:** 72% estimated (72.2% weighted across the 100-point backlog after this task's estimated row updates). This includes remaining V4.6 scope; it is not a test-pass percentage.
+- **Overall ZISU:** 77% estimated (77.1 weighted points across the 100-point backlog after V46-02 moved to 80%). This includes remaining V4.6 scope; it is not a test-pass percentage.
 - **Current V4.5.9/release-hardening scope:** 91% estimated. Installed binary and local offline tests pass, but screenshot/DPI, remote authenticated release flow and fresh CI are outstanding.
-- **V4.6.0:** 44% estimated (44.25% weighted across its backlog). Schedule state, Autopilot block integration and widget-level schedule UI are present; browser lifecycle, expanded dashboard and actual APIs remain incomplete.
-- **Current P0 work (V46-01 + V46-RESOURCE-01, with V46-02 dependency):** 58% estimated (15.75/27 weighted points). Scheduler UI, resource admission and safe same-process recovery pass isolated tests; browser management and long-duration/Windows resource measurements remain.
+- **V4.6.0:** 57% estimated (56.5% weighted across its backlog). Schedule state, offline account/channel registry, Autopilot block integration and widget-level schedule UI are present; browser lifecycle, expanded dashboard and actual APIs remain incomplete.
+- **Current P0 work (V46-01 + V46-02 + V46-RESOURCE-01):** 76% estimated (20.65/27 weighted points). Offline scheduler/resource and account/channel isolation tests pass; live OAuth, browser lifecycle and long-duration/Windows resource measurements remain.
 
 ## Verified and unverified state
 
@@ -51,12 +51,19 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 - Host resource observation during this task: 10.01-second sampling interval, system CPU 4.23% at the second sample, available RAM 12.71 GiB, system memory load 59%, sampler Python process working set 16.5 MiB. This is one brief host observation, not ZISU idle-average or extended-run performance.
 - Added four schedule tests for exact approval matching, resource recovery, uncertain call retention, and preserving a break across pause/resume. GUI smoke verifies the new controls/defaults and low-load setting. This is widget-level verification, not screenshot or DPI validation.
 
+### V4.6.0 V46-02 multi-account/channel implementation (2026-10-18)
+
+- Added additive `google_accounts` and `google_account_channels` registries plus `profiles.google_account_id`. Existing profile email/channel rows are linked on migration; repeat initialization is idempotent. No OAuth token is moved, copied, or logged.
+- OAuth remains separately stored per profile. A Google account can be linked to multiple channel-specific profiles, and multiple Google accounts can coexist. The account screen now summarizes account → authenticated channel(s) → connected profile(s); the existing OAuth consent response remains the source of selectable channel IDs.
+- Missing account email fails closed. Rebinding to another account/channel requires explicit confirmation and is blocked when that profile has research material or an active/recoverable scheduler session, so existing candidates, AI decisions, notes, drafts, and reports cannot be silently reattributed. Users should create a separate profile for another channel.
+- Added 5 account/channel tests covering same-account multiple channels, separate accounts, per-profile token isolation, candidate/AI/memo separation, identity change safeguards, active-session blocking, and repeatable additive migration. Updated the no-channel OAuth fixture to include its mock email.
+- This is mock/offline evidence only. No actual OAuth, Google API, live user DB, V4.5.9 installation, OAuth token or DPAPI credential was accessed. The parent checkout remains untouched.
+
 ## Latest validation
 
-- `python -m compileall -q main.py mcrs tests`: PASS (this task).
-- `python -m unittest discover -s tests -p test_*.py -v`: **161/161 PASS** (157 existing plus 4 new schedule/recovery tests; final rerun this task).
-- `python tests/smoke_gui.py`: PASS; schedule selector defaults, low-load default and schedule callbacks are present (this task). No screenshot/DPI evidence.
-- `python tests/stress_v43.py`: PASS; 100 profiles, 10,000 candidates, 12 workers, 5.886 s, peak traced memory 2.55 MiB, 0 failures (this task).
+- Prior V46-01 baseline `python -m unittest discover -s tests -p test_*.py -v`: **161/161 PASS** (157 existing plus 4 schedule/recovery tests); not rerun during V46-02 because final QA was explicitly deferred.
+- Prior V46-01 `python tests/smoke_gui.py` and `python tests/stress_v43.py`: PASS; schedule UI smoke and 100 profiles/10,000 candidates, 5.886 s, 2.55 MiB traced peak, 0 failures. Not repeated during V46-02.
+- Current V46-02 scoped suite: OAuth management **16/16 PASS**, OAuth/migration **11/11 PASS**, scheduler compatibility **17/17 PASS**; GUI smoke **PASS**, `compileall` **PASS**, `git diff --check` **PASS**. These 44 test cases are scoped checks and do not replace the existing full 161-test suite, which was intentionally not run per instruction to defer final QA.
 - One full-suite rerun exposed a pre-existing order-dependent assertion in the shortfall test; it now selects the expected audit by `video_id`. The isolated test and final 157-test suite pass.
 - PowerShell parser: PASS (release script).
 - `git diff --check` plus UTF-8/newline/trailing-whitespace checks: PASS for current authored files.
@@ -65,4 +72,4 @@ See calculation and row weights in [MASTER_BACKLOG.md](MASTER_BACKLOG.md).
 
 ## Immediate constraints and next order
 
-No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Continue with GUI/DPI and long-run resource validation, then complete dedicated browser ownership tests. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.
+No data-loss or credential issue was found; this task did not open or modify the live user DB, V4.5.9 installation, OAuth tokens or DPAPI store. Three root-level temporary directories returned permission-denied warnings during Git enumeration; they were not opened, changed or deleted. Next backlog item is V46-03 dedicated browser lifecycle; V46-RESOURCE-01 long-run validation and V46-04 dashboard/DPI work remain. Preserve the existing install, user DB/backups, OAuth/DPAPI stores, PR #4 Draft state and branch history. Never merge `main` or PR #2 without explicit approval.

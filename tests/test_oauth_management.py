@@ -153,6 +153,97 @@ class OAuthManagementTests(unittest.TestCase):
         self.assertNotEqual(oauth.token_path(self.first),oauth.token_path(third))
         self.assertEqual("fake-a-second-profile",json.loads(oauth.token_path(third).read_text(encoding="utf-8"))["token"])
 
+    def test_google_account_and_channel_registry_supports_many_channels_and_accounts(self):
+        same_account_channel=json.dumps({"token":"fake-a-channel-2","client_id":"shared","scopes":oauth.SCOPES})
+        oauth.save_connection(self.first,{"channel_id":"UCaaa1","channel_title":"JP primary","email":"a@example.test"},
+                              json.dumps({"token":"fake-a","client_id":"shared","scopes":oauth.SCOPES}))
+        third=store.create_profile("JP second channel","JP","MORNING_CHILL_RAP")
+        oauth.save_connection(third,{"channel_id":"UCaaa2","channel_title":"JP brand","email":"A@example.test"},same_account_channel)
+        oauth.save_connection(self.second,{"channel_id":"UCbbb2","channel_title":"KR channel","email":"b@example.test"},
+                              json.dumps({"token":"fake-b","client_id":"shared","scopes":oauth.SCOPES}))
+        candidate={"video_id":"abcdefghijk","video_title":"Morning chill rap melody"}
+        store.save_candidates(self.first,[candidate]); store.save_candidates(third,[candidate])
+        store.update_candidate(self.first,"abcdefghijk","검토 중","JP-only memo","JP-only draft")
+        store.update_candidate(third,"abcdefghijk","검토 중","second-channel memo","second-channel draft")
+        store.record_ai_decision(self.first,"abcdefghijk",rule_verdict="검토",ai_verdict="review",
+                                 proposed_verdict="cross_genre_review",evidence="profile A")
+        store.record_ai_decision(third,"abcdefghijk",rule_verdict="검토",ai_verdict="review",
+                                 proposed_verdict="cross_genre_review",evidence="profile B")
+
+        jp=store.get_profile(self.first); jp2=store.get_profile(third); kr=store.get_profile(self.second)
+        self.assertEqual(jp["google_account_id"],jp2["google_account_id"])
+        self.assertNotEqual(jp["google_account_id"],kr["google_account_id"])
+        accounts=store.list_google_accounts()
+        self.assertEqual(2,len(accounts))
+        shared=next(row for row in accounts if row["email"].casefold()=="a@example.test")
+        self.assertEqual({"UCaaa1","UCaaa2"},{row["channel_id"] for row in shared["channels"]})
+        self.assertEqual({self.first,third},{row["id"] for row in shared["profiles"]})
+        self.assertNotEqual(oauth.token_path(self.first),oauth.token_path(third))
+        self.assertEqual("fake-a",json.loads(oauth.token_path(self.first).read_text(encoding="utf-8"))["token"])
+        self.assertEqual("fake-a-channel-2",json.loads(oauth.token_path(third).read_text(encoding="utf-8"))["token"])
+        self.assertEqual("JP-only memo",store.get_candidate(self.first,"abcdefghijk")["notes"])
+        self.assertEqual("second-channel memo",store.get_candidate(third,"abcdefghijk")["notes"])
+        self.assertEqual("profile A",store.list_genre_audit(self.first)[0]["evidence"])
+        self.assertEqual("profile B",store.list_genre_audit(third)[0]["evidence"])
+
+    def test_account_switch_without_explicit_confirmation_preserves_token_and_research(self):
+        original=json.dumps({"token":"keep-old-token","client_id":"shared","scopes":oauth.SCOPES})
+        oauth.save_connection(self.first,{"channel_id":"UCaaa1","channel_title":"JP","email":"a@example.test"},original)
+        store.save_candidates(self.first,[{"video_id":"abcdefghijk","video_title":"Morning chill rap melody"}])
+        store.update_candidate(self.first,"abcdefghijk","검토 중","기존 메모","기존 초안")
+        replacement=json.dumps({"token":"new-account-token","client_id":"shared","scopes":oauth.SCOPES})
+        with self.assertRaises(oauth.OAuthError) as caught:
+            oauth.save_connection(self.first,{"channel_id":"UCccc3","channel_title":"Other","email":"b@example.test"},replacement)
+        self.assertEqual("account_mismatch",caught.exception.code)
+        self.assertEqual("keep-old-token",json.loads(oauth.token_path(self.first).read_text(encoding="utf-8"))["token"])
+        self.assertEqual("기존 메모",store.get_candidate(self.first,"abcdefghijk")["notes"])
+        self.assertEqual("a@example.test",store.get_profile(self.first)["connected_email"])
+        with self.assertRaises(oauth.OAuthError) as blocked:
+            oauth.save_connection(self.first,{"channel_id":"UCccc3","channel_title":"Other","email":"b@example.test"},
+                                  replacement,allow_account_change=True)
+        self.assertEqual("account_mismatch",blocked.exception.code)
+        self.assertEqual("keep-old-token",json.loads(oauth.token_path(self.first).read_text(encoding="utf-8"))["token"])
+        self.assertEqual("a@example.test",store.get_profile(self.first)["connected_email"])
+        self.assertEqual("기존 메모",store.get_candidate(self.first,"abcdefghijk")["notes"])
+        self.assertEqual(1,len(store.list_google_accounts()))
+
+    def test_missing_account_identity_is_rejected_before_token_write(self):
+        with self.assertRaises(oauth.OAuthError) as caught:
+            oauth.save_connection(self.first,{"channel_id":"UCaaa1","channel_title":"JP","email":""},
+                                  json.dumps({"token":"unbound-token","client_id":"shared","scopes":oauth.SCOPES}))
+        self.assertEqual("account_identity",caught.exception.code)
+        self.assertFalse(oauth.is_connected(self.first))
+
+    def test_active_profiled_session_blocks_account_channel_rebind(self):
+        old=json.dumps({"token":"keep-active-token","client_id":"shared","scopes":oauth.SCOPES})
+        oauth.save_connection(self.first,{"channel_id":"UCaaa1","channel_title":"JP","email":"a@example.test"},old)
+        with store.connect() as db:
+            db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls) "
+                       "VALUES('active-mock',?,'JP','MORNING_CHILL_RAP','paused',10,20)",(self.first,))
+        with self.assertRaises(oauth.OAuthError):
+            oauth.save_connection(self.first,{"channel_id":"UCccc3","channel_title":"KR","email":"b@example.test"},
+                                  json.dumps({"token":"new-token","client_id":"shared","scopes":oauth.SCOPES}),
+                                  allow_account_change=True)
+        self.assertEqual("keep-active-token",json.loads(oauth.token_path(self.first).read_text(encoding="utf-8"))["token"])
+        self.assertEqual("a@example.test",store.get_profile(self.first)["connected_email"])
+
+    def test_account_channel_registry_migration_is_additive_and_repeatable(self):
+        oauth.save_connection(self.first,{"channel_id":"UCaaa1","channel_title":"JP","email":"a@example.test"},
+                              json.dumps({"token":"migration-token","client_id":"shared","scopes":oauth.SCOPES}))
+        store.save_candidates(self.first,[{"video_id":"abcdefghijk","video_title":"Morning chill rap melody"}])
+        before=store.get_candidate(self.first,"abcdefghijk")
+        with store.connect() as db:
+            db.execute("DELETE FROM google_account_channels")
+            db.execute("DELETE FROM google_accounts")
+            db.execute("ALTER TABLE profiles DROP COLUMN google_account_id")
+        store.initialize(); store.initialize()
+        after=store.get_candidate(self.first,"abcdefghijk")
+        self.assertEqual(before["video_title"],after["video_title"])
+        self.assertEqual("a@example.test",store.get_profile(self.first)["connected_email"])
+        self.assertTrue(store.get_profile(self.first)["google_account_id"])
+        self.assertEqual("UCaaa1",store.list_google_accounts()[0]["channels"][0]["channel_id"])
+        self.assertTrue(oauth.is_connected(self.first))
+
     def test_mismatched_connected_identity_requires_explicit_confirmation(self):
         original=json.dumps({"token":"old-test-token","client_id":"shared","scopes":oauth.SCOPES})
         oauth.save_connection(self.first,{"channel_id":"UCaaa1","channel_title":"Old","email":"a@example.test"},original)
