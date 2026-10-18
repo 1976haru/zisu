@@ -34,6 +34,24 @@ class ResearchSchedulerTests(unittest.TestCase):
         self.assertEqual(("completed", "complete", 0),
                          (done["state"], done["phase"], done["remaining_seconds"]))
 
+    def test_all_supported_session_lengths_complete_and_cancel_preserves_history(self):
+        for hours in scheduler.TOTAL_HOURS:
+            profile = store.create_profile(f"duration {hours}h", "JP", "MORNING_CHILL_RAP", path=self.db)
+            session = scheduler.create(scheduler.ScheduleConfig(profile, total_hours=hours),
+                                       self.db, now=self.now)
+            self.assertEqual(hours * 60, session["total_minutes"])
+            ended = scheduler.get(session["id"], profile, self.db,
+                                  now=self.now + timedelta(hours=hours))
+            self.assertEqual(("completed", "complete"), (ended["state"], ended["phase"]))
+
+        scheduled = scheduler.create(scheduler.ScheduleConfig(
+            self.kr, total_hours=2, start_at=self.now + timedelta(hours=1)), self.db, now=self.now)
+        cancelled = scheduler.cancel(scheduled["id"], self.kr, self.db,
+                                     now=self.now + timedelta(minutes=10))
+        self.assertEqual(("cancelled", "cancelled", 0),
+                         (cancelled["state"], cancelled["phase"], cancelled["search_calls_used"]))
+        self.assertEqual([], scheduler.list_active(self.kr, self.db, now=self.now + timedelta(minutes=10)))
+
     def test_user_approved_one_time_research_extension_is_persisted_and_shifts_rest(self):
         session = scheduler.create(scheduler.ScheduleConfig(self.jp, total_hours=2,
             research_minutes=30, break_minutes=15), self.db, now=self.now)

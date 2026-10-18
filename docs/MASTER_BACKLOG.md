@@ -1,5 +1,11 @@
 # ZISU Master Backlog
 
+### V4.6.0 P0 stabilization batch (2026-10-18)
+
+- Reconfirmed scheduler behavior is profile-scoped and fail-closed for unresolved requests/resource recovery. Added a missing regression covering all supported 2/4/6/8-hour session lengths, completion at the requested duration, and cancellation of a future scheduled session without consuming its API allowance. This is simulated-clock/isolated-SQLite verification, not a six-hour wall-clock soak.
+- Account/channel isolation, resource admission/recovery, global single-flight slots, thread/handle/RSS checks and uncertain-call preservation were already covered by existing suites; no production-code defect was found in those areas, so they were not reimplemented or altered.
+- Full suite and offline acceptance outcomes are recorded in `PROJECT_STATUS.md`; actual OAuth, Chrome, visual DPI, live API/quota and six-hour Windows EXE operation remain pending.
+
 ### Windows CI onedir startup failure diagnosis (2026-10-18)
 
 - Runs `39117703604` and `39117699436` both passed unit/stress/GUI/acceptance/compile, onefile and onedir builds, archive validation, and release ZIP creation, then failed during startup measurement. The available failure artifact for `39117703604` shows onefile fresh runs 1–3 completed `offline_smoke_complete`; onedir fresh run 1 reached `database_initialized`, then recorded `startup_failed` with `PermissionError` and left a native `Unhandled exception in script` dialog, which caused the smoke harness timeout. This is an application-constructor permission failure, not a startup-speed threshold or GUI-close timing failure. Two other fresh onedir runs completed; the warm series did not start after the failure.

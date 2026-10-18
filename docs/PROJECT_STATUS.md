@@ -7,6 +7,13 @@ Working source: `D:\03 zisu\.test_tmp\history_audit` (the requested workspace; s
 V46-03 implementation parent: `5853f2ca78490d886f947b72967d0f596cd9d8ba`; implementation is committed on the requested feature branch (see current Git HEAD).
 Remote status: last tested code commit `9f18e9fec524e093109b04da3867d44bafc8a441` (followed by documentation-only commits); PR #4 checked open/Draft. Always re-fetch current feature-branch HEAD before new writes. Push Actions `39117316473` and PR Actions `39117319193` both completed successfully (including new offline acceptance, Windows packaging and startup smoke). PR #2 and `main` were not touched.
 
+### V4.6.0 P0 stabilization batch (2026-10-18)
+
+- Safely fetched `origin/feature/v4.5-ai-research-manager`; local HEAD and remote HEAD both began at `9b9f1e0927419c914e961596b546b3a7dd8d66d3`, with a clean work tree. No user installation, DB, OAuth, or DPAPI store was accessed.
+- Audited existing scheduler, account/channel and resource guard suites before changing code. Existing coverage already protects schedule transition/checkpoint/recovery, per-profile auth and candidate isolation, shared quota reservations, fail-closed CPU/RAM handling, single-flight API slots, and process resource/thread cleanup. Added one targeted scheduler regression for every supported duration (2/4/6/8 hours) and future-schedule cancellation with no quota use.
+- Latest focused scheduler result: 19/19 PASS. Final full suite: **266 run, 265 PASS / 1 SKIP / 0 FAIL**. V4.6 offline acceptance: **23/23 PASS**. `compileall` and `git diff --check` PASS.
+- The suite's bounded virtual-long-run sample completed 12 six-hour schedules and 12 pause/resume cycles; process RSS changed +4,096 bytes, tracemalloc peak was 87,559 bytes, thread count 2→2, Windows process handles 242→237. One separate instantaneous host CPU sample was ~9.44%; this is not a sustained idle or low-load performance guarantee. No real six-hour runtime test was performed.
+
 ### Windows onedir startup CI incident (2026-10-18)
 
 - Latest remote source base for this repair: `365b60d8929c4db9c85c0ac9b80b4324e95ed742`; the local branch was safely fast-forwarded to that commit before edits.
