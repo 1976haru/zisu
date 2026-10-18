@@ -19,7 +19,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from .branding import DISPLAY_NAME, KOREAN_NAME, SLOGAN, apply_window_branding
-from .research_browser import ResearchBrowserManager, BrowserError
+from .research_browser import (ResearchBrowserManager, BrowserError,
+    BrowserOwnershipUncertain, find_browser_candidates, load_browser_preference,
+    save_browser_preference)
 from .resource_guard import sample_resources
 
 
@@ -28,6 +30,12 @@ def verifier_root(local_app_data: str | os.PathLike | None = None, run_id: str |
     base = Path(local_app_data) if local_app_data else Path(
         os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
     return base / "ZisuSignalLab" / "BrowserVerification" / (run_id or uuid.uuid4().hex)
+
+
+def verifier_settings_path(local_app_data: str | os.PathLike | None = None) -> Path:
+    base = Path(local_app_data) if local_app_data else Path(
+        os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+    return base / "ZisuSignalLab" / "BrowserVerification" / "browser-settings.json"
 
 
 def installed_browsers() -> dict[str, str]:
@@ -90,6 +98,16 @@ def _snapshot_json(snapshot):
         "verifier_process_rss_bytes": snapshot.process_rss_bytes,
         "verifier_process_cpu_percent_sample": snapshot.process_cpu_percent,
     }
+
+
+def _canonical_profile_identity(value):
+    """Canonical filesystem identity used for comparison, never as a security bypass."""
+    if not value:
+        return None
+    try:
+        return os.path.normcase(os.path.normpath(os.path.realpath(str(value))))
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def build_report(events, browser="", auto_summary=None):
@@ -233,6 +251,7 @@ class BrowserVerifierApp:
         root.geometry("760x680")
         root.minsize(620, 560)
         self.test_root = verifier_root()
+        self.preference_path = verifier_settings_path()
         self.events: list[dict] = []
         self.messages: queue.Queue = queue.Queue()
         self._busy = False
@@ -250,7 +269,10 @@ class BrowserVerifierApp:
         self._selected_browser = ""
         self.browsers = installed_browsers()
         self.browser_names = list(self.browsers)
-        preferred = next((name for name in ("Microsoft Edge", "Google Chrome") if name in self.browsers), "")
+        saved_browser = load_browser_preference(self.preference_path)
+        preferred = saved_browser if saved_browser in self.browsers else (
+            "Google Chrome" if "Google Chrome" in self.browsers else
+            "Microsoft Edge" if "Microsoft Edge" in self.browsers else "")
         self.browser_var = tk.StringVar(value=preferred)
         self.status_var = tk.StringVar(value="브라우저 테스트를 시작하면 독립된 테스트 프로필을 사용합니다.")
         self.detail_var = tk.StringVar(value=f"테스트 자료: {self.test_root}  ·  개인 데이터와는 별도 위치")
@@ -275,6 +297,7 @@ class BrowserVerifierApp:
         self.browser_combo = ttk.Combobox(choice, textvariable=self.browser_var,
             values=self.browser_names, state="readonly", width=32)
         self.browser_combo.pack(side="left", padx=8)
+        self.browser_combo.bind("<<ComboboxSelected>>", self._save_browser_choice)
         if not self.browser_names:
             self.status_var.set("Edge 또는 Chrome을 찾지 못했습니다. 설치된 브라우저를 확인해 주세요.")
         buttons = ttk.Frame(outer)
@@ -428,8 +451,22 @@ class BrowserVerifierApp:
         self.test_root.mkdir(parents=True, exist_ok=True)
         if self._manager is None:
             self._manager = ResearchBrowserManager(app_data_root=self.test_root,
-                executable=executable, allow_local_test=True)
+                executable=executable, allow_local_test=True, preferred_browser=selected)
+            save_browser_preference(selected, self.test_root / "research-browser-settings.json")
+        elif self._manager.preferred_browser != selected:
+            self._manager.select_browser(selected, persist=False)
         return self._manager
+
+    def _save_browser_choice(self, _event=None):
+        selected = self.browser_var.get()
+        if selected in self.browsers:
+            save_browser_preference(selected, self.preference_path)
+            if self._manager and self._manager.preferred_browser != selected:
+                try:
+                    self._manager.select_browser(selected, persist=False)
+                except BrowserError as exc:
+                    self.browser_var.set(self._manager.preferred_browser)
+                    self.status_var.set(str(exc))
 
     def _diagnostic_snapshot(self):
         snapshot = sample_resources()
@@ -485,17 +522,22 @@ class BrowserVerifierApp:
             was_open = False
             reopened_after_x = False
             prior = None
+            expected_profile_identity = _canonical_profile_identity(self._first_profile)
             if manager.session:
                 current = manager.metrics()
                 prior = current
                 was_open = current.window_count == 1
                 reopened_after_x = current.window_count == 0 and current.lifecycle_state in {"USER_CLOSED", "BACKGROUND_PROCESS_ONLY", "CLOSED"}
+                if not expected_profile_identity:
+                    expected_profile_identity = _canonical_profile_identity(manager.session.profile_dir)
             elif manager.recovery_available:
                 try:
                     recovered = manager.recover_owned_session()
                     prior = recovered
                     was_open = recovered.window_count == 1
                     reopened_after_x = recovered.window_count == 0 and recovered.lifecycle_state in {"USER_CLOSED", "BACKGROUND_PROCESS_ONLY", "CLOSED"}
+                    if manager.session and not expected_profile_identity:
+                        expected_profile_identity = _canonical_profile_identity(manager.session.profile_dir)
                 except BrowserError:
                     # A stale, non-matching PID record is cleared by the manager;
                     # malformed/uncertain ownership remains blocked there.
@@ -513,6 +555,15 @@ class BrowserVerifierApp:
             after = sample_resources()
             self._first_pid = first.root_pid
             self._first_profile = manager.session.profile_dir if manager.session else None
+            evidence = manager.profile_ownership_evidence() if manager.session else {}
+            profile_identity = _canonical_profile_identity(evidence.get("profile_path"))
+            if expected_profile_identity:
+                same_profile = bool(evidence.get("verified") and profile_identity == expected_profile_identity)
+            else:
+                same_profile = bool(evidence.get("verified") and profile_identity)
+                if same_profile:
+                    expected_profile_identity = profile_identity
+            self._first_profile = evidence.get("profile_path") or self._first_profile
             self._first_window_count = first.window_count
             self._first_page_loaded = page_loaded
             detail = {"page_loaded": page_loaded, "window_count": first.window_count,
@@ -532,12 +583,16 @@ class BrowserVerifierApp:
                 "baseline_browser_processes": sorted(self._baseline_processes),
                 "browser": self._selected_browser}
             stable = wait_for_window_state(manager.metrics, 1)
-            if not page_loaded or not stable or stable.window_count != 1:
-                raise BrowserError("브라우저 창은 열렸지만 로컬 페이지 로드 또는 창 1개를 확인하지 못했습니다.")
+            if not page_loaded or not stable or stable.window_count != 1 or not same_profile:
+                raise BrowserError("브라우저 창은 열렸지만 로컬 페이지 또는 격리 프로필 소유권을 확인하지 못했습니다.")
             return {"status_message": "브라우저 연결 성공",
                     "detail": ("창 닫기 후 다시 열기 PASS · " if reopened_after_x else "")
                     + "로컬 페이지 로드 PASS · 전용 창 1개 확인 · 사용자 브라우저 프로필과 분리됨",
                     "reopened_after_user_close": reopened_after_x,
+                    "same_isolated_profile": same_profile,
+                    "profile_ownership_verified": bool(evidence.get("verified")),
+                    "profile_path": evidence.get("profile_path"),
+                    "profile_ownership_pids": evidence.get("owned_pids", []),
                     **detail, "window_count_initial_snapshot": first.window_count,
                     "window_count_stable": stable.window_count,
                     "owned_rss_bytes": stable.owned_rss_bytes,
@@ -558,13 +613,19 @@ class BrowserVerifierApp:
                 raise BrowserError("재사용 전 전용 창이 하나인지 확인되지 않아 새 요청을 보내지 않았습니다.")
             after = manager.open_selected(self._ensure_server() + "/reuse", user_approved=True)
             page_loaded = self._await_page("/reuse")
-            same_profile = bool(self._first_profile and manager.session.profile_dir == self._first_profile)
+            evidence = manager.profile_ownership_evidence()
+            same_profile = bool(evidence.get("verified") and
+                _canonical_profile_identity(evidence.get("profile_path")) ==
+                _canonical_profile_identity(self._first_profile))
             stable = wait_for_window_state(manager.metrics, 1)
             one_window = bool(stable and stable.window_count == 1 and before.window_count == 1)
             if not (page_loaded and same_profile and one_window):
                 raise BrowserError("같은 창 재사용 또는 두 번째 로컬 페이지 로드를 확인하지 못했습니다.")
             return {"detail": "두 번째 로컬 페이지 PASS · 같은 브라우저 PID · 창 1개 유지",
                 "page_loaded": page_loaded, "same_isolated_profile": same_profile,
+                "profile_ownership_verified": bool(evidence.get("verified")),
+                "profile_path": evidence.get("profile_path"),
+                "profile_ownership_pids": evidence.get("owned_pids", []),
                 "root_pid_before": self._first_pid, "root_pid_after": after.root_pid,
                 "root_pid_changed": after.root_pid != self._first_pid,
                 "window_count_before": before.window_count, "window_count_after": after.window_count,
@@ -616,9 +677,16 @@ class BrowserVerifierApp:
         max_handles = 0
         residual_count = None
         fatal_reason = None
+        baseline_profile_identity = None
 
         def emit(cycle, stage, state, **details):
             metrics = manager.metrics() if manager.session else None
+            profile_evidence = (manager.profile_ownership_evidence()
+                                if manager.session and hasattr(manager, "profile_ownership_evidence") else {})
+            path_identity = _canonical_profile_identity(profile_evidence.get("profile_path"))
+            same_profile = bool(profile_evidence.get("verified") and path_identity
+                                and (baseline_profile_identity is None
+                                     or path_identity == baseline_profile_identity))
             snap = sample_resources()
             owned_pids = (list(metrics.child_process_ids) + ([metrics.root_pid] if metrics and metrics.root_pid else [])) if metrics else []
             event = {
@@ -636,6 +704,17 @@ class BrowserVerifierApp:
                 "system_cpu_percent_sample": snap.system_cpu_percent if snap else None,
                 "system_available_ram_bytes": snap.available_ram_bytes if snap else None,
                 "system_memory_percent": snap.system_memory_percent if snap else None,
+                "profile_path": profile_evidence.get("profile_path"),
+                "profile_ownership_verified": bool(profile_evidence.get("verified")),
+                "profile_ownership_pids": profile_evidence.get("owned_pids", []),
+                "same_isolated_profile": same_profile,
+                "window_opened": bool(metrics and metrics.window_count > 0),
+                "same_window_reuse": stage == "B_REUSE" and bool(metrics and metrics.window_count == 1),
+                "dedicated_browser_closed": stage in {"C_USER_CLOSE_OBSERVED", "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK"}
+                    and bool(not metrics or metrics.window_count == 0),
+                "reopened_after_close": stage == "D_REOPEN_AFTER_CLOSE" and bool(metrics and metrics.window_count == 1),
+                "residual_process_count": metrics.owned_process_count if metrics else 0,
+                "failure_reason": details.get("failure_reason"),
                 **details,
             }
             events.append(event)
@@ -651,8 +730,8 @@ class BrowserVerifierApp:
             for cycle in range(1, cycles + 1):
                 self.messages.put(("progress", "진행 중", {
                     "status_message": f"전체 자동 테스트 진행 중: {cycle}/{cycles}회 · 로컬 페이지 열기/재사용/닫기/재실행"}))
+                cycle_event_start = len(events)
                 cycle_ok = True
-                profile_before = manager.session.profile_dir if manager.session else None
                 for action, stage in (("open", "A_INITIAL_OPEN"), ("reuse", "B_REUSE")):
                     route = f"/auto/{run_key}/{cycle}/{action}"
                     try:
@@ -660,20 +739,31 @@ class BrowserVerifierApp:
                         page_loaded = self._await_page(route, timeout=12.0)
                         stable = wait_for_window_state(manager.metrics, 1, timeout=8.0, stable_for=0.45)
                         ok = bool(page_loaded and stable and stable.window_count == 1)
-                        if action == "reuse" and profile_before:
-                            ok = ok and bool(manager.session and manager.session.profile_dir == profile_before)
+                        evidence = manager.profile_ownership_evidence()
+                        identity = _canonical_profile_identity(evidence.get("profile_path"))
+                        if action == "open" and evidence.get("verified") and identity:
+                            if baseline_profile_identity is None:
+                                baseline_profile_identity = identity
+                            ok = ok and identity == baseline_profile_identity
+                        else:
+                            ok = ok and bool(evidence.get("verified") and identity
+                                and identity == baseline_profile_identity)
                         emit(cycle, stage, "PASS" if ok else "FAIL",
                              page_load_confirmed=page_loaded,
                              initial_window_count=initial.window_count,
                              stable_window_count=stable.window_count if stable else None,
-                             same_isolated_profile=bool(manager.session and profile_before == manager.session.profile_dir),
+                             same_isolated_profile=bool(evidence.get("verified") and identity == baseline_profile_identity),
+                             profile_ownership_verified=bool(evidence.get("verified")),
+                             profile_path=evidence.get("profile_path"),
+                             profile_ownership_pids=evidence.get("owned_pids", []),
                              initial_root_pid=initial.root_pid,
                              stable_root_pid=stable.root_pid if stable else None,
                              pid_changed=bool(stable and initial.root_pid != stable.root_pid),
                              failure_reason=None if ok else "페이지 요청 또는 안정된 전용 창 1개 확인 실패")
                         if not ok:
                             cycle_ok = False
-                            fatal_reason = "창 표시와 프로세스 지표가 제한 시간 안에 안정적으로 일치하지 않았습니다."
+                            fatal_reason = ("격리 프로필 또는 브라우저 소유권을 확인하지 못했습니다."
+                                if not evidence.get("verified") or identity != baseline_profile_identity else None)
                             break
                     except Exception as exc:
                         err = _safe_error_result(exc)
@@ -683,19 +773,30 @@ class BrowserVerifierApp:
                         page_loaded = self._await_page(route, timeout=0.25)
                         stable = wait_for_window_state(manager.metrics, 1,
                             timeout=1.5, stable_for=0.3, interval=0.1) if manager.session else None
-                        owned_profile = bool(manager.session and
-                            Path(manager.session.profile_dir).resolve().is_relative_to(self.test_root.resolve()))
+                        evidence = (manager.profile_ownership_evidence() if manager.session else {
+                            "verified": False, "profile_path": getattr(manager, "last_attempt_profile_dir", None),
+                            "owned_pids": [], "reason": "browser_launch_not_confirmed"})
+                        identity = _canonical_profile_identity(evidence.get("profile_path"))
+                        if baseline_profile_identity is None and evidence.get("verified"):
+                            baseline_profile_identity = identity
+                        owned_profile = bool(evidence.get("verified") and identity
+                                             and identity == baseline_profile_identity)
                         reconciled = bool(page_loaded and stable and stable.window_count == 1 and owned_profile)
                         emit(cycle, stage, "PASS" if reconciled else "FAIL",
                              page_load_confirmed=page_loaded,
                              stable_window_count=stable.window_count if stable else None,
                              same_isolated_profile=owned_profile,
+                             profile_ownership_verified=bool(evidence.get("verified")),
+                             profile_path=evidence.get("profile_path"),
+                             profile_ownership_pids=evidence.get("owned_pids", []),
                              manager_open_error_type=err.get("error_type"),
                              browser_exit_code=err.get("browser_exit_code"),
                              failure_reason=None if reconciled else err.get("message", "브라우저 시작 실패"))
                         if not reconciled:
                             cycle_ok = False
-                            fatal_reason = err.get("message", "브라우저 시작 실패")
+                            ownership_uncertain = (isinstance(exc, BrowserOwnershipUncertain)
+                                or bool(manager.session and not evidence.get("verified")))
+                            fatal_reason = err.get("message", "브라우저 소유권을 확인할 수 없습니다.") if ownership_uncertain else None
                             break
                 completed += 1
                 if cycle_ok:
@@ -716,74 +817,145 @@ class BrowserVerifierApp:
                             reopened = manager.open_selected(base_url + route, user_approved=True)
                             page_loaded = self._await_page(route, timeout=12.0)
                             stable = wait_for_window_state(manager.metrics, 1, timeout=8.0, stable_for=0.45)
+                            evidence = manager.profile_ownership_evidence()
+                            identity = _canonical_profile_identity(evidence.get("profile_path"))
                             reopen_ok = bool(page_loaded and stable and stable.window_count == 1
-                                and manager.session and manager.session.profile_dir == profile_before)
+                                and evidence.get("verified") and identity == baseline_profile_identity)
                             emit(cycle, "D_REOPEN_AFTER_CLOSE", "PASS" if reopen_ok else "FAIL",
                                  page_load_confirmed=page_loaded,
                                  initial_window_count=reopened.window_count,
                                  stable_window_count=stable.window_count if stable else None,
-                                 same_isolated_profile=bool(manager.session and manager.session.profile_dir == profile_before),
+                                 same_isolated_profile=bool(evidence.get("verified") and identity == baseline_profile_identity),
+                                 profile_ownership_verified=bool(evidence.get("verified")),
+                                 profile_path=evidence.get("profile_path"),
+                                 profile_ownership_pids=evidence.get("owned_pids", []),
                                  root_pid=reopened.root_pid,
                                  stable_root_pid=stable.root_pid if stable else None,
                                  pid_changed=bool(stable and reopened.root_pid != stable.root_pid),
                                  failure_reason=None if reopen_ok else "닫힘 후 같은 격리 프로필의 재실행 확인 실패")
                             cycle_ok = reopen_ok
                             if not reopen_ok:
-                                fatal_reason = "닫힌 뒤 동일 격리 브라우저의 재실행 확인에 실패했습니다."
+                                fatal_reason = ("재실행 후 격리 프로필 또는 브라우저 소유권을 확인할 수 없습니다."
+                                    if not evidence.get("verified") or identity != baseline_profile_identity else None)
                         else:
                             cycle_ok = False
-                            fatal_reason = "브라우저 창이 정상적으로 닫혔는지 확인할 수 없습니다."
+                            fatal_reason = None
                     except Exception as exc:
                         err = _safe_error_result(exc)
                         emit(cycle, "C_OR_D_LIFECYCLE", "FAIL",
                              failure_reason=err.get("message", "브라우저 수명주기 확인 실패"),
                              error_type=err.get("error_type"), browser_exit_code=err.get("browser_exit_code"))
                         cycle_ok = False
-                        fatal_reason = err.get("message", "브라우저 수명주기 확인 실패")
+                        fatal_reason = (err.get("message", "브라우저 소유권을 확인할 수 없습니다.")
+                            if isinstance(exc, BrowserOwnershipUncertain) else None)
                 if cycle_ok:
                     successful += 1
                 else:
-                    # Avoid rapid or unsafe retries when ownership/window evidence is uncertain.
-                    break
+                    # Continue after ordinary assertion/launch failures only after the manager
+                    # proves session ownership and confirms all owned processes are gone.
+                    if fatal_reason:
+                        break
+                    if manager.session:
+                        try:
+                            evidence = manager.profile_ownership_evidence()
+                            if not evidence.get("verified"):
+                                fatal_reason = "전용 브라우저 소유권이 불명확해 다음 회차를 중단했습니다."
+                                break
+                            cleanup = manager.close_owned(grace_seconds=5)
+                            if not cleanup.closed or cleanup.residual_process_ids:
+                                fatal_reason = "전용 브라우저 정리가 확인되지 않아 다음 회차를 중단했습니다."
+                                break
+                        except Exception as exc:
+                            fatal_reason = _safe_error_result(exc).get("message", "전용 브라우저 정리 실패")
+                            break
+                round_events = events[cycle_event_start:]
+                cycle_metrics = manager.metrics() if manager.session else None
+                by_stage = {item.get("event_stage"): item for item in round_events}
+                latest_profile = next((item for item in reversed(round_events) if item.get("profile_path")), {})
+                events.append({
+                    "cycle": cycle, "step": "CYCLE_SUMMARY", "event_stage": "CYCLE_SUMMARY",
+                    "state": "PASS" if cycle_ok else "FAIL",
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "actual_window_open": bool(by_stage.get("A_INITIAL_OPEN", {}).get("window_opened")),
+                    "page_load_confirmed": bool(by_stage.get("A_INITIAL_OPEN", {}).get("page_load_confirmed")),
+                    "same_window_reuse": bool(by_stage.get("B_REUSE", {}).get("same_window_reuse")),
+                    "dedicated_browser_closed": bool(by_stage.get("C_USER_CLOSE_OBSERVED", {}).get("state") == "PASS"),
+                    "reopened_after_close": bool(by_stage.get("D_REOPEN_AFTER_CLOSE", {}).get("reopened_after_close")),
+                    "profile_path": latest_profile.get("profile_path"),
+                    "profile_ownership_verified": bool(latest_profile.get("profile_ownership_verified")),
+                    "same_isolated_profile": bool(latest_profile.get("same_isolated_profile")),
+                    "residual_process_count": cycle_metrics.owned_process_count if cycle_metrics else 0,
+                    "system_cpu_percent_samples": [item.get("system_cpu_percent_sample") for item in round_events],
+                    "system_available_ram_bytes_samples": [item.get("system_available_ram_bytes") for item in round_events],
+                    "failure_reason": fatal_reason or next((item.get("failure_reason") for item in round_events
+                        if item.get("state") == "FAIL" and item.get("failure_reason")), None),
+                })
         finally:
             if manager.session:
                 try:
-                    close_result = manager.close_owned(grace_seconds=5)
-                    after = manager.metrics()
-                    current_processes = browser_processes()
-                    current_ids = {pid for _, pid in current_processes} if current_processes is not None else set()
-                    preserved = (baseline_ids.issubset(current_ids)
-                                 if self._baseline_processes is not None and current_processes is not None else None)
-                    residual_count = len(close_result.residual_process_ids)
-                    close_ok = bool(close_result.closed and not close_result.residual_process_ids
-                                     and not close_result.forced_process_ids and preserved is True)
-                    emit(max(1, completed), "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK",
-                         "PASS" if close_ok else "FAIL",
-                         dedicated_close_normal=not bool(close_result.forced_process_ids),
-                         forced_owned_pids=list(close_result.forced_process_ids),
-                         residual_owned_pids=list(close_result.residual_process_ids),
-                         residual_process_count=residual_count,
-                         baseline_browser_pids_preserved=preserved,
-                         baseline_browser_count=len(self._baseline_processes) if self._baseline_processes is not None else None,
-                         browser_count_after=len(current_processes) if current_processes is not None else None,
-                         browser_rss_before_bytes=close_result.rss_before_bytes,
-                         browser_rss_after_bytes=close_result.rss_after_bytes,
-                         failure_reason=None if close_ok else "전용 브라우저가 정상 종료되지 않았거나 기존 브라우저 PID 보존을 확인하지 못함")
-                    if not close_ok:
-                        fatal_reason = fatal_reason or "최종 종료 또는 일반 브라우저 보존 확인 실패"
+                    evidence = manager.profile_ownership_evidence()
+                    if not evidence.get("verified"):
+                        metrics = manager.metrics()
+                        residual_count = metrics.owned_process_count
+                        emit(max(1, completed), "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK", "FAIL",
+                             profile_path=evidence.get("profile_path"),
+                             profile_ownership_verified=False,
+                             residual_process_count=residual_count,
+                             residual_owned_pids=list(metrics.child_process_ids)
+                                + ([metrics.root_pid] if metrics.root_pid else []),
+                             failure_reason="소유권을 확인할 수 없어 프로세스를 종료하지 않았습니다.")
+                        fatal_reason = fatal_reason or "소유권을 확인할 수 없어 브라우저 종료를 생략했습니다."
+                        return_from_cleanup = True
+                    else:
+                        return_from_cleanup = False
+                    if return_from_cleanup:
+                        close_result = None
+                    else:
+                        close_result = manager.close_owned(grace_seconds=5)
+                    if close_result is None:
+                        pass
+                    else:
+                        current_processes = browser_processes()
+                        current_ids = {pid for _, pid in current_processes} if current_processes is not None else set()
+                        preserved = (baseline_ids.issubset(current_ids)
+                                     if self._baseline_processes is not None and current_processes is not None else None)
+                        residual_count = len(close_result.residual_process_ids)
+                        close_ok = bool(close_result.closed and not close_result.residual_process_ids
+                                         and not close_result.forced_process_ids and preserved is True)
+                        emit(max(1, completed), "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK",
+                             "PASS" if close_ok else "FAIL",
+                             dedicated_close_normal=not bool(close_result.forced_process_ids),
+                             forced_owned_pids=list(close_result.forced_process_ids),
+                             residual_owned_pids=list(close_result.residual_process_ids),
+                             residual_process_count=residual_count,
+                             baseline_browser_pids_preserved=preserved,
+                             baseline_browser_count=len(self._baseline_processes) if self._baseline_processes is not None else None,
+                             browser_count_after=len(current_processes) if current_processes is not None else None,
+                             browser_rss_before_bytes=close_result.rss_before_bytes,
+                             browser_rss_after_bytes=close_result.rss_after_bytes,
+                             failure_reason=None if close_ok else "전용 브라우저가 정상 종료되지 않았거나 기존 브라우저 보존을 확인하지 못함")
+                        if not close_ok:
+                            fatal_reason = fatal_reason or "최종 종료 또는 일반 브라우저 보존 확인 실패"
                 except Exception as exc:
                     err = _safe_error_result(exc)
                     emit(max(1, completed), "E_DEDICATED_CLOSE_AND_F_RESIDUAL_PROCESS_CHECK", "FAIL",
                          failure_reason=err.get("message", "최종 정리 실패"), error_type=err.get("error_type"))
                     fatal_reason = fatal_reason or err.get("message", "최종 정리 실패")
 
-        failure_count = sum(item["state"] == "FAIL" for item in events)
+        failure_count = max(0, completed - successful)
+        stage_failure_count = sum(item["state"] == "FAIL" for item in events
+                                  if item.get("event_stage") in {"A_INITIAL_OPEN", "B_REUSE", "C_USER_CLOSE_OBSERVED", "D_REOPEN_AFTER_CLOSE"})
+        if residual_count is None and manager.session is None:
+            residual_count = 0
+        summary_failure_reason = fatal_reason or next((item.get("failure_reason") for item in events
+            if item.get("state") == "FAIL" and item.get("failure_reason")), None)
         final_verdict = "PASS" if completed == cycles and successful == cycles and failure_count == 0 else "INCOMPLETE_OR_FAIL"
         summary = {"requested_cycles": cycles, "completed_cycles": completed,
                    "success_count": successful, "failure_count": failure_count,
+                   "stage_failure_count": stage_failure_count,
                    "residual_process_count": residual_count, "max_owned_rss_bytes": max_rss,
                    "max_owned_process_handle_count": max_handles,
-                   "final_verdict": final_verdict, "failure_reason": fatal_reason,
+                   "final_verdict": final_verdict, "failure_reason": summary_failure_reason,
                    "browser": self._selected_browser}
         self.test_root.mkdir(parents=True, exist_ok=True)
         report_path = self.test_root / "browser-verification-report.json"

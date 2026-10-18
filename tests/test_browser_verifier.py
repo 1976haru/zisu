@@ -25,6 +25,12 @@ class BrowserVerifierTests(unittest.TestCase):
         self.assertEqual(first.parts[-3:-1], ("ZisuSignalLab", "BrowserVerification"))
         self.assertNotIn("ZisuResearchStudio", str(first))
 
+    def test_verifier_preference_path_is_stable_but_separate_from_each_run(self):
+        from mcrs.browser_verifier import verifier_settings_path
+        root = Path.cwd() / ".test_tmp" / "preference-root"
+        self.assertEqual(verifier_settings_path(root), verifier_settings_path(root))
+        self.assertNotEqual(verifier_settings_path(root), verifier_root(root, "one") / "research-browser-settings.json")
+
     def test_local_page_load_is_loopback_only_and_records_request(self):
         server, thread = create_local_server()
         try:
@@ -123,7 +129,9 @@ class BrowserVerifierTests(unittest.TestCase):
 
         class FakeManager:
             def __init__(self):
-                self.session = SimpleNamespace(profile_dir="isolated-profile")
+                self.profile_dir = Path.cwd() / ".test_tmp" / f"profile-{uuid.uuid4().hex}"
+                self.profile_dir.mkdir(parents=True)
+                self.session = SimpleNamespace(profile_dir=str(self.profile_dir))
                 self.open_count = 0
                 self.windows = 0
 
@@ -133,8 +141,18 @@ class BrowserVerifierTests(unittest.TestCase):
                     self.windows, (778, 779) if self.session else (),
                     lifecycle_state="OPEN" if self.windows else "USER_CLOSED")
 
+            def profile_ownership_evidence(self):
+                if self.session is None:
+                    return {"verified": False, "profile_path": None, "owned_pids": []}
+                # Simulates independent exact --user-data-dir process evidence.
+                return {"verified": True, "profile_path": str(self.profile_dir),
+                        "owned_pids": [777], "path_valid": True,
+                        "process_profile_match": True, "tracked_process_match": True}
+
             def open_selected(self, url, *, user_approved=False):
                 self.assert_approved = user_approved
+                if self.session is None:
+                    self.session = SimpleNamespace(profile_dir=str(self.profile_dir))
                 with urlopen(url, timeout=2) as response:
                     self.assert_page = response.status == 200
                 self.windows = 1
@@ -177,8 +195,169 @@ class BrowserVerifierTests(unittest.TestCase):
             self.assertTrue(any(event["event_stage"] == "D_REOPEN_AFTER_CLOSE"
                                 for event in payload["events"]))
             self.assertEqual(app._manager.open_count, 15)
+            cycles = [event for event in payload["events"] if event.get("event_stage") == "CYCLE_SUMMARY"]
+            self.assertEqual(len(cycles), 5)
+            self.assertTrue(all(event["same_isolated_profile"] and event["profile_ownership_verified"]
+                                for event in cycles))
+            self.assertTrue(all(event["profile_path"] for event in cycles))
         finally:
             app._stop_server()
+            # Test profile is disposable test data, not a user/browser profile.
+            import shutil
+            shutil.rmtree(app._manager.profile_dir)
+
+    def test_auto_test_sets_profile_baseline_after_initial_open_not_before(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+        from mcrs.browser_verifier import _canonical_profile_identity
+        path = Path("C:/Users/Test/AppData/Local/ZisuSignalLab/BrowserVerification/run/research-browser-profiles/abc").as_posix()
+        self.assertEqual(_canonical_profile_identity(path), _canonical_profile_identity(path.replace("/", "\\")))
+
+    def test_browser_preference_defaults_to_chrome_and_persists_explicit_choice(self):
+        from mcrs.research_browser import load_browser_preference, save_browser_preference, find_browser
+        root = Path.cwd() / ".test_tmp" / f"browser-pref-{uuid.uuid4().hex}"
+        path = root / "research-browser-settings.json"
+        try:
+            self.assertIsNone(load_browser_preference(path))
+            save_browser_preference("Microsoft Edge", path)
+            self.assertEqual(load_browser_preference(path), "Microsoft Edge")
+            with patch("mcrs.research_browser.find_browser_candidates",
+                       return_value={"Google Chrome": "chrome.exe", "Microsoft Edge": "edge.exe"}):
+                self.assertEqual(find_browser(settings_path=path), "edge.exe")
+                path.unlink()
+                self.assertEqual(find_browser(settings_path=path), "chrome.exe")
+        finally:
+            import shutil
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_research_browser_default_candidate_order_is_chrome_first(self):
+        from mcrs.research_browser import find_browser
+        with patch("mcrs.research_browser.find_browser_candidates",
+                   return_value={"Google Chrome": "chrome.exe", "Microsoft Edge": "edge.exe"}):
+            self.assertEqual(find_browser(), "chrome.exe")
+
+    def test_auto_test_continues_after_ordinary_validation_failure_and_reports_all_rounds(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+        # Reuse the existing fake pipeline setup through a compact local manager.
+        class FakeManager:
+            def __init__(self, path):
+                self.profile_dir = path
+                Path(path).mkdir(parents=True)
+                self.session = SimpleNamespace(profile_dir=path)
+                self.windows = 0
+                self.opens = 0
+            def metrics(self):
+                return BrowserMetrics(bool(self.session), 700 if self.session else None,
+                    2 if self.session else 0, 1024, self.windows,
+                    (701,) if self.session else (), lifecycle_state="OPEN" if self.windows else "USER_CLOSED")
+            def profile_ownership_evidence(self):
+                return {"verified": bool(self.session), "profile_path": self.profile_dir if self.session else None,
+                        "owned_pids": [700] if self.session else []}
+            def open_selected(self, url, *, user_approved=False):
+                if self.session is None:
+                    self.session = SimpleNamespace(profile_dir=self.profile_dir)
+                with urlopen(url, timeout=2) as response:
+                    response.read()
+                self.windows = 1
+                self.opens += 1
+                return self.metrics()
+            def request_close_owned_windows(self):
+                self.windows = 0
+                return (700, 701)
+            def close_owned(self, grace_seconds=5):
+                self.windows = 0
+                self.session = None
+                return SimpleNamespace(closed=True, forced_process_ids=(), residual_process_ids=(),
+                    rss_before_bytes=1024, rss_after_bytes=0)
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._selected_browser = "Google Chrome"
+        app._server = app._server_thread = None
+        app.test_root = Path.cwd() / ".test_tmp" / f"continue-auto-{uuid.uuid4().hex}"
+        app.events = []
+        app.messages = __import__("queue").Queue()
+        app._seen_paths = set()
+        app._baseline_processes = set()
+        manager = FakeManager(str(app.test_root / "research-browser-profiles" / "session"))
+        app._manager = manager
+        app._manager_for_selected = lambda: manager
+        await_count = {"n": 0}
+        real_await = app._await_page
+        def one_ordinary_miss(path, timeout=8.0):
+            result = real_await(path, timeout)
+            await_count["n"] += 1
+            return False if await_count["n"] == 1 else result
+        app._await_page = one_ordinary_miss
+        try:
+            with patch("mcrs.browser_verifier.browser_processes", return_value=set()), \
+                    patch("mcrs.browser_verifier._process_handle_count", return_value=3):
+                result = app._run_full_auto_test(2)
+            self.assertEqual(result["auto_summary"]["completed_cycles"], 2)
+            self.assertEqual(result["auto_summary"]["success_count"], 1)
+            self.assertEqual(result["auto_summary"]["failure_count"], 1)
+            self.assertEqual(manager.opens, 4)  # failed round + complete round, 2 opens each
+        finally:
+            app._stop_server()
+            import shutil
+            shutil.rmtree(app.test_root)
+
+    def test_profile_comparison_does_not_depend_on_process_pid(self):
+        from mcrs.research_browser import ResearchBrowserManager, BrowserSession
+        root = Path.cwd() / ".test_tmp" / f"ownership-{uuid.uuid4().hex}"
+        profile_root = root / "research-browser-profiles"
+        profile = profile_root / ("a" * 32)
+        profile.mkdir(parents=True)
+        exe = root / "chrome.exe"
+        exe.write_bytes(b"test")
+        manager = ResearchBrowserManager(app_data_root=root, executable=str(exe))
+        manager.session = BrowserSession("a" * 32, 111, 1, str(exe), str(profile), 1.0,
+            owned_processes={222: (2, str(exe))})
+        with patch("mcrs.research_browser._profile_owned_processes",
+                   return_value={222: (2, str(exe))}), \
+             patch.object(manager, "metrics", return_value=BrowserMetrics(True, 222, 1, 10, 1, (222,))):
+            evidence = manager.profile_ownership_evidence()
+        self.assertTrue(evidence["verified"])
+        self.assertEqual(evidence["owned_pids"], [222])
+        import shutil
+        shutil.rmtree(root)
+
+    def test_unverified_profile_ownership_stops_automatic_run_immediately(self):
+        from mcrs.browser_verifier import BrowserVerifierApp
+        class UncertainManager:
+            def __init__(self):
+                self.session = SimpleNamespace(profile_dir="outside-profile")
+                self.close_attempts = 0
+            def metrics(self):
+                return BrowserMetrics(True, 900, 2, 100, 1, (901,), lifecycle_state="OPEN")
+            def profile_ownership_evidence(self):
+                return {"verified": False, "profile_path": "outside-profile", "owned_pids": []}
+            def open_selected(self, *_args, **_kwargs):
+                return self.metrics()
+            def close_owned(self, **_kwargs):
+                self.close_attempts += 1
+                raise AssertionError("unverified browser ownership must never be closed automatically")
+        app = BrowserVerifierApp.__new__(BrowserVerifierApp)
+        app._selected_browser = "Google Chrome"
+        app._server = app._server_thread = None
+        app.test_root = Path.cwd() / ".test_tmp" / f"uncertain-auto-{uuid.uuid4().hex}"
+        app.events = []
+        app.messages = __import__("queue").Queue()
+        app._seen_paths = set()
+        app._baseline_processes = set()
+        app._manager = UncertainManager()
+        app._manager_for_selected = lambda: app._manager
+        app._await_page = lambda *_args, **_kwargs: False
+        with patch("mcrs.browser_verifier.browser_processes", return_value=set()):
+            result = app._run_full_auto_test(5)
+        try:
+            self.assertEqual(result["auto_summary"]["completed_cycles"], 1)
+            self.assertEqual(result["auto_summary"]["final_verdict"], "INCOMPLETE_OR_FAIL")
+            self.assertIn("소유권", result["auto_summary"]["failure_reason"])
+            self.assertEqual(app._manager.close_attempts, 0)
+        finally:
+            app._stop_server()
+            import shutil
+            if app.test_root.exists():
+                shutil.rmtree(app.test_root)
 
     def test_report_declares_separate_browser_lifecycle_stages(self):
         payload = build_report([{"step": "open", "state": "PASS", "event_stage": "A_INITIAL_OPEN"}])

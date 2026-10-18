@@ -32,6 +32,21 @@ class ResearchBrowserTests(unittest.TestCase):
     def tearDown(self):
         self.temp.__exit__(None,None,None)
 
+    def test_first_run_defaults_to_chrome_and_explicit_edge_choice_restores(self):
+        root=self.root / "browser-preference"
+        chrome=root / "chrome.exe"; edge=root / "msedge.exe"
+        chrome.parent.mkdir(parents=True); chrome.write_bytes(b"mock")
+        edge.write_bytes(b"mock")
+        choices={"Google Chrome":str(chrome),"Microsoft Edge":str(edge)}
+        with patch.object(research_browser,"find_browser_candidates",return_value=choices):
+            first=research_browser.ResearchBrowserManager(app_data_root=root)
+            self.assertEqual("Google Chrome",first.preferred_browser)
+            self.assertEqual(str(chrome.resolve()),first.executable)
+            first.select_browser("Microsoft Edge")
+            restored=research_browser.ResearchBrowserManager(app_data_root=root)
+            self.assertEqual("Microsoft Edge",restored.preferred_browser)
+            self.assertEqual(str(edge.resolve()),restored.executable)
+
     def test_url_validation_blocks_non_youtube_and_non_https(self):
         self.assertEqual("https://www.youtube.com/watch?v=abcdefghijk",
             research_browser.validate_research_url("https://www.youtube.com/watch?v=abcdefghijk"))

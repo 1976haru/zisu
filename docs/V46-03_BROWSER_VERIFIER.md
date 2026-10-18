@@ -6,9 +6,9 @@
 
 1. 전달받은 `ZISU_V46-03_Browser_Verifier.exe`를 Windows PC에 저장합니다.
 2. 파일을 더블클릭합니다. PowerShell 입력이나 관리자 권한은 필요하지 않습니다.
-3. Edge 또는 Chrome을 고른 다음 반복 횟수 `5회` 또는 `20회`를 선택합니다.
+3. 기본 선택은 Google Chrome입니다. 필요하면 Edge를 선택할 수 있으며, 선택한 브라우저는 안전한 앱 설정으로 저장됩니다. 반복 횟수 `5회` 또는 `20회`를 선택합니다.
 4. `전체 자동 테스트 시작`을 한 번 누릅니다. 프로그램이 로컬 페이지 열기, 같은 격리 창 재사용, 해당 창에만 WM_CLOSE 전송(X 버튼 동작과 동일), 닫힘 확인, 같은 프로필로 재실행을 순서대로 수행합니다.
-5. 마지막 반복 후 전용 창과 소유 자식 프로세스를 정상 종료하고, 테스트 전 일반 Chrome/Edge PID가 유지됐는지 확인합니다. 실패나 소유권 불확실성이 생기면 추가 반복을 중지하고 실패 원인을 기록합니다.
+5. 한 회차의 일반적인 페이지/창 검증 실패는 소유권이 검증된 전용 프로세스를 정리한 다음 다음 회차를 계속합니다. 프로필/프로세스 소유권이 불명확하거나 정리가 실패하면 안전을 위해 즉시 중단합니다. 마지막 반복 후 테스트 전 일반 Chrome/Edge 프로세스가 유지됐는지 확인합니다.
 6. 완료 화면에서 총 회수, 성공/실패, 잔류 프로세스, 최대 전용 브라우저 메모리, 최종 판정과 저장 경로를 확인합니다. 보고서는 자동 저장되며 필요하면 `결과 보고서 저장`으로 다시 저장할 수 있습니다.
 
 보고서는 `%LOCALAPPDATA%\ZisuSignalLab\BrowserVerification\<실행 ID>\browser-verification-report.json`에 저장됩니다. 실패하거나 테스트를 끝내기 전에 보고서를 저장하면 PASS가 아니라 미완료/실패로 기록됩니다.
@@ -24,8 +24,10 @@ The verifier now records lifecycle states `STARTING`, `OPEN`, `USER_CLOSED`, `BA
 
 Latest build is an onedir Windows package; extract the complete ZIP and keep `_internal` beside the EXE. Use the current handoff path and SHA-256 from the release report, not historical artifact paths recorded in older status notes.
 
-For the automated check, choose `5회` (recommended) or `20회` and click **전체 자동 테스트 시작** once. The report records every lifecycle stage and actual pass/fail, timestamp, local-page request, window/process count, owned PIDs, exit code, close reason, CPU/RAM, owned-process RSS/handle count, and whether baseline browser PIDs remained. A failure stops further cycles and is never converted into a pass.
+For the automated check, choose `5회` (recommended) or `20회` and click **전체 자동 테스트 시작** once. The report records every lifecycle stage and actual pass/fail, timestamp, local-page request, window/process count, owned PIDs, exit code, close reason, CPU/RAM, owned-process RSS/handle count, per-cycle profile/ownership proof, and whether baseline browser PIDs remained. Ordinary verification failures continue only after safe owned-process cleanup. Ownership ambiguity or cleanup failure stops the run and is never converted into a pass.
 
-PID recovery is accepted only when the process executable matches the selected Edge/Chrome binary and its parsed `--user-data-dir` argument exactly matches the isolated verifier profile. Stale PID identities are discarded before process-tree expansion. No process is selected or terminated by image name alone.
+The first false `same_isolated_profile` verdict was caused by comparing the first launched profile path with a baseline captured before launch (`None`). The verifier now captures a baseline after independent proof and compares canonical paths. Profile proof requires the session folder to be the exact expected child of the verifier-only profile root and an observed process with the selected executable plus an exact parsed `--user-data-dir` argument; that process must be in the manager's tracked owned PID set. PID changes alone are not a failure, but missing path/process proof remains a failure. Stale PID identities are discarded before process-tree expansion. No process is selected or terminated by image name alone.
+
+Use the newest handoff folder's ZIP and its included `SHA256SUMS.txt` to identify and verify the current verifier build; older paths and hashes in historical status entries are not current. Keep the ZIP's `_internal` folder beside the EXE after extraction. This package is a diagnostic verifier, not the V4.5.9 product installer.
 
 Current user-supplied run summary (not independently reproduced here): 5 Chrome attempts; attempts 1 and 3 passed; 2 and 4 failed the window-retention check; attempt 5 displayed then exited with code 0. This mixed result remains incomplete until the updated verifier records five successful reopen cycles on the user's interactive desktop.

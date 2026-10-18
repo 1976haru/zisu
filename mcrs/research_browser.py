@@ -28,6 +28,36 @@ import uuid
 import webbrowser
 from urllib.parse import urlparse, parse_qs
 
+
+BROWSER_LABELS = ("Google Chrome", "Microsoft Edge")
+
+
+def _browser_settings_path(root=None):
+    if root is not None:
+        return Path(root) / "research-browser-settings.json"
+    return _default_app_data_root() / "research-browser-settings.json"
+
+
+def load_browser_preference(path=None) -> str | None:
+    """Load only a known browser label; malformed settings fail back to the default."""
+    try:
+        payload = json.loads(Path(path or _browser_settings_path()).read_text(encoding="utf-8"))
+        value = payload.get("preferred_browser") if isinstance(payload, dict) else None
+        return value if value in BROWSER_LABELS else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def save_browser_preference(value: str, path=None) -> None:
+    """Persist the user's explicit browser choice atomically, without other settings."""
+    if value not in BROWSER_LABELS:
+        raise ValueError("지원하지 않는 브라우저 선택입니다.")
+    target = Path(path or _browser_settings_path())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_suffix(target.suffix + ".tmp")
+    temp.write_text(json.dumps({"preferred_browser": value}, ensure_ascii=False), encoding="utf-8")
+    os.replace(temp, target)
+
 from .resource_guard import ResourceGuard, ResourceSnapshot, sample_resources
 
 
@@ -109,26 +139,35 @@ def validate_research_url(url: str, *, allow_local_test: bool = False) -> str:
     raise ValueError("연구 창에는 정상적인 YouTube 영상 주소만 열 수 있습니다.")
 
 
-def find_browser() -> str | None:
-    """Prefer installed Edge, then Chrome; never install or download a browser."""
-    candidates = []
+def find_browser_candidates() -> dict[str, str]:
+    """Return installed browsers, preferring no browser and changing no settings."""
+    candidates = {"Google Chrome": [], "Microsoft Edge": []}
     if os.name == "nt":
         roots = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
                  os.environ.get("LOCALAPPDATA")]
         for root in roots:
             if root:
-                candidates.extend((os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
-                    os.path.join(root, "Google", "Chrome", "Application", "chrome.exe")))
-    candidates.extend((shutil.which("msedge"), shutil.which("chrome")))
-    seen = set()
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            resolved = str(Path(candidate).resolve())
-            key = os.path.normcase(resolved)
-            if key not in seen:
-                seen.add(key)
-                return resolved
-    return None
+                candidates["Google Chrome"].append(os.path.join(root, "Google", "Chrome", "Application", "chrome.exe"))
+                candidates["Microsoft Edge"].append(os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"))
+    candidates["Google Chrome"].append(shutil.which("chrome"))
+    candidates["Microsoft Edge"].append(shutil.which("msedge"))
+    found = {}
+    for label, paths in candidates.items():
+        for candidate in paths:
+            if candidate and Path(candidate).is_file():
+                found[label] = str(Path(candidate).resolve())
+                break
+    return found
+
+
+def find_browser(preferred_browser: str | None = None, *, settings_path=None) -> str | None:
+    """Use the saved explicit preference or Google Chrome-first first-run default."""
+    candidates = find_browser_candidates()
+    preferred = preferred_browser or load_browser_preference(settings_path) or "Google Chrome"
+    if preferred in candidates:
+        return candidates[preferred]
+    fallback = "Google Chrome" if preferred != "Google Chrome" else "Microsoft Edge"
+    return candidates.get(fallback)
 
 
 def open_manual_research_url(url: str, *, opener=None) -> bool:
@@ -143,12 +182,23 @@ class ResearchBrowserManager:
     def __init__(self, *, app_data_root: str | os.PathLike | None = None,
                  executable: str | None = None, resource_guard: ResourceGuard | None = None,
                  resource_sampler=sample_resources, launcher=subprocess.Popen,
-                 allow_local_test: bool = False, startup_stability_seconds: float = 1.5):
+                 allow_local_test: bool = False, startup_stability_seconds: float = 1.5,
+                 preferred_browser: str | None = None):
         root = app_data_root or _default_app_data_root()
         self.root = Path(root)
         self.profile_root = self.root / "research-browser-profiles"
         self.manifest_path = self.root / "research-browser-session.json"
-        self.executable = str(Path(executable).resolve()) if executable else find_browser()
+        self.settings_path = _browser_settings_path(self.root)
+        self.browser_choices = find_browser_candidates()
+        saved_browser = load_browser_preference(self.settings_path)
+        self.preferred_browser = preferred_browser or saved_browser or "Google Chrome"
+        if executable:
+            self.executable = str(Path(executable).resolve())
+            base_name = Path(self.executable).name.casefold()
+            self.preferred_browser = "Google Chrome" if base_name == "chrome.exe" else (
+                "Microsoft Edge" if base_name == "msedge.exe" else self.preferred_browser)
+        else:
+            self.executable = find_browser(self.preferred_browser, settings_path=self.settings_path)
         self.resource_guard = resource_guard or ResourceGuard()
         self.resource_sampler = resource_sampler
         self.launcher = launcher
@@ -156,7 +206,53 @@ class ResearchBrowserManager:
         self.startup_stability_seconds = max(0.0, min(5.0, float(startup_stability_seconds)))
         self._lock = threading.RLock()
         self.session: BrowserSession | None = None
+        self.last_attempt_session_id: str | None = None
+        self.last_attempt_profile_dir: str | None = None
         self._recovery_record = self._load_recovery_record()
+
+    def select_browser(self, label: str, *, persist: bool = True) -> str:
+        """Select an installed browser, refusing changes during an active session."""
+        with self._lock:
+            if self.session or self._recovery_record:
+                raise BrowserBusy("연구용 브라우저가 열려 있는 동안에는 선택을 바꿀 수 없습니다.")
+            executable = self.browser_choices.get(label)
+            if label not in BROWSER_LABELS or not executable or not Path(executable).is_file():
+                raise BrowserError("선택한 브라우저를 찾을 수 없습니다. 설치 상태를 확인해 주세요.")
+            self.preferred_browser = label
+            self.executable = executable
+            if persist:
+                save_browser_preference(label, self.settings_path)
+            return executable
+
+    def profile_ownership_evidence(self) -> dict:
+        """Independently verify the private profile path and exact command-line owner."""
+        session = self.session
+        if session is None:
+            return {"verified": False, "profile_path": None, "owned_pids": [],
+                    "reason": "no_active_session"}
+        try:
+            root = self.profile_root.resolve(strict=True)
+            profile = Path(session.profile_dir).resolve(strict=True)
+            expected = (root / session.session_id).resolve(strict=True)
+            path_valid = profile == expected and profile.parent == root and profile.is_dir()
+        except (OSError, RuntimeError):
+            root, profile, path_valid = None, None, False
+        # This scan requires both the exact executable image and exact
+        # --user-data-dir argument; a PID change is allowed when that evidence
+        # still proves this isolated profile is in use.
+        matches = (_profile_owned_processes(session.executable, str(profile))
+                   if path_valid and profile is not None else {})
+        metrics = self.metrics()
+        tracked = set(metrics.child_process_ids)
+        if metrics.root_pid:
+            tracked.add(metrics.root_pid)
+        matching_pids = sorted(set(matches).intersection(tracked))
+        verified = bool(path_valid and matching_pids)
+        return {"verified": verified, "profile_path": str(profile) if profile else None,
+                "session_id": session.session_id, "owned_pids": matching_pids,
+                "path_valid": path_valid, "process_profile_match": bool(matches),
+                "tracked_process_match": bool(matching_pids),
+                "reason": None if verified else "isolated_profile_or_owned_process_not_confirmed"}
 
     @property
     def recovery_available(self) -> bool:
@@ -226,6 +322,8 @@ class ResearchBrowserManager:
                 session_id = uuid.uuid4().hex
                 profile = self.profile_root / session_id
                 profile.mkdir(parents=True, exist_ok=False)
+            self.last_attempt_session_id = session_id
+            self.last_attempt_profile_dir = str(profile)
             command = [self.executable, f"--user-data-dir={profile}",
                        "--no-first-run", "--no-default-browser-check", "--disable-sync",
                        "--disable-background-mode", "--disable-background-networking",

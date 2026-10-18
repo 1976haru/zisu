@@ -1872,6 +1872,12 @@ class Studio(tk.Tk):
         self.resource_low_load_var=tk.BooleanVar(value=True)
         self.resource_guard=ResourceGuard()
         self.research_browser=ResearchBrowserManager(resource_guard=self.resource_guard)
+        browser_labels=list(self.research_browser.browser_choices)
+        selected_browser=(self.research_browser.preferred_browser
+            if self.research_browser.preferred_browser in browser_labels else
+            "Google Chrome" if "Google Chrome" in browser_labels else
+            browser_labels[0] if browser_labels else "")
+        self.research_browser_choice=tk.StringVar(value=selected_browser)
         self.research_browser_status=tk.StringVar(value="전용 인터넷 창: 닫힘 · 연구 시간에만 열 수 있어요")
         self._browser_alerted_schedules=set()
         self._browser_metrics_checked_at=0.0
@@ -1897,6 +1903,11 @@ class Studio(tk.Tk):
         browser_panel=ttk.LabelFrame(tab,text="연구용 전용 인터넷 창 · 자동 재생/참여 기능 없음")
         browser_panel.grid(row=11,column=0,sticky="ew",pady=4)
         browser_buttons=ttk.Frame(browser_panel); browser_buttons.pack(fill="x",padx=4,pady=3)
+        ttk.Label(browser_buttons,text="전용 브라우저:").pack(side="left",padx=3)
+        self.research_browser_combo=ttk.Combobox(browser_buttons,textvariable=self.research_browser_choice,
+            values=browser_labels,state="readonly",width=18)
+        self.research_browser_combo.pack(side="left",padx=3)
+        self.research_browser_combo.bind("<<ComboboxSelected>>",self._research_browser_select)
         ttk.Button(browser_buttons,text="연구용 인터넷 창 열기",command=self._research_browser_open).pack(side="left",padx=3)
         ttk.Button(browser_buttons,text="기본 브라우저에서 수동 열기",command=self._research_browser_manual_open).pack(side="left",padx=3)
         ttk.Button(browser_buttons,text="인터넷 창 닫기",command=self._research_browser_close).pack(side="left",padx=3)
@@ -2538,6 +2549,16 @@ class Studio(tk.Tk):
                 self.autopilot_stage_text.set("프로필 전용 조사 보고서를 JSON으로 내보냈습니다.")
             except OSError:
                 self._autopilot_show_exception({"type":"report_export","impact":"보고서 파일을 쓸 수 없습니다.","recommended_action":"다른 저장 경로와 폴더 쓰기 권한을 확인하세요.","retry_allowed":True})
+
+    def _research_browser_select(self,_event=None):
+        selected=self.research_browser_choice.get()
+        try:
+            self.research_browser.select_browser(selected,persist=True)
+            self.research_browser_status.set(
+                f"연구용 브라우저를 {selected}(으)로 저장했습니다. 기존 Chrome·Edge 창과 프로필은 그대로 유지됩니다.")
+        except BrowserError as exc:
+            self.research_browser_choice.set(self.research_browser.preferred_browser)
+            self.research_browser_status.set(str(exc))
 
     def _research_browser_open(self):
         profile=self.current_profile()
