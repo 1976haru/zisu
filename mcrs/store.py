@@ -214,6 +214,29 @@ def initialize(path=None):
           avg_minutes REAL NOT NULL, subscribers INTEGER NOT NULL,
           PRIMARY KEY(profile_id,day),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS vph_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+          video_id TEXT NOT NULL, observed_at_utc TEXT NOT NULL, view_count INTEGER,
+          sample_status TEXT NOT NULL, uncertainty_reason TEXT NOT NULL DEFAULT '',
+          video_format TEXT NOT NULL DEFAULT 'unknown', published_at TEXT NOT NULL DEFAULT '',
+          duration_seconds INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(profile_id,video_id,observed_at_utc),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_vph_observations_pair_time
+          ON vph_observations(profile_id,video_id,observed_at_utc);
+        CREATE TABLE IF NOT EXISTS vph_evaluations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+          video_id TEXT NOT NULL, earlier_observation_id INTEGER,
+          later_observation_id INTEGER NOT NULL, elapsed_seconds REAL,
+          view_delta INTEGER, vph REAL, state TEXT NOT NULL, reason TEXT NOT NULL,
+          tier TEXT NOT NULL DEFAULT 'UNKNOWN', tier_a_threshold REAL NOT NULL,
+          tier_b_threshold REAL NOT NULL, confidence TEXT NOT NULL,
+          evaluated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(profile_id,video_id,later_observation_id),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+          FOREIGN KEY(earlier_observation_id) REFERENCES vph_observations(id),
+          FOREIGN KEY(later_observation_id) REFERENCES vph_observations(id));
         CREATE TABLE IF NOT EXISTS genre_audit (
           profile_id TEXT NOT NULL, video_id TEXT NOT NULL, video_title TEXT NOT NULL,
           description TEXT NOT NULL DEFAULT '', market TEXT NOT NULL, target_genre TEXT NOT NULL,
@@ -324,6 +347,8 @@ def initialize(path=None):
             "comment_tone TEXT NOT NULL DEFAULT ''",
             "comment_emoji_level TEXT NOT NULL DEFAULT 'light'",
             "comment_length TEXT NOT NULL DEFAULT 'short'",
+            "vph_tier_a REAL NOT NULL DEFAULT 100",
+            "vph_tier_b REAL NOT NULL DEFAULT 50",
         ):
             _add_column(db, "profiles", definition)
         if migrate_legacy_subgenre:

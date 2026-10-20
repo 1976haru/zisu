@@ -49,6 +49,35 @@ class LauncherTests(unittest.TestCase):
             self.assertGreaterEqual(payload["events"][-1]["launch_elapsed_ms"],0)
             self.assertNotIn("email",payload)
             self.assertNotIn("token",report.read_text(encoding="utf-8").lower())
+    def test_startup_report_retries_transient_windows_replace_lock_atomically(self):
+        with WorkspaceTemp() as root:
+            report=root/"locked-report.json"
+            real_replace=os.replace
+            attempts=[]
+            def transient(source,target):
+                attempts.append((Path(source),Path(target)))
+                if len(attempts)<3:
+                    raise PermissionError("simulated scanner lock")
+                return real_replace(source,target)
+            with patch.dict(os.environ,{"ZISU_EXE_SMOKE_REPORT":str(report)},clear=True), \
+                 patch("mcrs.startup_probe.os.replace",side_effect=transient), \
+                 patch("mcrs.startup_probe.time.sleep"):
+                write_stage("database_initializing")
+            self.assertEqual(3,len(attempts))
+            self.assertEqual("database_initializing",json.loads(report.read_text(encoding="utf-8"))["stage"])
+            self.assertFalse(list(root.glob("*.tmp")))
+
+    def test_startup_report_persistent_replace_lock_fails_and_leaves_old_complete_report(self):
+        with WorkspaceTemp() as root:
+            report=root/"locked-report.json"
+            report.write_text('{"stage":"previous_complete"}',encoding="utf-8")
+            with patch.dict(os.environ,{"ZISU_EXE_SMOKE_REPORT":str(report)},clear=True), \
+                 patch("mcrs.startup_probe.os.replace",side_effect=PermissionError("locked")), \
+                 patch("mcrs.startup_probe.time.sleep"):
+                with self.assertRaises(PermissionError):
+                    write_stage("database_initializing")
+            self.assertEqual("previous_complete",json.loads(report.read_text(encoding="utf-8"))["stage"])
+            self.assertFalse(list(root.glob("*.tmp")))
     def test_launcher_and_diagnostics_are_present(self):
         for f in ("실행하기.bat","START_ZISU.cmd","오류진단하기.bat","설치안내_문제해결.html","main.py","mcrs/gui.py"):
             self.assertTrue((ROOT/f).exists(),f)

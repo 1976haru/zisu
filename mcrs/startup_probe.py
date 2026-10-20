@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import traceback
@@ -64,8 +65,25 @@ def write_stage(stage: str, **details) -> None:
         "events": list(_EVENTS),
         **details,
     }
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    temporary.replace(target)
+    # Windows scanners can briefly retain a just-closed file handle.  A unique
+    # sibling prevents a stale/locked fixed .tmp name from poisoning the next
+    # stage or process; os.replace keeps readers on the old or complete payload.
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        for attempt in range(5):
+            try:
+                os.replace(temporary, target)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # Never conceal the original write/replace failure with cleanup.
+            pass

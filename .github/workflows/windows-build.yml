@@ -125,6 +125,19 @@ jobs:
       - name: Run packaged onefile and onedir offline scheduler QA (30 seconds each)
         shell: pwsh
         run: |
+          $archive = (Resolve-Path -LiteralPath 'dist/release/ZISU-SIGNAL-LAB-V4.6.0-Windows.zip').Path
+          $target = Join-Path $env:RUNNER_TEMP 'ZISU packaged QA 日本語 path'
+          if (Test-Path -LiteralPath $target) { throw "Refusing to reuse packaged QA target: $target" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $target
+          $manifest = Join-Path $target 'SHA256SUMS.txt'
+          $packagedExe = Join-Path $target 'ZisuResearchStudio.exe'
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $packagedExe -PathType Leaf)) {
+            throw 'Packaged QA archive is missing its manifest or executable.'
+          }
+          $expected = (Get-Content -LiteralPath $manifest -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedExe).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw 'Packaged QA EXE hash mismatch.' }
           function Invoke-OfflineQaShort($name, $exe) {
             $runRoot = Join-Path $env:RUNNER_TEMP ("zisu-qa-short-{0}-{1}" -f $name, [guid]::NewGuid().ToString('N'))
             $data = Join-Path $runRoot 'data'
