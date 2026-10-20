@@ -25,6 +25,7 @@ from . import ai_research
 from . import comments
 from . import timers
 from . import autopilot
+from . import vph
 from . import research_scheduler
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .research_browser import (ResearchBrowserManager, BrowserError, BrowserResourceDeferred,
@@ -332,6 +333,9 @@ class Studio(tk.Tk):
             tab=ttk.Frame(self.tabs,padding=14)
             self.tabs.add(tab,text=label)
             self.frames.append(tab)
+        vph_frame=ttk.Frame(self.tabs,padding=14)
+        self.tabs.add(vph_frame,text="VPH 연구 레이더")
+        self.frames.append(vph_frame)
         self._account_ui(self.frames[0])
         self._search_ui(self.frames[1])
         self._candidate_ui(self.frames[2])
@@ -340,6 +344,7 @@ class Studio(tk.Tk):
         self._help_ui(self.frames[5])
         self._ai_research_ui(self.frames[6])
         self._autopilot_ui(self.frames[7])
+        self._vph_ui(self.frames[8])
         self.filter.trace_add("write",lambda *_:self._save_ui_state())
         self.decision_filter.trace_add("write",lambda *_:self._save_ui_state())
         self.ai_target.trace_add("write",lambda *_:self._save_ui_state())
@@ -376,7 +381,7 @@ class Studio(tk.Tk):
         self.update_idletasks()
         payload = {
             "app_version": APP_VERSION,
-            "gui_initialized": len(self.frames) == 8 and len(self.tabs.tabs()) == 9 and bool(self.winfo_exists()),
+            "gui_initialized": len(self.frames) == 9 and len(self.tabs.tabs()) == 10 and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
             "python_executable": Path(sys.executable).name,
@@ -507,6 +512,7 @@ class Studio(tk.Tk):
             ("결과 확인",lambda:self.tabs.select(self.frames[2]),"TButton"),
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
+        ttk.Button(actions,text="VPH 연구 레이더",command=lambda:self.tabs.select(self.frames[8])).grid(row=6,column=0,sticky="ew",padx=3,pady=3)
         browser_row=ttk.Frame(content);browser_row.grid(row=13,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
@@ -847,6 +853,7 @@ class Studio(tk.Tk):
         if index==3:self.reload_candidates()
         elif index==7:self._ai_refresh_saved_results()
         elif index==8:self._autopilot_refresh_profile()
+        elif index==9:self.reload_vph_radar()
 
     def _restore_ui_state(self):
         state=getattr(self,"_ui_state",{})
@@ -1023,6 +1030,9 @@ class Studio(tk.Tk):
         self.reload_metrics()
         self.schedule_text.set(profile["schedule"])
         self._autopilot_refresh_profile()
+        if hasattr(self,"vph_profile_combo"):
+            self._sync_vph_profile_choice()
+            self.reload_vph_radar()
         self._save_ui_state()
         self._refresh_easy_step()
         self.footer.set("채널을 전환했습니다. 다른 채널의 검색 후보와 성과는 분리됩니다.")
@@ -1736,6 +1746,186 @@ class Studio(tk.Tk):
         if self.comment_video:
             item=store.get_candidate(*self.comment_video)
             if item:webbrowser.open(item["video_url"],new=2)
+
+    def _sync_vph_profile_choice(self):
+        if not hasattr(self,"vph_profile_combo"):
+            return
+        self.vph_profiles=list(self.profiles)
+        self.vph_profile_combo.configure(values=[
+            f'{p["name"]} | {p["market"]} | {_genre_title_for_profile(p)}' for p in self.vph_profiles])
+        index=next((i for i,p in enumerate(self.vph_profiles) if p["id"]==self.active_id),-1)
+        if index>=0:
+            self.vph_profile_combo.current(index)
+
+    def _vph_profile_selected(self,_event=None):
+        index=self.vph_profile_combo.current()
+        if 0<=index<len(self.vph_profiles) and self.vph_profiles[index]["id"]!=self.active_id:
+            if self.search_inflight or getattr(self,"ai_running",False) or getattr(self,"autopilot_schedule_running",False):
+                self._sync_vph_profile_choice()
+                messagebox.showinfo("연구 진행 중","현재 프로필의 진행 작업이 안전하게 끝난 뒤 프로필을 전환하세요.",parent=self)
+                return
+            self.reload_profiles(self.vph_profiles[index]["id"])
+        self.reload_vph_radar()
+
+    def _vph_ui(self,tab):
+        tab.columnconfigure(0,weight=1);tab.rowconfigure(2,weight=1)
+        ttk.Label(tab,text="VPH 연구 레이더",font=("Malgun Gothic",17,"bold")).grid(row=0,column=0,sticky="w",pady=(2,6))
+        ttk.Label(tab,text="누적 조회수 표본의 실제 변화 속도입니다. 조회수·구독·좋아요·댓글을 자동으로 늘리거나 영상 자동재생을 하지 않습니다. 영상은 사용자가 하나씩 직접 열어 듣고 10~20분 연구 메모를 남깁니다.",wraplength=1150).grid(row=1,column=0,sticky="w",pady=(0,8))
+        controls=ttk.Frame(tab);self.vph_controls=controls;controls.grid(row=2,column=0,sticky="new")
+        ttk.Label(controls,text="조사 프로필 / 채널").pack(side="left")
+        self.vph_profiles=[]
+        self.vph_profile_combo=ttk.Combobox(controls,state="readonly",width=42)
+        self.vph_profile_combo.pack(side="left",padx=6)
+        self.vph_profile_combo.bind("<<ComboboxSelected>>",self._vph_profile_selected)
+        ttk.Label(controls,text="Tier A ≥").pack(side="left",padx=(10,3))
+        self.vph_tier_a_var=tk.StringVar(value="100")
+        ttk.Entry(controls,textvariable=self.vph_tier_a_var,width=8).pack(side="left")
+        ttk.Label(controls,text="Tier B ≥").pack(side="left",padx=(7,3))
+        self.vph_tier_b_var=tk.StringVar(value="50")
+        ttk.Entry(controls,textvariable=self.vph_tier_b_var,width=8).pack(side="left")
+        ttk.Button(controls,text="기준 저장",command=self.save_vph_thresholds).pack(side="left",padx=6)
+        ttk.Button(controls,text="새로고침",command=self.reload_vph_radar).pack(side="left",padx=3)
+        columns=("market","genre","title","channel","published","duration","format","views","vph","tier","reason")
+        self.vph_tree=ttk.Treeview(tab,columns=columns,show="headings",height=14)
+        self.vph_tree.tag_configure("unknown",foreground="#795500")
+        self.vph_tree.tag_configure("review",foreground="#9B2C2C")
+        labels={"market":"시장","genre":"장르","title":"영상 제목","channel":"채널","published":"게시일","duration":"길이","format":"형식","views":"누적 조회수","vph":"시간당 조회","tier":"등급","reason":"판정 사유"}
+        widths={"market":58,"genre":140,"title":230,"channel":160,"published":95,"duration":65,"format":82,"views":100,"vph":95,"tier":115,"reason":200}
+        for col in columns:
+            self.vph_tree.heading(col,text=labels[col])
+            self.vph_tree.column(col,width=widths[col],stretch=col in {"title","reason"},anchor="w")
+        self.vph_tree.grid(row=3,column=0,sticky="nsew",pady=7)
+        tab.rowconfigure(3,weight=1)
+        scroll=ttk.Scrollbar(tab,orient="vertical",command=self.vph_tree.yview)
+        scroll.grid(row=3,column=1,sticky="ns");self.vph_tree.configure(yscrollcommand=scroll.set)
+        horizontal=ttk.Scrollbar(tab,orient="horizontal",command=self.vph_tree.xview)
+        horizontal.grid(row=4,column=0,sticky="ew");self.vph_tree.configure(xscrollcommand=horizontal.set)
+        self.vph_status=tk.StringVar(value="표본이 없습니다. 오프라인 연구 데이터가 있으면 여기에 표시됩니다.")
+        ttk.Label(tab,textvariable=self.vph_status,wraplength=1100).grid(row=5,column=0,sticky="w",pady=3)
+        buttons=ttk.Frame(tab);self.vph_buttons=buttons;buttons.grid(row=6,column=0,sticky="w",pady=5)
+        ttk.Button(buttons,text="선택 영상의 표본 이력",command=self.open_vph_history).pack(side="left")
+        ttk.Button(buttons,text="선택 영상 후보·수동 메모",command=self.open_vph_manual_review).pack(side="left",padx=5)
+        ttk.Label(buttons,text="VPH는 장르 적합도 다음의 보조 정렬 기준이며, 60분 미만·결측·감소 등은 수치 대신 검토 상태로 표시합니다.").pack(side="left",padx=9)
+        self._sync_vph_profile_choice()
+        self.reload_vph_radar()
+
+    @staticmethod
+    def _vph_reason_ko(row):
+        if row.get("sample_status")=="missing" or row.get("view_count") is None:
+            details={"view_count_missing":"조회수 항목 없음","video_metadata_missing":"영상 정보를 찾지 못함"}
+            detail=details.get(row.get("uncertainty_reason"),"")
+            suffix="" if not detail else f" · {detail}"
+            return "누적 조회수 결측: VPH 산출 안 함"+suffix
+        if row.get("state")=="REVIEW":
+            reasons={"uncertain_or_missing_sample":"표본 결측 또는 불확실","stale_sample_pair":"표본 간격이 너무 오래됨","cumulative_view_count_decreased":"누적 조회수 감소: 확인 필요","duplicate_observation_timestamp":"동일 시각 표본 중복: 확인 필요","out_of_order_observation":"관측 순서 역전: 확인 필요"}
+        else:
+            reasons={"first_sample":"첫 표본: 비교 표본 없음","interval_under_60_minutes":"표본 부족: 60분 미만","stale_sample_pair":"오래된 표본: 재측정 필요","uncertain_or_missing_sample":"표본 결측 또는 불확실"}
+        if row.get("state")=="VALID":
+            return "유효한 60분 이상 표본" if row.get("tier") in {"A","B"} else "유효 표본: Tier B 기준 미만"
+        return reasons.get(row.get("reason"),"불확실한 표본: 사람 확인 필요")
+
+    def reload_vph_radar(self):
+        if not hasattr(self,"vph_tree"):
+            return
+        profile=self.current_profile()
+        profile_id=profile["id"] if profile else None
+        same_profile=profile_id==getattr(self,"_vph_tree_profile_id",None)
+        selected=self.vph_tree.selection()[0] if same_profile and self.vph_tree.selection() else None
+        try: vertical=self.vph_tree.yview()[0]; horizontal=self.vph_tree.xview()[0]
+        except tk.TclError: vertical=horizontal=0.0
+        self.vph_tree.delete(*self.vph_tree.get_children())
+        self._sync_vph_profile_choice()
+        if not profile:
+            self._vph_tree_profile_id=None
+            self.vph_tier_a_var.set("100");self.vph_tier_b_var.set("50")
+            self.vph_status.set("조사 프로필이 없습니다. 먼저 KR/JP 프로필을 추가하세요.")
+            return
+        self._vph_tree_profile_id=profile_id
+        self.vph_tier_a_var.set(str(profile.get("vph_tier_a",100)))
+        self.vph_tier_b_var.set(str(profile.get("vph_tier_b",50)))
+        genre=_genre_title_for_profile(profile)
+        rows=vph.list_radar(profile["id"])
+        self._vph_video_by_eval_id={}
+        for row in rows:
+            tier=(f"Tier {row['tier']}" if row["state"]=="VALID" and row["tier"] in {"A","B"}
+                  else "기준 미만" if row["state"]=="VALID" else row["state"])
+            views=row.get("view_count")
+            row_tag="review" if row.get("state")=="REVIEW" else "unknown" if row.get("state")=="UNKNOWN" else ""
+            self.vph_tree.insert("","end",iid=str(row["id"]),tags=(row_tag,) if row_tag else (),values=(profile["market"],genre,
+                row.get("video_title") or "제목 정보 없음",row.get("channel_title") or "채널 정보 없음",
+                str(row.get("published_at") or "")[:10] or "미상",self._format_vph_duration(row.get("duration_seconds")),
+                self._vph_format_ko(row.get("video_format")),f"{views:,}" if views is not None else "미상",
+                f"{row['vph']:.1f}" if row.get("vph") is not None else "—",tier,self._vph_reason_ko(row)))
+            self._vph_video_by_eval_id[str(row["id"])]=row["video_id"]
+        if selected and self.vph_tree.exists(selected):
+            self.vph_tree.selection_set(selected);self.vph_tree.focus(selected)
+        self.vph_tree.yview_moveto(vertical);self.vph_tree.xview_moveto(horizontal)
+        self.vph_status.set(f"{profile['name']} · {profile['market']} · {genre} · 최신 영상 평가 {len(rows)}건 · 원본 표본은 수정 없이 보존")
+
+    @staticmethod
+    def _vph_format_ko(value):
+        return {"longform":"롱폼","live":"라이브","short_candidate":"쇼츠 후보","unknown":"미상"}.get(value,"미상")
+
+    @staticmethod
+    def _format_vph_duration(seconds):
+        if seconds is None:return "미상"
+        seconds=int(seconds)
+        return f"{seconds//3600}:{(seconds%3600)//60:02d}:{seconds%60:02d}" if seconds>=3600 else f"{seconds//60}:{seconds%60:02d}"
+
+    def save_vph_thresholds(self):
+        if not self.active_id:
+            self.vph_status.set("프로필이 없어 기준을 저장할 수 없습니다.");return
+        try:
+            tier_a=float(self.vph_tier_a_var.get());tier_b=float(self.vph_tier_b_var.get())
+            vph.set_thresholds(self.active_id,tier_a,tier_b)
+        except (ValueError,OverflowError) as exc:
+            messagebox.showwarning("기준 확인","Tier A는 Tier B보다 크고 Tier B는 0 이상이어야 합니다. 숫자를 확인하세요.\n"+str(exc),parent=self);return
+        self.reload_profiles(self.active_id)
+        self.vph_status.set("이 프로필의 Tier 기준을 저장했습니다. 기존 평가에는 당시 기준이 보존됩니다.")
+
+    def open_vph_history(self):
+        if not self.active_id:
+            self.vph_status.set("표본 이력을 볼 프로필을 선택하세요.");return
+        selected=self.vph_tree.selection()
+        if not selected:
+            self.vph_status.set("먼저 레이더에서 영상을 선택하세요.");return
+        video_id=getattr(self,"_vph_video_by_eval_id",{}).get(selected[0])
+        if not video_id:return
+        current_title=self.vph_tree.item(selected[0],"values")[2]
+        history=vph.list_history(self.active_id,video_id)
+        window=tk.Toplevel(self);window.title("VPH 표본 이력 · "+current_title)
+        window.geometry("920x390");window.transient(self)
+        ttk.Label(window,text="각 행은 독립 관측 표본에 대한 평가입니다. 이 기록은 프로필별로 분리되어 보존됩니다.",wraplength=870).pack(anchor="w",padx=12,pady=8)
+        tree=ttk.Treeview(window,columns=("time","views","interval","delta","vph","tier","state","reason"),show="headings")
+        for col,label,width in (("time","관측 시각 (UTC)",170),("views","누적 조회수",100),("interval","간격(분)",85),("delta","조회수 차이",95),("vph","VPH",80),("tier","등급",75),("state","상태",90),("reason","사유",200)):
+            tree.heading(col,text=label);tree.column(col,width=width,stretch=col=="reason")
+        for row in history:
+            tree.insert("","end",values=(row["observed_at_utc"],f"{row['view_count']:,}" if row.get("view_count") is not None else "미상",
+                f"{row['elapsed_seconds']/60:.1f}" if row.get("elapsed_seconds") is not None else "—",
+                row.get("view_delta") if row.get("view_delta") is not None else "—",
+                f"{row['vph']:.1f}" if row.get("vph") is not None else "—",row.get("tier"),row.get("state"),self._vph_reason_ko(row)))
+        tree.pack(fill="both",expand=True,padx=12,pady=8)
+        ttk.Button(window,text="닫기",command=window.destroy).pack(anchor="e",padx=12,pady=8)
+
+    def open_vph_manual_review(self):
+        if not self.active_id:
+            self.vph_status.set("수동 연구를 진행할 프로필을 선택하세요.");return
+        selected=self.vph_tree.selection()
+        if not selected:
+            self.vph_status.set("먼저 레이더에서 영상을 선택하세요.");return
+        video_id=getattr(self,"_vph_video_by_eval_id",{}).get(selected[0])
+        if not video_id:return
+        candidate=store.get_candidate(self.active_id,video_id)
+        if not candidate:
+            self.vph_status.set("선택 영상의 후보 메타데이터가 없습니다. 후보에 등록된 뒤 수동 메모를 연결할 수 있습니다.");return
+        self.filter.set("");self.decision_filter.set("전체")
+        self.reload_candidates()
+        if not self.candidates.exists(video_id):
+            self.vph_status.set("선택 영상이 현재 프로필 후보 목록에 없습니다.");return
+        self.candidates.selection_set(video_id);self.candidates.focus(video_id);self.candidates.see(video_id)
+        self.selected_candidate()
+        self.tabs.select(self.frames[2])
+        self.footer.set("선택한 VPH 영상이 후보 화면에 연결되었습니다. 직접 영상 열기를 눌러 한 편씩 듣고 메모를 작성하세요.")
 
     def _metrics_ui(self,tab):
         tab.columnconfigure(0,weight=1)

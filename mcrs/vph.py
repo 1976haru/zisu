@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 import re
 
 from . import store, youtube_api
@@ -42,7 +43,7 @@ def classify_format(snippet, duration_seconds):
 
 def set_thresholds(profile_id, tier_a=100, tier_b=50, path=None):
     tier_a, tier_b = float(tier_a), float(tier_b)
-    if tier_b < 0 or tier_a <= tier_b:
+    if not math.isfinite(tier_a) or not math.isfinite(tier_b) or tier_b < 0 or tier_a <= tier_b:
         raise ValueError("Tier A must be greater than non-negative Tier B.")
     store.initialize(path)
     with store.connect(path) as db:
@@ -75,6 +76,19 @@ def record_observation(profile_id, video_id, view_count, observed_at_utc=None, *
         profile = db.execute("SELECT vph_tier_a,vph_tier_b FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not profile:
             raise ValueError("Profile not found.")
+        duplicate = db.execute("SELECT id,view_count,sample_status FROM vph_observations WHERE profile_id=? AND video_id=? AND observed_at_utc=? LIMIT 1",
+                               (profile_id,video_id,stamp)).fetchone()
+        if duplicate:
+            if duplicate["view_count"]!=view_count or duplicate["sample_status"]!=status:
+                raise ValueError("Conflicting cumulative views for an existing observation timestamp.")
+            existing=db.execute("SELECT * FROM vph_evaluations WHERE later_observation_id=?",(duplicate["id"],)).fetchone()
+            if existing:
+                return dict(existing)
+            raise ValueError("An observation already exists for this profile, video and timestamp.")
+        latest = db.execute("SELECT observed_at_utc FROM vph_observations WHERE profile_id=? AND video_id=? "
+                            "ORDER BY observed_at_utc DESC,id DESC LIMIT 1",(profile_id,video_id)).fetchone()
+        if latest and observed < _utc(latest["observed_at_utc"]):
+            status,reason="uncertain","out_of_order_observation"
         db.execute("""INSERT INTO vph_observations(profile_id,video_id,observed_at_utc,view_count,
           sample_status,uncertainty_reason,video_format,published_at,duration_seconds,metadata_json)
           VALUES(?,?,?,?,?,?,?,?,?,?)""", (profile_id,video_id,stamp,view_count,status,reason,
@@ -85,7 +99,9 @@ def record_observation(profile_id, video_id, view_count, observed_at_utc=None, *
           AND observed_at_utc<? ORDER BY observed_at_utc DESC,id DESC LIMIT 1""",
           (profile_id,video_id,stamp)).fetchone()
         state, eval_reason, delta, elapsed, rate, confidence = "UNKNOWN", "first_sample", None, None, None, "none"
-        if earlier:
+        if reason=="out_of_order_observation":
+            state, eval_reason = "REVIEW", reason
+        elif earlier:
             elapsed = (observed - _utc(earlier["observed_at_utc"])).total_seconds()
             if status != "valid" or earlier["sample_status"] != "valid":
                 state, eval_reason = "REVIEW", "uncertain_or_missing_sample"
@@ -112,15 +128,31 @@ def record_observation(profile_id, video_id, view_count, observed_at_utc=None, *
 
 
 def list_radar(profile_id, path=None):
-    """Market/genre rank remains primary; callers may use VPH only as a tie-break."""
+    """Return only each video's newest evaluation, ordered by genre fit then VPH."""
     with store.connect(path) as db:
-        rows = db.execute("""SELECT e.*,o.observed_at_utc,o.view_count,o.video_format,
+        rows = db.execute("""WITH ranked AS (
+          SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.profile_id,e.video_id
+            ORDER BY o.observed_at_utc DESC,o.id DESC,e.id DESC) AS sample_rank
+          FROM vph_evaluations e JOIN vph_observations o ON o.id=e.later_observation_id
+          WHERE e.profile_id=?)
+          SELECT e.*,o.observed_at_utc,o.view_count,o.sample_status,o.uncertainty_reason,o.video_format,
           o.published_at,o.duration_seconds,c.video_title,c.channel_title,c.views AS cumulative_views,
           c.genre_score,c.genre_decision,c.country
-          FROM vph_evaluations e JOIN vph_observations o ON o.id=e.later_observation_id
+          FROM ranked e JOIN vph_observations o ON o.id=e.later_observation_id
           LEFT JOIN candidates c ON c.profile_id=e.profile_id AND c.video_id=e.video_id
-          WHERE e.profile_id=? ORDER BY COALESCE(c.genre_score,-1) DESC,
+          WHERE e.sample_rank=1 ORDER BY COALESCE(c.genre_score,-1) DESC,
           CASE e.state WHEN 'VALID' THEN 0 ELSE 1 END,COALESCE(e.vph,-1) DESC,e.id DESC""", (profile_id,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_history(profile_id, video_id, path=None):
+    """Return immutable chronological observations/evaluations for one profile/video."""
+    with store.connect(path) as db:
+        rows = db.execute("""SELECT e.*,o.observed_at_utc,o.view_count,o.sample_status,
+          o.uncertainty_reason,o.video_format,o.published_at,o.duration_seconds
+          FROM vph_evaluations e JOIN vph_observations o ON o.id=e.later_observation_id
+          WHERE e.profile_id=? AND e.video_id=? ORDER BY o.observed_at_utc,o.id""",
+          (profile_id,video_id)).fetchall()
     return [dict(row) for row in rows]
 
 

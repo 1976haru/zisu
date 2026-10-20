@@ -1,9 +1,11 @@
 """Run with xvfb-run -a python tests/smoke_gui.py on Linux CI."""
-import os, sys, threading, time
+import os, sys, threading, time, tkinter as tk
+from tkinter import ttk
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
-from mcrs import store
+from mcrs import store, vph
 from mcrs.gui import Studio, ProfileDialog
 with WorkspaceTemp() as temp:
     os.environ['ZISU_DATA_DIR']=str(temp)
@@ -17,10 +19,85 @@ with WorkspaceTemp() as temp:
     app.update_idletasks()
     assert len(app.profiles)>=1
     assert app.active_id
-    assert len(app.frames)==8
-    assert len(app.tabs.tabs())==9
+    assert len(app.frames)==9
+    assert len(app.tabs.tabs())==10
     assert app.tabs.tab(app.tabs.tabs()[0],"text")=="쉬운 시작"
     assert hasattr(app,"dashboard_channels")
+    assert hasattr(app,"vph_tree") and hasattr(app,"vph_profile_combo")
+    start=datetime(2026,1,1,tzinfo=timezone.utc)
+    first_video="vphGUI12345"
+    second_video="vphGUI54321"
+    missing_video="vphGUI00000"
+    store.save_candidates(first,[{"video_id":first_video,"video_title":"Morning Chill Rap instrumental","channel_title":"JP Radar","published_at":"2025-12-01T00:00:00Z","views":1200}],)
+    store.save_candidates(second,[{"video_id":second_video,"video_title":"Chill Rap study","channel_title":"KR Radar","views":50},
+                                  {"video_id":missing_video,"video_title":"Chill Rap unknown","channel_title":"KR Radar"}],)
+    vph.record_observation(first,first_video,1000,start,video_format="longform",duration_seconds=240,path=None)
+    vph.record_observation(first,first_video,1600,start+timedelta(hours=1),video_format="longform",duration_seconds=240,path=None)
+    vph.record_observation(first,first_video,1700,start+timedelta(hours=2),video_format="longform",duration_seconds=240,path=None)
+    vph.record_observation(second,second_video,50,start,path=None)
+    vph.record_observation(second,second_video,40,start+timedelta(hours=1),path=None)
+    vph.record_observation(second,missing_video,None,start,sample_status="missing",uncertainty_reason="view_count_missing",path=None)
+    app.reload_profiles(first)
+    app.tabs.select(app.frames[8]);app.update_idletasks()
+    assert len(app.vph_tree.get_children())==1
+    current=store.get_profile(first)
+    assert app.vph_tree.item(app.vph_tree.get_children()[0],"values")[0]=="JP"
+    assert app.vph_tree.item(app.vph_tree.get_children()[0],"values")[8]=="100.0"
+    app.vph_tier_a_var.set("150");app.vph_tier_b_var.set("75");app.save_vph_thresholds()
+    assert (store.get_profile(first)["vph_tier_a"],store.get_profile(first)["vph_tier_b"])==(150,75)
+    assert len(vph.list_history(first,first_video))==3
+    app.vph_tree.selection_set(app.vph_tree.get_children()[0])
+    with patch("mcrs.gui.vph.list_radar",wraps=vph.list_radar) as radar_query:
+        app.open_vph_history()
+        assert radar_query.call_count==0
+    history_windows=[child for child in app.winfo_children() if isinstance(child,tk.Toplevel) and "표본 이력" in child.title()]
+    assert len(history_windows)==1
+    history_tree=next(widget for widget in history_windows[0].winfo_children() if isinstance(widget,ttk.Treeview))
+    assert len(history_tree.get_children())==3
+    history_windows[0].destroy()
+    selected_eval=app.vph_tree.selection()[0]
+    app.reload_vph_radar()
+    assert app.vph_tree.selection()==(selected_eval,)
+    with patch("mcrs.gui.vph.list_radar",wraps=vph.list_radar) as radar_query:
+        app.open_vph_manual_review()
+        assert radar_query.call_count==0
+    assert app.tabs.select()==str(app.frames[2])
+    assert app.selected_video==first_video and app.candidates.selection()==(first_video,)
+    app.tabs.select(app.frames[8])
+    app.autopilot_schedule_running=True
+    app.vph_profile_combo.current([p["id"] for p in app.vph_profiles].index(second))
+    with patch("mcrs.gui.messagebox.showinfo"):
+        app._vph_profile_selected()
+    assert app.active_id==first and app.vph_profile_combo.current()==[p["id"] for p in app.vph_profiles].index(first)
+    app.autopilot_schedule_running=False
+    with patch("mcrs.gui.vph.list_radar",return_value=[]):
+        app.reload_vph_radar()
+        assert len(app.vph_tree.get_children())==0 and "0건" in app.vph_status.get()
+    stress_rows=[{"id":index+1000,"video_id":f"x{index:010d}","state":"VALID","tier":"A",
+        "view_count":1000,"vph":100.0,"video_format":"longform","published_at":"2026-01-01",
+        "duration_seconds":600,"video_title":f"Stress video {index}","channel_title":"Mock channel"}
+        for index in range(1001)]
+    with patch("mcrs.gui.vph.list_radar",return_value=stress_rows):
+        render_started=time.perf_counter()
+        app.reload_vph_radar()
+        render_seconds=time.perf_counter()-render_started
+        assert len(app.vph_tree.get_children())==1001
+        assert render_seconds<5.0, render_seconds
+        print(f"VPH_GUI_1001_RENDER_SECONDS {render_seconds:.3f}")
+        keep_iid=app.vph_tree.get_children()[800]
+        app.vph_tree.selection_set(keep_iid);app.vph_tree.yview_moveto(0.45);app.vph_tree.xview_moveto(0.25)
+        old_y,old_x=app.vph_tree.yview()[0],app.vph_tree.xview()[0]
+        app.reload_vph_radar()
+        assert app.vph_tree.selection()==(keep_iid,)
+        assert abs(app.vph_tree.yview()[0]-old_y)<0.02 and abs(app.vph_tree.xview()[0]-old_x)<0.02
+    app.vph_profile_combo.current([p["id"] for p in app.vph_profiles].index(second));app._vph_profile_selected()
+    assert app.active_id==second and len(app.vph_tree.get_children())==2
+    second_rows=[app.vph_tree.item(iid,"values") for iid in app.vph_tree.get_children()]
+    assert all(row[0]=="KR" for row in second_rows)
+    assert {row[9] for row in second_rows}=={"REVIEW","UNKNOWN"}
+    assert any("조회수 항목 없음" in row[10] for row in second_rows)
+    app.vph_profile_combo.current([p["id"] for p in app.vph_profiles].index(first));app._vph_profile_selected()
+    assert app.active_id==first and app.vph_tier_a_var.get()=="150.0"
     assert hasattr(app,"dashboard_selected_text")
     assert callable(app._dashboard_refresh)
     assert callable(app._dashboard_start_research)
@@ -98,8 +175,19 @@ with WorkspaceTemp() as temp:
                     assert child.winfo_width()>0 and child.winfo_height()>0
                     assert child.winfo_height()+2>=child.winfo_reqheight()
         assert app.easy_next.cget("text")
+    vph_tab=app.tabs.tabs()[9]
+    for scaling in (1.0,1.25,1.5,2.0):
+        app.tk.call("tk","scaling",scaling);app.tabs.select(vph_tab);app.update()
+        assert app.vph_tree.winfo_width()>0 and app.vph_tree.winfo_height()>0
+        assert app.vph_tree.cget("xscrollcommand") and app.vph_tree.cget("yscrollcommand")
+        viewport=app.frames[8]
+        left,top=viewport.winfo_rootx(),viewport.winfo_rooty()
+        right,bottom=left+viewport.winfo_width(),top+viewport.winfo_height()
+        for widget in (app.vph_controls,app.vph_buttons,*app.vph_controls.winfo_children(),*app.vph_buttons.winfo_children()):
+            assert widget.winfo_rootx()>=left-1 and widget.winfo_rootx()+widget.winfo_width()<=right+2, (scaling,widget,widget.winfo_rootx(),widget.winfo_width(),right)
+            assert widget.winfo_rooty()>=top-1 and widget.winfo_rooty()+widget.winfo_height()<=bottom+2, (scaling,widget,widget.winfo_rooty(),widget.winfo_height(),bottom)
     # Verify actual Tk key bindings and focus navigation on the beginner screen.
-    app.tabs.select(easy_tab);app.update_idletasks()
+    app.tabs.select(easy_tab);app.update()
     app.dashboard_channels.selection_set("profile:"+third)
     app.dashboard_channels.focus_set();app.event_generate("<Return>");app.update()
     assert app.active_id==third
