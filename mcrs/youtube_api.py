@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import re
 import socket
 import time
 from urllib.error import HTTPError, URLError
@@ -186,12 +187,14 @@ def _get(endpoint, key, access_token=None, retries=0, retry_delay=0.25,
 
 
 def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None,
-                   return_page=False, order="relevance", quota_context=None):
+                   return_page=False, order="relevance", quota_context=None, relevance_language=None):
     if market not in ("KR", "JP"):
         raise ValueError("시장 코드는 KR 또는 JP입니다.")
     if order not in {"relevance", "date"}:
         raise ValueError("Search order must be relevance or date.")
-    lang = "ko" if market == "KR" else "ja"
+    lang = relevance_language or ("ko" if market == "KR" else "ja")
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", lang):
+        raise ValueError("A valid relevance language code is required.")
     credentials = {"access_token": access_token} if access_token else {}
     context = {"quota_context": quota_context} if quota_context else {}
     results = _get("search", key, part="snippet", type="video", q=keyword,
@@ -211,7 +214,8 @@ def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token
     except APIError as exc:
         exc.request_uncertain = True
         raise
-    counts = {item["id"]: int(item.get("statistics", {}).get("viewCount", 0) or 0)
+    counts = {item["id"]: (int(item["statistics"]["viewCount"])
+              if item.get("statistics", {}).get("viewCount") is not None else None)
               for item in videos.get("items", [])}
     countries = {item["id"]: item.get("snippet", {}).get("country", "")
                  for item in channels.get("items", [])}
@@ -228,11 +232,11 @@ def _lookup_videos(key, keyword, market, limit=12, access_token=None, page_token
 
 
 def lookup_videos(key, keyword, market, limit=12, access_token=None, page_token=None,
-                  return_page=False, order="relevance", quota_context=None):
+                  return_page=False, order="relevance", quota_context=None, relevance_language=None):
     """Serialize a complete read-only search + metadata operation process-wide."""
     try:
         with occupy(SEARCH_SLOT):
             return _lookup_videos(key, keyword, market, limit, access_token, page_token,
-                                  return_page, order, quota_context)
+                                  return_page, order, quota_context, relevance_language)
     except WorkSlotBusy:
         raise APIError(code="search_busy", request_uncertain=False) from None

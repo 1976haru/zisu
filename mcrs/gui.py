@@ -13,7 +13,7 @@ import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from urllib.parse import urlencode, urlparse, parse_qs
 from . import store
 from .genres import GENRES, search_terms, assess, related_classification
@@ -25,7 +25,7 @@ from . import ai_research
 from . import comments
 from . import timers
 from . import autopilot
-from . import vph
+from . import vph, vph_research
 from . import research_scheduler
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .research_browser import (ResearchBrowserManager, BrowserError, BrowserResourceDeferred,
@@ -319,6 +319,11 @@ class Studio(tk.Tk):
         self.oauth_status=tk.StringVar(value="계정 상태 확인 중...")
         self.oauth_busy=False
         self.search_inflight=False
+        self._vph_research_worker_busy=False
+        self._vph_research_cancel_event=threading.Event()
+        self._vph_research_pause_event=threading.Event()
+        self._vph_research_last_job_check=0.0
+        self.vph_observation_slots=tk.StringVar(value="10")
         self._ui_state=(store.load_ui_state() or {}).get("state",{})
         self._ui_save_after=None
         self._restoring_ui=False
@@ -370,6 +375,7 @@ class Studio(tk.Tk):
                 threading.Thread(target=self._research_browser_metrics_probe,
                     name="zisu-browser-metrics",daemon=True).start()
         self.after(1000,self._tick)
+        self.after(2500,self._vph_research_tick)
         self.after(14000,self._scheduled_tick)
         if smoke_report:
             _write_smoke_stage("gui_widgets_ready")
@@ -500,6 +506,8 @@ class Studio(tk.Tk):
         ttk.Label(content,textvariable=self.dashboard_ai_queue_text,wraplength=1000).grid(row=8,column=0,columnspan=2,sticky="w",pady=3)
         ttk.Label(content,textvariable=self.dashboard_resource_text,wraplength=1000).grid(row=9,column=0,columnspan=2,sticky="w",pady=3)
         ttk.Label(content,textvariable=self.dashboard_browser_text,wraplength=1000).grid(row=10,column=0,columnspan=2,sticky="w",pady=3)
+        self.dashboard_vph_text=tk.StringVar(value="VPH 연구: 자동 작업 없음")
+        ttk.Label(content,textvariable=self.dashboard_vph_text,wraplength=1000).grid(row=11,column=0,columnspan=2,sticky="w",pady=3)
         self.easy_next=ttk.Button(content,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
         self.easy_next.grid(row=11,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
         actions=ttk.Frame(content);actions.grid(row=12,column=0,columnspan=2,sticky="ew",pady=4)
@@ -513,7 +521,7 @@ class Studio(tk.Tk):
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
         ttk.Button(actions,text="VPH 연구 레이더",command=lambda:self.tabs.select(self.frames[8])).grid(row=6,column=0,sticky="ew",padx=3,pady=3)
-        browser_row=ttk.Frame(content);browser_row.grid(row=13,column=0,columnspan=2,sticky="ew",pady=4)
+        browser_row=ttk.Frame(content);browser_row.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
             ("연구용 인터넷 창 열기",self._research_browser_open),
@@ -522,9 +530,9 @@ class Studio(tk.Tk):
             ("도움말",lambda:self.tabs.select(self.frames[5])))):
             ttk.Button(browser_row,text=label,command=command).grid(row=index,column=0,sticky="ew",padx=3,pady=2)
         ttk.Label(content,text="수동 모드로 연 일반 브라우저는 ZISU가 자동으로 닫지 않습니다. 영상 재생·댓글·좋아요·구독은 직접 수행합니다.",
-                  wraplength=1000).grid(row=14,column=0,columnspan=2,sticky="w",pady=(5,12))
+                  wraplength=1000).grid(row=15,column=0,columnspan=2,sticky="w",pady=(5,12))
         performance=ttk.LabelFrame(content,text="실제 YouTube 채널 성과 · 읽기 전용",padding=10)
-        performance.grid(row=15,column=0,columnspan=2,sticky="ew",pady=(8,4))
+        performance.grid(row=16,column=0,columnspan=2,sticky="ew",pady=(8,4))
         performance.columnconfigure(0,weight=1)
         ttk.Label(performance,text="연구 후보·메모 수와 별개의 YouTube Analytics 측정값입니다. 가져오지 못한 값은 0이 아니라 미수집으로 표시합니다.",wraplength=1000).grid(row=0,column=0,columnspan=3,sticky="w",pady=(0,4))
         ttk.Label(performance,text="기간:").grid(row=1,column=0,sticky="w")
@@ -1003,6 +1011,19 @@ class Studio(tk.Tk):
         profile=self.profiles[i]
         if getattr(self,"comment_video",None):self._autosave_comment()
         self.active_id=profile["id"]
+        if hasattr(self,"vph_observation_slots"):
+            self.vph_observation_slots.set(str(profile.get("vph_observation_slots",10)))
+        if hasattr(self,"schedule_hours"):
+            preferences=store.profile_research_preferences(self.active_id)
+            for key,variable in (("total_hours",self.schedule_hours),("research_minutes",self.schedule_research_minutes),
+                ("break_minutes",self.schedule_break_minutes),("schedule_mode",self.schedule_mode),
+                ("research_min_minutes",self.schedule_research_min),("research_max_minutes",self.schedule_research_max),
+                ("break_min_minutes",self.schedule_break_min),("break_max_minutes",self.schedule_break_max)):
+                if key in preferences:variable.set(str(preferences[key]))
+            if hasattr(self,"schedule_preset_combo"):
+                presets=store.list_research_schedule_presets(self.active_id)
+                self.schedule_preset_combo.configure(values=presets)
+                if self.schedule_preset_var.get() not in presets:self.schedule_preset_var.set("")
         if hasattr(self,"ai_tree") and getattr(self,"ai_expected_profile",None) != self.active_id:
             self.ai_tree.delete(*self.ai_tree.get_children())
             self.ai_reviews={}
@@ -1784,13 +1805,21 @@ class Studio(tk.Tk):
         self.vph_tier_b_var=tk.StringVar(value="50")
         ttk.Entry(controls,textvariable=self.vph_tier_b_var,width=8).pack(side="left")
         ttk.Button(controls,text="기준 저장",command=self.save_vph_thresholds).pack(side="left",padx=6)
+        ttk.Label(controls,text="검색 상한").pack(side="left",padx=(7,2))
+        self.vph_search_limit=tk.IntVar(value=vph_research.DEFAULT_SEARCH_CALLS)
+        ttk.Spinbox(controls,from_=1,to=vph_research.MAX_SEARCH_CALLS,textvariable=self.vph_search_limit,width=3).pack(side="left")
+        ttk.Label(controls,text="관측 슬롯 (1~20)").pack(side="left",padx=(7,2))
+        self.vph_slots_combo=ttk.Combobox(controls,textvariable=self.vph_observation_slots,
+            values=tuple(str(value) for value in range(1,21)),state="normal",width=4)
+        self.vph_slots_combo.pack(side="left")
+        self.vph_slots_combo.bind("<<ComboboxSelected>>",lambda _event:self.save_vph_observation_slots())
         ttk.Button(controls,text="새로고침",command=self.reload_vph_radar).pack(side="left",padx=3)
-        columns=("market","genre","title","channel","published","duration","format","views","vph","tier","reason")
+        columns=("market","genre","group","title","channel","published","duration","format","views","vph","tier","reason")
         self.vph_tree=ttk.Treeview(tab,columns=columns,show="headings",height=14)
         self.vph_tree.tag_configure("unknown",foreground="#795500")
         self.vph_tree.tag_configure("review",foreground="#9B2C2C")
-        labels={"market":"시장","genre":"장르","title":"영상 제목","channel":"채널","published":"게시일","duration":"길이","format":"형식","views":"누적 조회수","vph":"시간당 조회","tier":"등급","reason":"판정 사유"}
-        widths={"market":58,"genre":140,"title":230,"channel":160,"published":95,"duration":65,"format":82,"views":100,"vph":95,"tier":115,"reason":200}
+        labels={"market":"시장","genre":"장르","group":"연구 그룹","title":"영상 제목","channel":"채널","published":"게시일","duration":"길이","format":"형식","views":"누적 조회수","vph":"시간당 조회","tier":"등급","reason":"판정 사유"}
+        widths={"market":58,"genre":140,"group":160,"title":230,"channel":160,"published":95,"duration":65,"format":82,"views":100,"vph":95,"tier":115,"reason":230}
         for col in columns:
             self.vph_tree.heading(col,text=labels[col])
             self.vph_tree.column(col,width=widths[col],stretch=col in {"title","reason"},anchor="w")
@@ -1803,11 +1832,222 @@ class Studio(tk.Tk):
         self.vph_status=tk.StringVar(value="표본이 없습니다. 오프라인 연구 데이터가 있으면 여기에 표시됩니다.")
         ttk.Label(tab,textvariable=self.vph_status,wraplength=1100).grid(row=5,column=0,sticky="w",pady=3)
         buttons=ttk.Frame(tab);self.vph_buttons=buttons;buttons.grid(row=6,column=0,sticky="w",pady=5)
-        ttk.Button(buttons,text="선택 영상의 표본 이력",command=self.open_vph_history).pack(side="left")
+        self.vph_start_button=ttk.Button(buttons,text="자동 VPH 연구 시작",command=self.start_vph_research,style="Accent.TButton")
+        self.vph_start_button.pack(side="left",padx=(0,5))
+        self.vph_pause_button=ttk.Button(buttons,text="일시정지",command=self.pause_vph_research)
+        self.vph_pause_button.pack(side="left",padx=3)
+        self.vph_resume_button=ttk.Button(buttons,text="재개",command=self.resume_vph_research)
+        self.vph_resume_button.pack(side="left",padx=3)
+        self.vph_stop_button=ttk.Button(buttons,text="중지",command=self.cancel_vph_research)
+        self.vph_stop_button.pack(side="left",padx=3)
+        ttk.Button(buttons,text="선택 영상의 표본 이력",command=self.open_vph_history).pack(side="left",padx=(5,0))
         ttk.Button(buttons,text="선택 영상 후보·수동 메모",command=self.open_vph_manual_review).pack(side="left",padx=5)
         ttk.Label(buttons,text="VPH는 장르 적합도 다음의 보조 정렬 기준이며, 60분 미만·결측·감소 등은 수치 대신 검토 상태로 표시합니다.").pack(side="left",padx=9)
         self._sync_vph_profile_choice()
         self.reload_vph_radar()
+        self._refresh_vph_research_status()
+
+    def _current_vph_job(self):
+        if not self.active_id:return None
+        return vph_research.latest_active(self.active_id) or vph_research.latest_job(self.active_id)
+
+    def save_vph_observation_slots(self):
+        if not self.active_id:return False
+        try:
+            slots=int(self.vph_observation_slots.get())
+            store.set_profile_vph_observation_slots(self.active_id,slots)
+            self.vph_observation_slots.set(str(slots))
+            return True
+        except (TypeError,ValueError,sqlite3.Error):
+            self.vph_status.set("관측 슬롯은 프로필별 1~20개로 설정해야 합니다.")
+            return False
+
+    def _refresh_vph_research_status(self, job=None):
+        if not hasattr(self,"vph_status"):
+            return
+        job = job or self._current_vph_job()
+        if not job:
+            state_text = "자동 연구 작업 없음 · 시작 버튼을 누르면 프로필별 최대 3회 검색을 시작합니다."
+            if job and job.get("schedule_id"):
+                try:
+                    schedule=research_scheduler.get(job["schedule_id"],job["profile_id"])
+                    if schedule:
+                        total=max(1,int(schedule["total_minutes"])*60)
+                        state_text += (f" · 8h schedule {schedule['phase']} "
+                            f"{schedule['elapsed_seconds']*100/total:.1f}% · "
+                            f"{schedule['remaining_seconds']//60} min remaining")
+                except (KeyError,sqlite3.Error):
+                    state_text += " · schedule checkpoint unavailable"
+            if hasattr(self,"vph_pause_button"):
+                self.vph_pause_button.configure(state="disabled")
+                self.vph_resume_button.configure(state="disabled")
+                self.vph_stop_button.configure(state="disabled")
+                self.vph_start_button.configure(state="normal" if self.active_id else "disabled")
+        else:
+            targets = job.get("targets",[])
+            fit_count=sum(item.get("group")=="CORE_FIT" for item in targets)
+            review_count=sum(item.get("group")=="GENRE_UNCONFIRMED_REFERENCE" for item in targets)
+            used_calls=job.get('search_calls_used',0); limit_calls=job.get('search_limit',3)
+            calls = f"검색 {used_calls}/{limit_calls}회 (회차 잔여 {max(0,limit_calls-used_calls)})"
+            if job["state"] == "WAITING_SECOND" and job.get("next_run_utc"):
+                due = datetime.fromisoformat(job["next_run_utc"].replace("Z","+00:00"))
+                seconds = max(0,int((due-datetime.now(timezone.utc)).total_seconds()))
+                local = due.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+                state_text = (f"첫 표본 저장 완료 · FIT {fit_count} / 장르 미확정 참고 {review_count} · {calls} · "
+                              f"다음 측정까지 {seconds//60}분 {seconds%60}초 · UTC {job['next_run_utc']} · 현지 {local}")
+            else:
+                state_text = f"{job['message']} · 상태 {job['state']} · FIT {fit_count} / 장르 미확정 참고 {review_count} · {calls}"
+                if job["state"]=="REVIEW" and not targets:
+                    state_text += " · 검색 결과가 없거나 핵심 장르 신호가 부족함(적합도 0점·EXCLUDE 제외)"
+            if hasattr(self,"vph_pause_button"):
+                can_pause = job["state"] in {"READY","WAITING_SECOND"} or (job["state"] in {"COLLECTING_FIRST","COLLECTING_SECOND"} and self._vph_research_worker_busy)
+                self.vph_pause_button.configure(state="normal" if can_pause else "disabled")
+                self.vph_resume_button.configure(state="normal" if job["state"]=="PAUSED" else "disabled")
+                self.vph_stop_button.configure(state="normal" if job["state"] in {"READY","WAITING_SECOND","PAUSED"} else "disabled")
+                self.vph_start_button.configure(state="disabled" if job["state"] in vph_research.ACTIVE_STATES else "normal")
+                if job["state"] in {"COLLECTING_FIRST","COLLECTING_SECOND"}:
+                    self.vph_stop_button.configure(state="normal")
+        self.vph_status.set(state_text)
+        if hasattr(self,"dashboard_vph_text"):
+            self.dashboard_vph_text.set("VPH 연구: "+state_text)
+            if job:
+                try:
+                    key=self.api_key.get().strip()
+                    identity=quota_project_identity(key,(oauth.quota_project_identity(job["profile_id"]) or "oauth-project:unknown") if not key else "")
+                    quota=quota_ledger.summary(identity,store.db_path(),
+                        search_limit=quota_ledger.DEFAULT_SEARCH_CALL_LIMIT)
+                    self.dashboard_vph_text.set("VPH 연구: "+state_text+
+                        f" · 프로젝트 잔여 추정 quota search {quota['search_calls_remaining_estimate']} / 기타 {quota['other_units_remaining_estimate']}")
+                except Exception:
+                    pass
+
+    def start_vph_research(self):
+        if not self.active_id:
+            self.vph_status.set("먼저 조사 프로필을 선택하세요.");return
+        if self._vph_research_worker_busy:
+            return
+        if not self.api_key.get().strip() and not oauth.is_connected(self.active_id):
+            self.vph_status.set("읽기 전용 Google 연결이 필요합니다. 연결을 확인한 뒤 다시 시작하세요.");return
+        try:
+            job=vph_research.start(self.active_id,search_limit=int(self.vph_search_limit.get()))
+        except RuntimeError:
+            self.vph_status.set("이 프로필에는 진행 중인 자동 VPH 연구가 있습니다. 기존 체크포인트를 이어갑니다.")
+            job=self._current_vph_job()
+        except Exception as exc:
+            self.vph_status.set(f"연구 시작 실패: {type(exc).__name__}");return
+        if job and job["state"]=="READY":
+            self._launch_vph_job(job,second=False)
+        else:
+            self._refresh_vph_research_status(job)
+
+    def _launch_vph_job(self,job,*,second):
+        if self._vph_research_worker_busy or not job:
+            return
+        profile_id=job["profile_id"]
+        profile=store.get_profile(profile_id)
+        if not profile:return
+        self._vph_research_worker_busy=True
+        self._vph_research_cancel_event.clear()
+        self._vph_research_pause_event.clear()
+        self._refresh_vph_research_status(job)
+        def worker():
+            error=""
+            try:
+                decision=self.resource_guard.check(sample_resources)
+                if not decision.allow_new_work:
+                    self.after(0,self._finish_vph_resource_pause)
+                    return
+                key=self.api_key.get().strip()
+                token=oauth.get_access_token(profile_id) if not key else None
+                identity=quota_project_identity(key,(oauth.quota_project_identity(profile_id) or "oauth-project:unknown") if not key else "")
+                quota_context={"project_identity":identity,"profile_id":profile_id,
+                               "path":str(store.db_path())}
+                if second:
+                    result=vph_research.run_second_phase(job["id"],profile_id,key,access_token=token,
+                        quota_context=quota_context,path=store.db_path(),should_stop=self._vph_research_cancel_event.is_set)
+                else:
+                    result=vph_research.run_first_phase(job["id"],profile_id,key,access_token=token,
+                        quota_context=quota_context,path=store.db_path(),should_stop=self._vph_research_cancel_event.is_set,
+                        should_pause=self._vph_research_pause_event.is_set)
+            except (APIError,oauth.OAuthError,ValueError,OSError,RuntimeError) as exc:
+                error=f"{type(exc).__name__}"+(f" · {getattr(exc,'code','')}" if getattr(exc,'code','') else "")
+                result=None
+            except Exception as exc:
+                error=f"{type(exc).__name__}"
+                result=None
+            def done():
+                self._vph_research_worker_busy=False
+                if self._vph_research_pause_event.is_set() and result and result.get("state") in {"READY","WAITING_SECOND"}:
+                    try:result=vph_research.pause(result["id"],result["profile_id"])
+                    except Exception:pass
+                if result and result.get("state")=="COMPLETED":
+                    self.reload_vph_radar()
+                elif error and self.active_id==profile_id:
+                    self.vph_status.set("자동 연구 오류: "+error+" · 체크포인트 보존, 불확실 요청은 자동 재시도하지 않습니다.")
+                if self.active_id==profile_id:
+                    self._refresh_vph_research_status(result or self._current_vph_job())
+            self.after(0,done)
+        threading.Thread(target=worker,name="zisu-vph-research",daemon=True).start()
+
+    def _finish_vph_resource_pause(self):
+        self._vph_research_worker_busy=False
+        self.vph_status.set("자원 보호로 새 API 요청을 보류했습니다. 저장된 체크포인트를 보존하고 자원 여유가 회복되면 이어갑니다.")
+
+    def pause_vph_research(self):
+        job=self._current_vph_job()
+        if not job:return
+        if self._vph_research_worker_busy:
+            self._vph_research_pause_event.set()
+            self.vph_status.set("일시정지 요청됨 · 진행 중 요청이 끝나면 체크포인트에서 멈춥니다.")
+            return
+        try:self._refresh_vph_research_status(vph_research.pause(job["id"],job["profile_id"]))
+        except Exception as exc:self.vph_status.set(f"안전한 일시정지 실패: {type(exc).__name__}")
+
+    def resume_vph_research(self):
+        job=self._current_vph_job()
+        if not job or job["state"]!="PAUSED":return
+        try:
+            job=vph_research.resume(job["id"],job["profile_id"])
+            if job["state"]=="READY":self._launch_vph_job(job,second=False)
+            else:self._refresh_vph_research_status(job)
+        except Exception as exc:self.vph_status.set(f"체크포인트 재개 실패: {type(exc).__name__}")
+
+    def cancel_vph_research(self):
+        job=self._current_vph_job()
+        if not job:return
+        if self._vph_research_worker_busy:
+            self._vph_research_cancel_event.set()
+            self.vph_status.set("중지 요청됨 · 진행 중 API 요청은 안전하게 끝난 뒤 다음 요청을 막고 체크포인트를 보존합니다.")
+            return
+        try:self._refresh_vph_research_status(vph_research.cancel(job["id"],job["profile_id"]))
+        except Exception as exc:self.vph_status.set(f"안전한 중지 실패: {type(exc).__name__}")
+
+    def _vph_research_tick(self):
+        now=time.monotonic()
+        if self.active_id and now-self._vph_research_last_job_check>=5:
+            self._vph_research_last_job_check=now
+            try:
+                job=self._current_vph_job()
+                if job and job["state"] in {"COLLECTING_FIRST","COLLECTING_SECOND"} and not self._vph_research_worker_busy:
+                    job=vph_research.mark_interrupted(job["id"],job["profile_id"])
+                self._refresh_vph_research_status(job)
+                if not self._vph_research_worker_busy:
+                    for pending in vph_research.active_jobs():
+                        scheduled=(research_scheduler.get(pending["schedule_id"],pending["profile_id"])
+                                   if pending.get("schedule_id") else None)
+                        if not vph_research.schedule_window_allows_sample(pending,scheduled):
+                            continue
+                        if pending["state"] in {"COLLECTING_FIRST","COLLECTING_SECOND"}:
+                            vph_research.mark_interrupted(pending["id"],pending["profile_id"])
+                        elif pending["state"]=="READY":
+                            self._launch_vph_job(pending,second=False);break
+                        elif pending["state"]=="WAITING_SECOND":
+                            due=datetime.fromisoformat(pending["next_run_utc"].replace("Z","+00:00"))
+                            if datetime.now(timezone.utc)>=due:
+                                self._launch_vph_job(pending,second=True);break
+            except Exception as exc:
+                self.vph_status.set(f"저장된 VPH 작업 확인 실패: {type(exc).__name__}")
+        self.after(5000,self._vph_research_tick)
 
     @staticmethod
     def _vph_reason_ko(row):
@@ -1850,12 +2090,21 @@ class Studio(tk.Tk):
             tier=(f"Tier {row['tier']}" if row["state"]=="VALID" and row["tier"] in {"A","B"}
                   else "기준 미만" if row["state"]=="VALID" else row["state"])
             views=row.get("view_count")
-            row_tag="review" if row.get("state")=="REVIEW" else "unknown" if row.get("state")=="UNKNOWN" else ""
-            self.vph_tree.insert("","end",iid=str(row["id"]),tags=(row_tag,) if row_tag else (),values=(profile["market"],genre,
+            try:metadata=json.loads(row.get("metadata_json") or "{}")
+            except (TypeError,ValueError):metadata={}
+            candidate_review=row.get("genre_decision")==genre_engine.REVIEW
+            row_tag="review" if candidate_review or row.get("state")=="REVIEW" else "unknown" if row.get("state")=="UNKNOWN" else ""
+            research_group=metadata.get("research_group") or ("CORE FIT" if row.get("genre_decision")==genre_engine.FIT else
+                ("장르 미확정 참고 · REVIEW" if candidate_review else "분류 미상"))
+            reason=self._vph_reason_ko(row)
+            if candidate_review:
+                evidence=metadata.get("genre_evidence") or []
+                reason += " · 장르 REVIEW(미승격)"+(" · 신호: "+", ".join(evidence[:2]) if evidence else "")
+            self.vph_tree.insert("","end",iid=str(row["id"]),tags=(row_tag,) if row_tag else (),values=(profile["market"],genre,research_group,
                 row.get("video_title") or "제목 정보 없음",row.get("channel_title") or "채널 정보 없음",
                 str(row.get("published_at") or "")[:10] or "미상",self._format_vph_duration(row.get("duration_seconds")),
                 self._vph_format_ko(row.get("video_format")),f"{views:,}" if views is not None else "미상",
-                f"{row['vph']:.1f}" if row.get("vph") is not None else "—",tier,self._vph_reason_ko(row)))
+                f"{row['vph']:.1f}" if row.get("vph") is not None else "—",tier,reason))
             self._vph_video_by_eval_id[str(row["id"])]=row["video_id"]
         if selected and self.vph_tree.exists(selected):
             self.vph_tree.selection_set(selected);self.vph_tree.focus(selected)
@@ -1891,19 +2140,22 @@ class Studio(tk.Tk):
             self.vph_status.set("먼저 레이더에서 영상을 선택하세요.");return
         video_id=getattr(self,"_vph_video_by_eval_id",{}).get(selected[0])
         if not video_id:return
-        current_title=self.vph_tree.item(selected[0],"values")[2]
+        current_title=self.vph_tree.item(selected[0],"values")[3]
         history=vph.list_history(self.active_id,video_id)
         window=tk.Toplevel(self);window.title("VPH 표본 이력 · "+current_title)
         window.geometry("920x390");window.transient(self)
         ttk.Label(window,text="각 행은 독립 관측 표본에 대한 평가입니다. 이 기록은 프로필별로 분리되어 보존됩니다.",wraplength=870).pack(anchor="w",padx=12,pady=8)
-        tree=ttk.Treeview(window,columns=("time","views","interval","delta","vph","tier","state","reason"),show="headings")
-        for col,label,width in (("time","관측 시각 (UTC)",170),("views","누적 조회수",100),("interval","간격(분)",85),("delta","조회수 차이",95),("vph","VPH",80),("tier","등급",75),("state","상태",90),("reason","사유",200)):
+        tree=ttk.Treeview(window,columns=("time","views","interval","delta","vph","tier","state","group","reason"),show="headings")
+        for col,label,width in (("time","관측 시각 (UTC)",170),("views","누적 조회수",100),("interval","간격(분)",85),("delta","조회수 차이",95),("vph","VPH",80),("tier","등급",75),("state","상태",90),("group","연구 그룹",170),("reason","사유",220)):
             tree.heading(col,text=label);tree.column(col,width=width,stretch=col=="reason")
         for row in history:
+            try:metadata=json.loads(row.get("metadata_json") or "{}")
+            except (TypeError,ValueError):metadata={}
+            group=metadata.get("research_group", "분류 미상")
             tree.insert("","end",values=(row["observed_at_utc"],f"{row['view_count']:,}" if row.get("view_count") is not None else "미상",
                 f"{row['elapsed_seconds']/60:.1f}" if row.get("elapsed_seconds") is not None else "—",
                 row.get("view_delta") if row.get("view_delta") is not None else "—",
-                f"{row['vph']:.1f}" if row.get("vph") is not None else "—",row.get("tier"),row.get("state"),self._vph_reason_ko(row)))
+                f"{row['vph']:.1f}" if row.get("vph") is not None else "—",row.get("tier"),row.get("state"),group,self._vph_reason_ko(row)))
         tree.pack(fill="both",expand=True,padx=12,pady=8)
         ttk.Button(window,text="닫기",command=window.destroy).pack(anchor="e",padx=12,pady=8)
 
@@ -2149,19 +2401,41 @@ class Studio(tk.Tk):
         ttk.Label(tab,textvariable=self.autopilot_scope_text,wraplength=1050).grid(row=2,column=0,sticky="w",pady=3)
         schedule=ttk.LabelFrame(tab,text="연구 시간 설정 · 저부하 권장")
         schedule.grid(row=3,column=0,sticky="ew",pady=4)
-        self.schedule_hours=tk.StringVar(value="6")
-        self.schedule_research_minutes=tk.StringVar(value="30")
-        self.schedule_break_minutes=tk.StringVar(value="30")
+        self.schedule_hours=tk.StringVar(value="8")
+        self.schedule_research_minutes=tk.StringVar(value="20")
+        self.schedule_break_minutes=tk.StringVar(value="20")
         self.schedule_start_time=tk.StringVar(value="")
-        for label, variable, values, width in (("전체 시간",self.schedule_hours,("2","4","6","8"),4),
-                ("연구 분",self.schedule_research_minutes,("20","30","40"),4),
-                ("휴식 분",self.schedule_break_minutes,("15","30","40"),4)):
+        self.schedule_mode=tk.StringVar(value="fixed")
+        self.schedule_research_min=tk.StringVar(value="20");self.schedule_research_max=tk.StringVar(value="20")
+        self.schedule_break_min=tk.StringVar(value="20");self.schedule_break_max=tk.StringVar(value="20")
+        for label, variable, values, width in (("전체 시간",self.schedule_hours,tuple(str(n) for n in (2,4,6,8,10,12)),5),
+                ("연구 분",self.schedule_research_minutes,tuple(str(n) for n in (5,10,15,20,30,40,60)),4),
+                ("휴식 분",self.schedule_break_minutes,tuple(str(n) for n in (5,10,15,20,30,40,60)),4)):
             ttk.Label(schedule,text=label).pack(side="left",padx=(6,2))
-            ttk.Combobox(schedule,textvariable=variable,values=values,state="readonly",width=width).pack(side="left")
+            ttk.Combobox(schedule,textvariable=variable,values=values,state="normal",width=width).pack(side="left")
+        ttk.Label(schedule,text="편성").pack(side="left",padx=(6,2))
+        ttk.Combobox(schedule,textvariable=self.schedule_mode,values=("fixed","random"),state="readonly",width=8).pack(side="left")
+        ranges=ttk.Frame(schedule);ranges.pack(fill="x",pady=3)
+        for label,variable in (("연구 최소",self.schedule_research_min),("연구 최대",self.schedule_research_max),
+                               ("휴식 최소",self.schedule_break_min),("휴식 최대",self.schedule_break_max)):
+            ttk.Label(ranges,text=label).pack(side="left",padx=(6,2))
+            ttk.Spinbox(ranges,from_=1,to=180,textvariable=variable,width=4).pack(side="left")
+        preset_bar=ttk.Frame(schedule);preset_bar.pack(fill="x",pady=2)
+        self.schedule_preset_var=tk.StringVar(value="")
+        self.schedule_preset_combo=ttk.Combobox(preset_bar,textvariable=self.schedule_preset_var,state="readonly",width=24)
+        self.schedule_preset_combo.pack(side="left",padx=4)
+        ttk.Button(preset_bar,text="프리셋 적용",command=self.apply_research_schedule_preset).pack(side="left",padx=3)
+        ttk.Button(preset_bar,text="현재 설정 저장",command=self.save_research_schedule_preset).pack(side="left",padx=3)
+        ttk.Button(preset_bar,text="다음 회차부터 적용",command=self.apply_schedule_settings_next_cycle).pack(side="left",padx=3)
+        ttk.Label(schedule,text="관측 슬롯 (1~20)").pack(side="left",padx=(8,2))
+        slots=ttk.Combobox(schedule,textvariable=self.vph_observation_slots,
+            values=tuple(str(value) for value in range(1,21)),state="normal",width=4)
+        slots.pack(side="left")
+        slots.bind("<<ComboboxSelected>>",lambda _event:self.save_vph_observation_slots())
         ttk.Label(schedule,text="시작 시각 선택 (HH:MM)").pack(side="left",padx=(8,2))
         ttk.Entry(schedule,textvariable=self.schedule_start_time,width=7).pack(side="left")
         ttk.Button(schedule,text="연구 시간 설정",command=self._autopilot_schedule_preview).pack(side="left",padx=7)
-        self.schedule_progress_text=tk.StringVar(value="예약 대기 · 6시간 / 연구 30분 / 휴식 30분")
+        self.schedule_progress_text=tk.StringVar(value="예약 대기 · 8시간 / 연구 20분 / 휴식 20분")
         ttk.Label(tab,textvariable=self.schedule_progress_text,wraplength=1050).grid(row=4,column=0,sticky="w",pady=3)
         self.autopilot_start_button=ttk.Button(tab,text="AI 자동 조사 시작",command=self._autopilot_start,
                                                 style="Accent.TButton")
@@ -2291,7 +2565,11 @@ class Studio(tk.Tk):
                 total_hours=int(self.schedule_hours.get()),
                 research_minutes=int(self.schedule_research_minutes.get()),
                 break_minutes=int(self.schedule_break_minutes.get()),
-                approved_search_calls=int(self.ai_max_calls.get()))
+                approved_search_calls=int(self.ai_max_calls.get()),schedule_mode=self.schedule_mode.get(),
+                research_min_minutes=int(self.schedule_research_min.get()),
+                research_max_minutes=int(self.schedule_research_max.get()),
+                break_min_minutes=int(self.schedule_break_min.get()),
+                break_max_minutes=int(self.schedule_break_max.get()))
             config.validate()
         except (TypeError,ValueError):
             messagebox.showerror("시간 설정 확인","전체 시간, 연구/휴식 간격과 검색 한도를 다시 확인해 주세요.",parent=self)
@@ -2299,6 +2577,60 @@ class Studio(tk.Tk):
         start=self.schedule_start_time.get().strip() or "지금 시작"
         self.schedule_progress_text.set(
             f"설정됨 · {config.total_hours}시간 · 연구 {config.research_minutes}분 / 휴식 {config.break_minutes}분 · 시작 {start} · 검색 한도 {config.approved_search_calls}회")
+
+    def _research_schedule_preferences(self):
+        return {"total_hours":int(self.schedule_hours.get()),
+            "research_minutes":int(self.schedule_research_minutes.get()),
+            "break_minutes":int(self.schedule_break_minutes.get()),"schedule_mode":self.schedule_mode.get(),
+            "research_min_minutes":int(self.schedule_research_min.get()),
+            "research_max_minutes":int(self.schedule_research_max.get()),
+            "break_min_minutes":int(self.schedule_break_min.get()),
+            "break_max_minutes":int(self.schedule_break_max.get())}
+
+    def save_research_schedule_preset(self):
+        if not self.active_id:return
+        try:
+            settings=self._research_schedule_preferences()
+            config=research_scheduler.ScheduleConfig(profile_id=self.active_id,**settings,
+                approved_search_calls=int(self.ai_max_calls.get()))
+            config.validate()
+            name=simpledialog.askstring("일정 프리셋","프리셋 이름을 입력하세요 (예: 8시간 고정형)",parent=self)
+            if not name:return
+            store.save_research_schedule_preset(self.active_id,name,settings)
+            store.save_profile_research_preferences(self.active_id,settings)
+            presets=store.list_research_schedule_presets(self.active_id)
+            self.schedule_preset_combo.configure(values=presets);self.schedule_preset_var.set(name)
+        except (ValueError,sqlite3.Error):
+            messagebox.showerror("설정 확인","일정 범위 또는 프리셋 이름을 확인하세요.",parent=self)
+
+    def apply_research_schedule_preset(self):
+        if not self.active_id:return
+        try:
+            settings=store.get_research_schedule_preset(self.active_id,self.schedule_preset_var.get())
+            if not settings:return
+            for key,variable in (("total_hours",self.schedule_hours),("research_minutes",self.schedule_research_minutes),
+                ("break_minutes",self.schedule_break_minutes),("schedule_mode",self.schedule_mode),
+                ("research_min_minutes",self.schedule_research_min),("research_max_minutes",self.schedule_research_max),
+                ("break_min_minutes",self.schedule_break_min),("break_max_minutes",self.schedule_break_max)):
+                if key in settings:variable.set(str(settings[key]))
+            store.save_profile_research_preferences(self.active_id,settings)
+        except (ValueError,sqlite3.Error):
+            messagebox.showerror("설정 확인","프리셋을 불러오지 못했습니다.",parent=self)
+
+    def apply_schedule_settings_next_cycle(self):
+        if not self.active_id:return
+        try:
+            settings=self._research_schedule_preferences()
+            active=research_scheduler.list_active(self.active_id)
+            schedule=next((item for item in active if item["state"]=="running"),None)
+            if not schedule:raise ValueError("실행 중인 일정이 없습니다.")
+            updated=research_scheduler.update_next_cycle(schedule["id"],self.active_id,settings)
+            store.save_profile_research_preferences(self.active_id,settings)
+            self.schedule_progress_text.set(
+                f"다음 연구 회차부터 설정 변경 · {updated['total_minutes']//60}시간 · "
+                f"{updated['schedule_mode']} · 현재 {updated['phase']}")
+        except (ValueError,sqlite3.Error) as exc:
+            messagebox.showerror("일정 변경 보류",str(exc),parent=self)
 
     def _resource_status(self):
         decision=self.resource_guard.check(sample_resources)
@@ -2448,6 +2780,8 @@ class Studio(tk.Tk):
             schedule_id=None
         if session_settings is None:
             try:
+                if not self.save_vph_observation_slots():
+                    return
                 start_at=None
                 start_text=self.schedule_start_time.get().strip()
                 if start_text:
@@ -2456,11 +2790,19 @@ class Studio(tk.Tk):
                     start_at=datetime.combine(local_now.date(),parsed,tzinfo=local_now.tzinfo)
                     if start_at < local_now:
                         raise ValueError("시작 시각은 오늘의 현재 시각 이후로 입력해 주세요.")
-                schedule=research_scheduler.create(research_scheduler.ScheduleConfig(
+                preferences=self._research_schedule_preferences()
+                schedule_config=research_scheduler.ScheduleConfig(
                     profile_id=profile_id,total_hours=int(self.schedule_hours.get()),
                     research_minutes=int(self.schedule_research_minutes.get()),
                     break_minutes=int(self.schedule_break_minutes.get()),start_at=start_at,
-                    approved_search_calls=config.max_search_calls))
+                    approved_search_calls=config.max_search_calls,schedule_mode=preferences["schedule_mode"],
+                    research_min_minutes=preferences["research_min_minutes"],
+                    research_max_minutes=preferences["research_max_minutes"],
+                    break_min_minutes=preferences["break_min_minutes"],
+                    break_max_minutes=preferences["break_max_minutes"])
+                schedule_config.validate()
+                store.save_profile_research_preferences(profile_id,preferences)
+                schedule=research_scheduler.create(schedule_config)
                 schedule_id=schedule["id"]
                 research_scheduler.checkpoint(schedule_id,profile_id,{
                     "approved_provider_id":config.provider_id,
@@ -2535,7 +2877,7 @@ class Studio(tk.Tk):
                                                    "project":project_usage})
                 if schedule_id:
                     outcome=self._autopilot_schedule_worker(schedule_id,profile_id,config,provider,
-                        collect,resource_check,low_load_enabled)
+                        collect,resource_check,low_load_enabled,key,token,identity)
                 else:
                     outcome=self.autopilot_controller.run(config,collect,provider=provider,
                         on_event=self.autopilot_events.put,continue_check=resource_check,
@@ -2565,7 +2907,53 @@ class Studio(tk.Tk):
         threading.Thread(target=worker,name="zisu-autopilot",daemon=True).start()
         self.after(100,self._autopilot_poll)
 
-    def _autopilot_schedule_worker(self,schedule_id,profile_id,config,provider,collector,resource_check,low_load_enabled):
+    def _run_schedule_vph_first_sample(self,schedule_id,profile_id,key,token,identity,resource_check):
+        """Bind the completed bounded discovery batch to one durable VPH first-sample job."""
+        item=research_scheduler.get(schedule_id,profile_id)
+        if not item:
+            raise RuntimeError("Research schedule checkpoint is unavailable.")
+        checkpoint=json.loads(item.get("checkpoint_json") or "{}")
+        job_id=checkpoint.get("vph_job_id")
+        job=vph_research.get(job_id,profile_id) if job_id else None
+        if job_id and not job:
+            raise RuntimeError("Saved VPH job does not match this research profile.")
+        if job and job.get("schedule_id")!=schedule_id:
+            raise RuntimeError("Saved VPH job belongs to a different research schedule.")
+        if job and job["state"]!="READY":
+            checkpoint.update(vph_job_id=job["id"],vph_observation_slots=job["observation_slots"],
+                              vph_discovery_complete=True)
+            research_scheduler.checkpoint(schedule_id,profile_id,checkpoint)
+            self.autopilot_events.put({"stage":"vph_result","job":job})
+            return job
+        if not job:
+            profile=store.get_profile(profile_id)
+            slots=int(profile.get("vph_observation_slots",10))
+            job=vph_research.start(profile_id,store.db_path(),search_limit=0,
+                observation_slots=slots,schedule_id=schedule_id)
+            checkpoint.update(vph_job_id=job["id"],vph_observation_slots=slots,
+                              vph_discovery_complete=False)
+            research_scheduler.checkpoint(schedule_id,profile_id,checkpoint)
+        if not resource_check():
+            decision=self.resource_guard.check(sample_resources)
+            reason=decision.reasons[0] if decision.reasons else "system_memory_high"
+            research_scheduler.request_resource_pause(schedule_id,profile_id,
+                reason,path=store.db_path())
+            self.autopilot_events.put({"stage":"resource_status","allow":False,
+                "status":"System resources are low; VPH first sampling is deferred."})
+            return job
+        context={"profile_id":profile_id,"path":store.db_path(),"project_identity":identity,
+                 "schedule_id":schedule_id,"session_id":job["id"]}
+        result=vph_research.run_first_phase(job["id"],profile_id,key,access_token=token,
+            quota_context=context,path=store.db_path(),searcher=lambda *args,**kwargs:[],
+            should_stop=self.autopilot_schedule_stop_event.is_set,
+            should_pause=self.autopilot_schedule_pause_event.is_set)
+        checkpoint.update(vph_job_id=result["id"],vph_observation_slots=result["observation_slots"],
+                          vph_discovery_complete=True)
+        research_scheduler.checkpoint(schedule_id,profile_id,checkpoint)
+        self.autopilot_events.put({"stage":"vph_result","job":result})
+        return result
+
+    def _autopilot_schedule_worker(self,schedule_id,profile_id,config,provider,collector,resource_check,low_load_enabled,key,token,identity):
         last_result=None
         settings=autopilot.AutopilotController._settings(config,provider)
         while True:
@@ -2585,6 +2973,8 @@ class Studio(tk.Tk):
                 break
             item=research_scheduler.get(schedule_id,profile_id)
             if not item or item["state"] in {"completed","cancelled"}:
+                vph_research.finish_schedule_jobs(profile_id,schedule_id,store.db_path(),
+                    reason="schedule_ended" if item and item["state"]=="completed" else "schedule_stopped")
                 break
             self.autopilot_events.put({"stage":"schedule_status","item":item})
             if self.autopilot_schedule_pause_event.is_set():
@@ -2641,10 +3031,19 @@ class Studio(tk.Tk):
                 self.autopilot_schedule_resume_event.wait(min(15,max(1,item["remaining_seconds"])))
                 self.autopilot_schedule_resume_event.clear()
                 continue
+            checkpoint=json.loads(item.get("checkpoint_json") or "{}")
+            if checkpoint.get("vph_discovery_complete"):
+                self.autopilot_events.put({"stage":"schedule","message":"Discovery and first VPH sample are checkpointed; waiting for scheduled observations."})
+                self.autopilot_schedule_resume_event.wait(min(15,max(1,item["phase_remaining_seconds"])))
+                self.autopilot_schedule_resume_event.clear()
+                continue
             if item["search_calls_remaining"]<=0:
-                research_scheduler.pause(schedule_id,profile_id)
-                self.autopilot_events.put({"stage":"schedule","message":"승인된 검색 한도에 도달해 안전하게 멈췄습니다."})
-                break
+                self.autopilot_events.put({"stage":"schedule","message":"승인된 검색 한도를 사용했습니다. 추가 검색 없이 남은 일정을 진행합니다."})
+                if last_result and last_result.state=="complete":
+                    self._run_schedule_vph_first_sample(schedule_id,profile_id,key,token,identity,resource_check)
+                self.autopilot_schedule_resume_event.wait(min(15,max(1,item["phase_remaining_seconds"])))
+                self.autopilot_schedule_resume_event.clear()
+                continue
             self.autopilot_events.put({"stage":"schedule","message":"연구 구간 · 기존 Autopilot으로 승인된 범위에서 검색합니다."})
             resumed_config=autopilot.AutopilotConfig(profile_id=config.profile_id,target=config.target,
                 max_search_calls=config.max_search_calls,provider_id=config.provider_id,
@@ -2654,9 +3053,13 @@ class Studio(tk.Tk):
                 self.autopilot_controller,resumed_config,collector,provider=provider,
                 on_event=self.autopilot_events.put,resource_guard=self.resource_guard if low_load_enabled else None)
             if last_result.state=="complete":
-                self._research_browser_boundary_close("complete")
-                research_scheduler.complete(schedule_id,profile_id)
-                break
+                item=research_scheduler.get(schedule_id,profile_id)
+                if not item or item["state"]=="completed":
+                    self._research_browser_boundary_close("complete")
+                    break
+                self._run_schedule_vph_first_sample(schedule_id,profile_id,key,token,identity,resource_check)
+                self.autopilot_events.put({"stage":"schedule","message":"검색과 첫 VPH 표본 단계가 끝났습니다. 전체 일정은 계속되며 검색을 반복하지 않습니다."})
+                continue
             if self.autopilot_schedule_stop_event.is_set():
                 item=research_scheduler.get(schedule_id,profile_id)
                 if item and not item["search_in_flight"] and item["state"] in {"running","paused","scheduled"}:
@@ -2757,6 +3160,9 @@ class Studio(tk.Tk):
                         f"{item.get('phase','대기')} · 경과 {elapsed//60}분 · 남은 시간 {item.get('remaining_seconds',0)//60}분 · 검색 잔여 {item.get('search_calls_remaining',0)}회")
                 elif stage=="schedule" and event.get("message"):
                     self.autopilot_stage_text.set(event["message"])
+                elif stage=="vph_result":
+                    self.reload_vph_radar()
+                    self._refresh_vph_research_status(event.get("job"))
                 elif stage=="progress":
                     max_calls=max(1,int(self.ai_max_calls.get()))
                     self.autopilot_progress.configure(value=min(95,100*event.get("calls_used",0)/max_calls))

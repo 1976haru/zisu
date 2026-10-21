@@ -3,17 +3,22 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import store
 from .resource_guard import ResourceGuard, ResourceSnapshot, sample_resources
 
-TOTAL_HOURS = (2, 4, 6, 8)
-RESEARCH_MINUTES = (20, 30, 40)
-BREAK_MINUTES = (15, 30, 40)
+TOTAL_HOURS = (2, 4, 6, 8, 10, 12)
+MIN_TOTAL_HOURS = 1
+MAX_TOTAL_HOURS = 24
+MIN_INTERVAL_MINUTES = 1
+MAX_INTERVAL_MINUTES = 180
+RESEARCH_MINUTES = (5, 10, 15, 20, 30, 40, 60)
+BREAK_MINUTES = (5, 10, 15, 20, 30, 40, 60)
 MAX_SEARCH_CALLS = 1000
 _FORBIDDEN_KEY = re.compile(r"(?i)(secret|password|credential|api.?key|access.?token|refresh.?token|authorization)")
 
@@ -38,16 +43,30 @@ class ScheduleConfig:
     break_minutes: int = 30
     start_at: datetime | None = None
     approved_search_calls: int = 12
+    schedule_mode: str = "fixed"
+    research_min_minutes: int | None = None
+    research_max_minutes: int | None = None
+    break_min_minutes: int | None = None
+    break_max_minutes: int | None = None
 
     def validate(self):
         if not self.profile_id:
             raise ValueError("Choose a research profile.")
-        if self.total_hours not in TOTAL_HOURS:
-            raise ValueError("Total time must be 2, 4, 6, or 8 hours.")
-        if self.research_minutes not in RESEARCH_MINUTES:
-            raise ValueError("Research interval must be 20, 30, or 40 minutes.")
-        if self.break_minutes not in BREAK_MINUTES:
-            raise ValueError("Break interval must be 15, 30, or 40 minutes.")
+        if isinstance(self.total_hours,bool) or not isinstance(self.total_hours,int) or not MIN_TOTAL_HOURS <= self.total_hours <= MAX_TOTAL_HOURS:
+            raise ValueError(f"Total time must be between {MIN_TOTAL_HOURS} and {MAX_TOTAL_HOURS} hours.")
+        if self.schedule_mode not in {"fixed","random"}:
+            raise ValueError("Schedule mode must be fixed or random.")
+        for value in (self.research_minutes,self.break_minutes):
+            if isinstance(value,bool) or not isinstance(value,int) or not MIN_INTERVAL_MINUTES <= value <= MAX_INTERVAL_MINUTES:
+                raise ValueError(f"Research and break durations must be between {MIN_INTERVAL_MINUTES} and {MAX_INTERVAL_MINUTES} minutes.")
+        limits=(self.research_min_minutes,self.research_max_minutes,self.break_min_minutes,self.break_max_minutes)
+        defaults=(self.research_minutes,self.research_minutes,self.break_minutes,self.break_minutes)
+        resolved=tuple(value if value is not None else default for value,default in zip(limits,defaults))
+        for value in resolved:
+            if isinstance(value,bool) or not isinstance(value,int) or not MIN_INTERVAL_MINUTES <= value <= MAX_INTERVAL_MINUTES:
+                raise ValueError(f"Research and break durations must be between {MIN_INTERVAL_MINUTES} and {MAX_INTERVAL_MINUTES} minutes.")
+        if resolved[0]>resolved[1] or resolved[2]>resolved[3]:
+            raise ValueError("Minimum schedule duration cannot exceed its maximum.")
         if isinstance(self.approved_search_calls, bool) or not isinstance(self.approved_search_calls, int):
             raise ValueError("Search allowance must be a whole number.")
         if not 1 <= self.approved_search_calls <= MAX_SEARCH_CALLS:
@@ -73,6 +92,14 @@ def _parse(value: str) -> datetime:
 
 def _phase_at(item: dict, elapsed: int) -> tuple[str, int]:
     """Return phase and time remaining in phase, accounting for one saved extension."""
+    checkpoint=json.loads(item.get("checkpoint_json") or "{}")
+    plan=checkpoint.get("schedule_plan",[])
+    if plan and int(item.get("research_extension_seconds",0) or 0)==0:
+        for segment in plan:
+            start=int(segment["offset_start_seconds"]); end=int(segment["offset_end_seconds"])
+            if start <= elapsed < end:
+                return segment["phase"],end-elapsed
+        return "complete",0
     research = int(item["research_minutes"]) * 60
     rest = int(item["break_minutes"]) * 60
     cycle = research + rest
@@ -95,6 +122,31 @@ def _phase_at(item: dict, elapsed: int) -> tuple[str, int]:
     return ("research", research - offset) if offset < research else ("break", cycle - offset)
 
 
+def _build_schedule_plan(config, start, *, total_seconds=None, offset_start=0):
+    total=config.total_hours*3600 if total_seconds is None else int(total_seconds)
+    final_offset=int(offset_start)+total
+    research_min=config.research_min_minutes if config.research_min_minutes is not None else config.research_minutes
+    research_max=config.research_max_minutes if config.research_max_minutes is not None else config.research_minutes
+    break_min=config.break_min_minutes if config.break_min_minutes is not None else config.break_minutes
+    break_max=config.break_max_minutes if config.break_max_minutes is not None else config.break_minutes
+    if config.schedule_mode=="fixed":
+        research_min=research_max=config.research_minutes
+        break_min=break_max=config.break_minutes
+    chooser=random.SystemRandom().randint if config.schedule_mode=="random" else lambda low,high:low
+    plan=[]; elapsed=int(offset_start); phase="research"
+    while elapsed < final_offset:
+        low,high=(research_min,research_max) if phase=="research" else (break_min,break_max)
+        duration=min(final_offset-elapsed,chooser(low,high)*60)
+        end=elapsed+duration
+        plan.append({"phase":phase,"duration_seconds":duration,
+            "offset_start_seconds":elapsed,"offset_end_seconds":end,
+            "planned_start_utc":_stamp(start+timedelta(seconds=elapsed-int(offset_start))),
+            "planned_end_utc":_stamp(start+timedelta(seconds=end-int(offset_start)))})
+        elapsed=end
+        phase="break" if phase=="research" else "research"
+    return plan
+
+
 def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) -> dict:
     """Persist a schedule with immutable profile/genre/channel scope."""
     config.validate()
@@ -111,6 +163,12 @@ def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) ->
         profile["genre"], profile.get("related_genres_json", "[]"), genre_config["custom_genres"])
     session_id = uuid.uuid4().hex
     active = start <= now_utc
+    schedule_plan=_build_schedule_plan(config,start)
+    checkpoint={"schedule_plan":schedule_plan,"schedule_mode":config.schedule_mode,
+        "research_min_minutes":config.research_min_minutes if config.research_min_minutes is not None else config.research_minutes,
+        "research_max_minutes":config.research_max_minutes if config.research_max_minutes is not None else config.research_minutes,
+        "break_min_minutes":config.break_min_minutes if config.break_min_minutes is not None else config.break_minutes,
+        "break_max_minutes":config.break_max_minutes if config.break_max_minutes is not None else config.break_minutes}
     with store.connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         if db.execute("SELECT 1 FROM research_schedules WHERE profile_id=? "
@@ -120,15 +178,15 @@ def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) ->
         db.execute("""INSERT INTO research_schedules(
           id,profile_id,market,core_genre,related_genres_json,genre_config_snapshot_json,channel_id,start_at_utc,
           total_minutes,research_minutes,break_minutes,approved_search_calls,state,phase,
-          running_since_utc)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+          running_since_utc,checkpoint_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
           (session_id, config.profile_id, profile["market"], profile["genre"],
            json.dumps(related, ensure_ascii=False), json.dumps(genre_config,ensure_ascii=False,sort_keys=True),
            profile.get("youtube_channel_id", ""),
            _stamp(start), config.total_hours * 60, config.research_minutes,
            config.break_minutes, config.approved_search_calls,
            "running" if active else "scheduled", "research" if active else "waiting",
-           _stamp(start) if active else ""))
+           _stamp(start) if active else "",json.dumps(checkpoint,ensure_ascii=False,sort_keys=True)))
     return get(session_id, config.profile_id, path, now=now_utc)
 
 
@@ -140,6 +198,13 @@ def get(session_id: str, profile_id: str, path=None, *, now: datetime | None = N
         if not row:
             return None
         item = dict(row)
+        checkpoint=json.loads(item.get("checkpoint_json") or "{}")
+        item.update(schedule_mode=checkpoint.get("schedule_mode","fixed"),
+            schedule_plan=checkpoint.get("schedule_plan",[]),
+            research_min_minutes=checkpoint.get("research_min_minutes",item["research_minutes"]),
+            research_max_minutes=checkpoint.get("research_max_minutes",item["research_minutes"]),
+            break_min_minutes=checkpoint.get("break_min_minutes",item["break_minutes"]),
+            break_max_minutes=checkpoint.get("break_max_minutes",item["break_minutes"]))
         current = _utc(now)
         old_state, old_phase = item["state"], item["phase"]
         state, phase = old_state, old_phase
@@ -176,16 +241,57 @@ def get(session_id: str, profile_id: str, path=None, *, now: datetime | None = N
                     remaining_seconds=max(0, total - elapsed),
                     phase_remaining_seconds=phase_remaining,
                     search_calls_remaining=max(0, int(item["approved_search_calls"]) - int(item["search_calls_used"])))
-        if state != old_state or phase != old_phase:
-            # Re-anchor the monotonic wall-clock accounting at phase changes;
-            # otherwise a later read would add already-persisted elapsed time twice.
-            if state == "running" and old_state == "running":
-                running_since = _stamp(current)
+        if state == "running":
+            # Persist the active process checkpoint; a restart must not count
+            # time spent with the app closed as completed research schedule.
+            running_since = _stamp(current)
+        if state != old_state or phase != old_phase or state == "running":
             db.execute("UPDATE research_schedules SET state=?,phase=?,elapsed_seconds=?,"
                        "running_since_utc=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=?",
                        (state, phase, elapsed if state != "running" or old_state == "running" else 0,
                         running_since, session_id, profile_id))
         return item
+
+
+def update_next_cycle(session_id: str, profile_id: str, settings: dict, path=None, *, now=None) -> dict:
+    """Apply edited durations only at the next research-cycle boundary."""
+    current=_utc(now)
+    item=get(session_id,profile_id,path,now=current)
+    if not item or item["state"]!="running" or item["search_in_flight"]:
+        raise ValueError("Schedule settings can only change safely while running between API requests.")
+    required={"total_hours","research_minutes","break_minutes","schedule_mode",
+        "research_min_minutes","research_max_minutes","break_min_minutes","break_max_minutes"}
+    if not isinstance(settings,dict) or set(settings)!=required:
+        raise ValueError("A complete schedule configuration is required.")
+    config=ScheduleConfig(profile_id,total_hours=settings["total_hours"],
+        research_minutes=settings["research_minutes"],break_minutes=settings["break_minutes"],
+        schedule_mode=settings["schedule_mode"],research_min_minutes=settings["research_min_minutes"],
+        research_max_minutes=settings["research_max_minutes"],break_min_minutes=settings["break_min_minutes"],
+        break_max_minutes=settings["break_max_minutes"],approved_search_calls=max(1,item["approved_search_calls"]))
+    config.validate()
+    elapsed=int(item["elapsed_seconds"]); plan=list(item.get("schedule_plan",[]))
+    boundary=next((int(segment["offset_start_seconds"]) for segment in plan
+                   if segment["phase"]=="research" and int(segment["offset_start_seconds"])>elapsed),None)
+    if boundary is None:
+        raise ValueError("No future research cycle remains in this schedule.")
+    new_total=config.total_hours*3600
+    if boundary>=new_total:
+        raise ValueError("New total duration ends before the next safe cycle boundary.")
+    start_segment=next(segment for segment in plan if int(segment["offset_start_seconds"])==boundary)
+    new_start=_parse(start_segment["planned_start_utc"])
+    prefix=[segment for segment in plan if int(segment["offset_end_seconds"])<=boundary]
+    tail=_build_schedule_plan(config,new_start,total_seconds=new_total-boundary,offset_start=boundary)
+    checkpoint=json.loads(item.get("checkpoint_json") or "{}")
+    checkpoint.update(schedule_plan=prefix+tail,schedule_mode=config.schedule_mode,**{
+        "research_min_minutes":settings["research_min_minutes"],"research_max_minutes":settings["research_max_minutes"],
+        "break_min_minutes":settings["break_min_minutes"],"break_max_minutes":settings["break_max_minutes"]})
+    with store.connect(path) as db:
+        changed=db.execute("UPDATE research_schedules SET total_minutes=?,research_minutes=?,break_minutes=?,"
+            "checkpoint_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND state='running' AND search_in_flight=0",
+            (config.total_hours*60,config.research_minutes,config.break_minutes,
+             json.dumps(checkpoint,ensure_ascii=False,sort_keys=True),session_id,profile_id)).rowcount
+    if changed!=1:raise ValueError("Schedule changed while applying the next-cycle settings.")
+    return get(session_id,profile_id,path,now=current)
 
 
 def list_active(profile_id: str, path=None, *, now: datetime | None = None) -> list[dict]:
@@ -232,10 +338,27 @@ def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None 
             profile["market"], profile["genre"], current_related, current_config):
         raise ValueError("Saved research scope differs from current profile genre settings; review or start a new session.")
     phase, _ = _phase_at(item, item["elapsed_seconds"])
+    checkpoint=json.loads(item.get("checkpoint_json") or "{}")
+    plan=checkpoint.get("schedule_plan",[])
+    if plan:
+        elapsed=int(item["elapsed_seconds"])
+        current_segment=next((segment for segment in plan
+            if int(segment["offset_start_seconds"])<=elapsed<int(segment["offset_end_seconds"])),None)
+        if current_segment:
+            expected=_parse(current_segment["planned_start_utc"])+timedelta(
+                seconds=elapsed-int(current_segment["offset_start_seconds"]))
+        else:
+            expected=_parse(item["start_at_utc"])+timedelta(seconds=elapsed)
+        shift=current-expected
+        for segment in plan:
+            if int(segment["offset_end_seconds"])>elapsed:
+                segment["planned_start_utc"]=_stamp(_parse(segment["planned_start_utc"])+shift)
+                segment["planned_end_utc"]=_stamp(_parse(segment["planned_end_utc"])+shift)
+        checkpoint["schedule_plan"]=plan
     with store.connect(path) as db:
-        db.execute("UPDATE research_schedules SET state='running',phase=?,pause_reason='',running_since_utc=?,"
+        db.execute("UPDATE research_schedules SET state='running',phase=?,pause_reason='',running_since_utc=?,checkpoint_json=?,"
                    "updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND state='paused'",
-                   (phase, _stamp(current), session_id, profile_id))
+                   (phase, _stamp(current),json.dumps(checkpoint,ensure_ascii=False,sort_keys=True),session_id, profile_id))
     return get(session_id, profile_id, path, now=current)
 
 
@@ -248,6 +371,8 @@ def extend_current_research(session_id: str, profile_id: str, path=None, *,
     item = get(session_id, profile_id, path, now=current)
     if not item or item["state"] != "running" or item["phase"] != "research":
         raise ValueError("Only an active research phase can be extended.")
+    if item.get("schedule_mode")=="random":
+        raise ValueError("Random schedules use their saved cycle plan; use next-cycle settings to change later intervals.")
     if item.get("research_extension_used"):
         raise ValueError("This schedule has already used its one-time extension.")
     if int(item.get("phase_remaining_seconds", 0)) > 60:
@@ -337,7 +462,10 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
                "autopilot_session_id", "notes_draft_id", "uncertain_request",
                "approved_provider_id", "approved_model", "approved_target",
                "approved_max_search_calls", "paid_external_approved",
-               "cost_estimate_usd", "cost_limit_usd"}
+               "cost_estimate_usd", "cost_limit_usd", "vph_job_id",
+               "vph_observation_slots", "vph_discovery_complete", "schedule_plan",
+               "schedule_mode", "research_min_minutes", "research_max_minutes",
+               "break_min_minutes", "break_max_minutes"}
     if set(values) - allowed:
         raise ValueError("Checkpoint contains unsupported fields.")
     for key, value in values.items():
@@ -350,6 +478,32 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
         elif key in {"uncertain_request", "paid_external_approved"}:
             if not isinstance(value, bool):
                 raise ValueError("Request uncertainty must be true or false.")
+        elif key == "vph_discovery_complete":
+            if not isinstance(value, bool):
+                raise ValueError("VPH discovery state must be true or false.")
+        elif key == "vph_observation_slots":
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 20:
+                raise ValueError("VPH observation slots must be between 1 and 20.")
+        elif key == "schedule_plan":
+            if not isinstance(value,list) or len(value)>2000:
+                raise ValueError("Schedule plan is invalid.")
+            last_end=0
+            for segment in value:
+                if not isinstance(segment,dict) or segment.get("phase") not in {"research","break"}:
+                    raise ValueError("Schedule plan segment is invalid.")
+                start,end=segment.get("offset_start_seconds"),segment.get("offset_end_seconds")
+                if (isinstance(start,bool) or not isinstance(start,int) or isinstance(end,bool)
+                    or not isinstance(end,int) or start!=last_end or end<=start or end-start>10800
+                    or not isinstance(segment.get("planned_start_utc"),str)
+                    or not isinstance(segment.get("planned_end_utc"),str)):
+                    raise ValueError("Schedule plan timing is invalid.")
+                last_end=end
+        elif key == "schedule_mode":
+            if value not in {"fixed","random"}:
+                raise ValueError("Schedule mode is invalid.")
+        elif key in {"research_min_minutes","research_max_minutes","break_min_minutes","break_max_minutes"}:
+            if isinstance(value,bool) or not isinstance(value,int) or not 1<=value<=180:
+                raise ValueError("Schedule range is invalid.")
         elif key in {"approved_target", "approved_max_search_calls"}:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError("Approved research limits must be positive whole numbers.")
@@ -364,10 +518,19 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
                 raise ValueError("Approved provider details are invalid.")
             if key == "approved_provider_id" and value not in {"disabled", "gemini", "openai", "ollama"}:
                 raise ValueError("Approved provider is not supported.")
+        elif key == "vph_job_id":
+            if not isinstance(value, str) or len(value) > 128:
+                raise ValueError("VPH checkpoint identifier is invalid.")
         elif not isinstance(value, str) or len(value) > 128:
             raise ValueError("Checkpoint text is invalid.")
-    payload = json.dumps(values, ensure_ascii=False, sort_keys=True, allow_nan=False)
     with store.connect(path) as db:
+        row=db.execute("SELECT checkpoint_json FROM research_schedules WHERE id=? AND profile_id=?",
+                       (session_id,profile_id)).fetchone()
+        if not row:
+            raise ValueError("Research schedule does not match the selected profile.")
+        merged=json.loads(row[0] or "{}")
+        merged.update(values)
+        payload = json.dumps(merged, ensure_ascii=False, sort_keys=True, allow_nan=False)
         result = db.execute("UPDATE research_schedules SET checkpoint_json=?,updated_at=CURRENT_TIMESTAMP "
                             "WHERE id=? AND profile_id=?", (payload, session_id, profile_id))
         if result.rowcount != 1:
@@ -477,21 +640,19 @@ def pause_for_api_error(session_id: str, profile_id: str, error, path=None) -> d
 
 def recover_interrupted(profile_id: str, path=None, *, now: datetime | None = None) -> list[dict]:
     """Convert crashed running rows to paused checkpoints; never resume requests."""
-    current = _utc(now)
     with store.connect(path) as db:
-        ids = [row[0] for row in db.execute("SELECT id FROM research_schedules WHERE profile_id=? "
-               "AND state='running'", (profile_id,))]
-    recovered = []
-    for session_id in ids:
-        item = get(session_id, profile_id, path, now=current)
-        if not item or item["state"] == "completed":
-            continue
-        with store.connect(path) as db:
-            db.execute("UPDATE research_schedules SET state='paused',phase='interrupted',elapsed_seconds=?,"
-                       "running_since_utc='',updated_at=CURRENT_TIMESTAMP WHERE id=? AND profile_id=? AND state='running'",
-                       (item["elapsed_seconds"], session_id, profile_id))
-        recovered.append(get(session_id, profile_id, path, now=current))
-    return recovered
+        rows = db.execute("SELECT id FROM research_schedules WHERE profile_id=? AND state='running'",
+                          (profile_id,)).fetchall()
+        recovered_ids = []
+        for row in rows:
+            session_id = row["id"]
+            changed = db.execute("UPDATE research_schedules SET state='paused',phase='interrupted',"
+                "pause_reason='process_interrupted',running_since_utc='',updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND profile_id=? AND state='running'", (session_id, profile_id)).rowcount
+            if changed:
+                recovered_ids.append(session_id)
+    return [item for session_id in recovered_ids
+            if (item := get(session_id, profile_id, path, now=now))]
 
 
 def acknowledge_uncertain_search_consumed(session_id: str, profile_id: str, path=None) -> dict:

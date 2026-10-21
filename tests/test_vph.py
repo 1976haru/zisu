@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import unittest
 from contextlib import closing
@@ -70,11 +71,13 @@ class VphRadarTests(unittest.TestCase):
         context={"profile_id":self.profile,"path":str(self.db)}
         with patch("mcrs.vph.youtube_api._get",return_value=response) as request:
             result=vph.collect_video_samples("key",self.profile,[self.video],quota_context=context,
-                observed_at_utc=self.start,path=self.db)
+                observed_at_utc=self.start,path=self.db,
+                target_metadata={self.video:{"research_group":"GENRE_UNCONFIRMED_REFERENCE"}})
         self.assertEqual("UNKNOWN",result[0]["state"])
         self.assertEqual("videos",request.call_args.args[0]); self.assertEqual(context,request.call_args.kwargs["quota_context"])
         radar=vph.list_radar(self.profile,self.db)[0]
         self.assertEqual("short_candidate",radar["video_format"]); self.assertEqual(120,radar["duration_seconds"])
+        self.assertEqual("GENRE_UNCONFIRMED_REFERENCE",json.loads(radar["metadata_json"])["research_group"])
 
 
     def test_radar_deduplicates_to_latest_and_genre_fit_precedes_vph(self):

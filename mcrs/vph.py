@@ -6,7 +6,7 @@ import json
 import math
 import re
 
-from . import store, youtube_api
+from . import genres, store, youtube_api
 
 MIN_INTERVAL_SECONDS = 3600
 DEFAULT_MAX_AGE_SECONDS = 48 * 3600
@@ -136,12 +136,14 @@ def list_radar(profile_id, path=None):
           FROM vph_evaluations e JOIN vph_observations o ON o.id=e.later_observation_id
           WHERE e.profile_id=?)
           SELECT e.*,o.observed_at_utc,o.view_count,o.sample_status,o.uncertainty_reason,o.video_format,
-          o.published_at,o.duration_seconds,c.video_title,c.channel_title,c.views AS cumulative_views,
+          o.published_at,o.duration_seconds,o.metadata_json,c.video_title,c.channel_title,c.views AS cumulative_views,
           c.genre_score,c.genre_decision,c.country
           FROM ranked e JOIN vph_observations o ON o.id=e.later_observation_id
           LEFT JOIN candidates c ON c.profile_id=e.profile_id AND c.video_id=e.video_id
-          WHERE e.sample_rank=1 ORDER BY COALESCE(c.genre_score,-1) DESC,
-          CASE e.state WHEN 'VALID' THEN 0 ELSE 1 END,COALESCE(e.vph,-1) DESC,e.id DESC""", (profile_id,)).fetchall()
+          WHERE e.sample_rank=1 ORDER BY CASE c.genre_decision WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,
+          COALESCE(c.genre_score,-1) DESC,
+          CASE e.state WHEN 'VALID' THEN 0 ELSE 1 END,COALESCE(e.vph,-1) DESC,e.id DESC""",
+          (profile_id,genres.FIT,genres.REVIEW)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -149,7 +151,7 @@ def list_history(profile_id, video_id, path=None):
     """Return immutable chronological observations/evaluations for one profile/video."""
     with store.connect(path) as db:
         rows = db.execute("""SELECT e.*,o.observed_at_utc,o.view_count,o.sample_status,
-          o.uncertainty_reason,o.video_format,o.published_at,o.duration_seconds
+          o.uncertainty_reason,o.video_format,o.published_at,o.duration_seconds,o.metadata_json
           FROM vph_evaluations e JOIN vph_observations o ON o.id=e.later_observation_id
           WHERE e.profile_id=? AND e.video_id=? ORDER BY o.observed_at_utc,o.id""",
           (profile_id,video_id)).fetchall()
@@ -157,7 +159,7 @@ def list_history(profile_id, video_id, path=None):
 
 
 def collect_video_samples(key, profile_id, video_ids, *, access_token=None, quota_context=None,
-                          observed_at_utc=None, path=None):
+                          observed_at_utc=None, path=None, target_metadata=None):
     """Fetch metadata only. No playback or engagement endpoint is used."""
     ids = list(dict.fromkeys(str(value) for value in video_ids if value))[:50]
     if not ids:
@@ -180,5 +182,6 @@ def collect_video_samples(key, profile_id, video_ids, *, access_token=None, quot
             sample_status="valid" if raw_count is not None else "missing",
             uncertainty_reason="" if raw_count is not None else "view_count_missing",
             video_format=classify_format(snippet,duration),published_at=snippet.get("publishedAt", ""),
-            duration_seconds=duration,metadata={"source":"youtube_data_api_v3"},path=path))
+            duration_seconds=duration,metadata={"source":"youtube_data_api_v3",
+                **((target_metadata or {}).get(video_id) or {})},path=path))
     return results

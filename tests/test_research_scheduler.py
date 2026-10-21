@@ -1,5 +1,6 @@
 import concurrent.futures
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from mcrs import autopilot, research_scheduler as scheduler, store
@@ -109,14 +110,87 @@ class ResearchSchedulerTests(unittest.TestCase):
         second = scheduler.create(scheduler.ScheduleConfig(self.kr), self.db, now=self.now)
         self.assertNotEqual(first["id"], second["id"])
         for config in (
-            scheduler.ScheduleConfig(self.kr, total_hours=3),
-            scheduler.ScheduleConfig(self.kr, research_minutes=15),
-            scheduler.ScheduleConfig(self.kr, break_minutes=20),
+            scheduler.ScheduleConfig(self.kr, total_hours=25),
+            scheduler.ScheduleConfig(self.kr, research_minutes=181),
             scheduler.ScheduleConfig(self.kr, approved_search_calls=1001),
             scheduler.ScheduleConfig(self.kr, approved_search_calls=float("inf")),
         ):
             with self.assertRaises(ValueError):
                 config.validate()
+
+    def test_eight_hour_twenty_twenty_schedule_has_twelve_real_time_cycles(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, total_hours=8,
+            research_minutes=20, break_minutes=20), self.db, now=self.now)
+        self.assertEqual(28800, session["remaining_seconds"])
+        for cycle in range(12):
+            research_at = self.now + timedelta(minutes=cycle * 40)
+            research = scheduler.get(session["id"], self.jp, self.db, now=research_at)
+            self.assertEqual("research", research["phase"], cycle)
+            break_at = research_at + timedelta(minutes=20)
+            if cycle < 11:
+                rest = scheduler.get(session["id"], self.jp, self.db, now=break_at)
+                self.assertEqual("break", rest["phase"], cycle)
+        completed = scheduler.get(session["id"], self.jp, self.db,
+                                  now=self.now + timedelta(hours=8))
+        self.assertEqual(("completed", 28800),
+                         (completed["state"], completed["elapsed_seconds"]))
+
+    def test_general_user_schedule_ten_hours_custom_fixed_and_twenty_slots(self):
+        config=scheduler.ScheduleConfig(self.jp,total_hours=10,research_minutes=30,
+            break_minutes=15,approved_search_calls=7)
+        session=scheduler.create(config,self.db,now=self.now)
+        self.assertEqual(600,session["total_minutes"])
+        self.assertEqual(36000,session["schedule_plan"][-1]["offset_end_seconds"])
+        self.assertEqual(["research","break"],[s["phase"] for s in session["schedule_plan"][:2]])
+        store.set_profile_vph_observation_slots(self.jp,20,self.db)
+        from mcrs import vph_research
+        job=vph_research.start(self.jp,self.db,search_limit=2,observation_slots=20)
+        self.assertEqual((20,2),(job["observation_slots"],job["search_limit"]))
+
+    def test_user_entered_and_random_ranges_are_checkpointed_and_capped(self):
+        custom=scheduler.ScheduleConfig(self.kr,total_hours=7,research_minutes=17,break_minutes=13)
+        self.assertEqual(420,scheduler.create(custom,self.db,now=self.now)["total_minutes"])
+        random_config=scheduler.ScheduleConfig(self.jp,total_hours=10,research_minutes=30,break_minutes=15,
+            schedule_mode="random",research_min_minutes=20,research_max_minutes=30,
+            break_min_minutes=15,break_max_minutes=25)
+        with patch("mcrs.research_scheduler.random.SystemRandom") as source:
+            source.return_value.randint.side_effect=lambda low,high:high
+            planned=scheduler.create(random_config,self.db,now=self.now)
+        self.assertEqual(36000,planned["schedule_plan"][-1]["offset_end_seconds"])
+        self.assertLessEqual(planned["schedule_plan"][-1]["duration_seconds"],1800)
+        self.assertEqual("random",planned["schedule_mode"])
+        saved=[(s["phase"],s["duration_seconds"],s["planned_start_utc"],s["planned_end_utc"])
+               for s in planned["schedule_plan"]]
+        checkpoint=scheduler.checkpoint(planned["id"],self.jp,{"approved_target":2},self.db)
+        self.assertEqual(saved,[(s["phase"],s["duration_seconds"],s["planned_start_utc"],s["planned_end_utc"])
+                                for s in checkpoint["schedule_plan"]])
+
+    def test_schedule_edits_apply_at_next_research_cycle_only(self):
+        item=scheduler.create(scheduler.ScheduleConfig(self.jp,total_hours=8,
+            research_minutes=20,break_minutes=20),self.db,now=self.now)
+        before=list(item["schedule_plan"])
+        settings={"total_hours":10,"research_minutes":30,"break_minutes":15,"schedule_mode":"fixed",
+            "research_min_minutes":30,"research_max_minutes":30,"break_min_minutes":15,"break_max_minutes":15}
+        updated=scheduler.update_next_cycle(item["id"],self.jp,settings,self.db,now=self.now)
+        self.assertEqual(600,updated["total_minutes"])
+        self.assertEqual(before[:2],updated["schedule_plan"][:2])
+        self.assertEqual(1800,updated["schedule_plan"][2]["duration_seconds"])
+        self.assertEqual(36000,updated["schedule_plan"][-1]["offset_end_seconds"])
+
+    def test_process_interruption_preserves_checkpoint_and_excludes_app_off_time(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, total_hours=8,
+            research_minutes=20, break_minutes=20), self.db, now=self.now)
+        checkpoint_at = self.now + timedelta(minutes=13)
+        scheduler.get(session["id"], self.jp, self.db, now=checkpoint_at)
+        recovered = scheduler.recover_interrupted(self.jp, self.db,
+            now=self.now + timedelta(hours=7))[0]
+        self.assertEqual(("paused", 13 * 60, "process_interrupted"),
+            (recovered["state"], recovered["elapsed_seconds"], recovered["pause_reason"]))
+        prior=[(part["phase"],part["duration_seconds"]) for part in recovered["schedule_plan"]]
+        resumed=scheduler.resume(session["id"],self.jp,self.db,now=self.now+timedelta(hours=7))
+        self.assertEqual(prior,[(part["phase"],part["duration_seconds"]) for part in resumed["schedule_plan"]])
+        self.assertNotEqual(recovered["schedule_plan"][1]["planned_start_utc"],
+                            resumed["schedule_plan"][1]["planned_start_utc"])
 
     def test_search_allowance_claim_is_atomic_break_aware_and_crash_safe(self):
         session = scheduler.create(scheduler.ScheduleConfig(self.jp, total_hours=2,

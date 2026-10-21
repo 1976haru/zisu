@@ -6,9 +6,15 @@ local application-data directory and are not synchronized to GitHub.
 from __future__ import annotations
 import json
 import os
+import subprocess
+import threading
+import time
+import uuid
+import webbrowser
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from . import store
 
 READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
@@ -31,6 +37,7 @@ _SAFE_FAILURES = {
     "client_config": "Desktop OAuth JSON 형식이 올바르지 않습니다. 원본 파일을 확인하고 다시 선택하세요.",
     "unknown": "Google 인증을 완료하지 못했습니다. 계정, 네트워크, 테스트 사용자 및 OAuth 설정을 확인하세요.",
 }
+_SAFE_FAILURES["isolated_browser"] = "QA OAuth 브라우저 격리를 검증하지 못했습니다. 기본 브라우저는 열지 않았습니다."
 
 class OAuthError(Exception):
     def __init__(self, message=None, *, code="unknown", stage="oauth"):
@@ -140,6 +147,106 @@ def _packages():
     except ImportError as e:
         raise OAuthError("구글 계정 연결 모듈이 설치되지 않았습니다. 'OAuth_모듈_설치하기.bat'을 먼저 실행해 주세요.") from e
     return InstalledAppFlow, Credentials, RefreshRequest
+
+
+_QA_EDGE_LOCK = threading.RLock()
+
+
+def _qa_edge_settings():
+    """Validate an explicitly isolated QA Edge executable/profile pair."""
+    try:
+        root = Path(os.environ.get("ZISU_QA_ROOT", "")).resolve(strict=True)
+        executable = Path(os.environ.get("ZISU_QA_EDGE_EXE", "")).resolve(strict=True)
+        profile = Path(os.environ.get("ZISU_QA_EDGE_PROFILE", "")).resolve(strict=False)
+        expected_profile = (root / "browser-profile").resolve(strict=False)
+        if (not root.is_dir() or not executable.is_file()
+                or executable.name.casefold() != "msedge.exe"
+                or profile != expected_profile or profile.parent != root):
+            raise ValueError
+        profile.mkdir(parents=True, exist_ok=True)
+        return root, executable, profile
+    except (OSError, RuntimeError, ValueError):
+        raise OAuthError(code="isolated_browser", stage="browser_preflight") from None
+
+
+def _safe_google_auth_url(url):
+    try:
+        parsed = urlparse(str(url))
+        return (parsed.scheme == "https" and parsed.hostname == "accounts.google.com"
+                and parsed.port in (None, 443)
+                and parsed.path in {"/o/oauth2/auth", "/o/oauth2/v2/auth"})
+    except (TypeError, ValueError):
+        return False
+
+
+class _QAEdgeOAuthBrowser:
+    """Open only Google OAuth URLs in one verified QA-owned Edge profile."""
+
+    def __init__(self, root, executable, profile, *, process_factory=subprocess.Popen,
+                 ownership_probe=None, wait_seconds=8.0):
+        self.root = Path(root)
+        self.executable = Path(executable)
+        self.profile = Path(profile)
+        self._process_factory = process_factory
+        self._ownership_probe = ownership_probe or self._default_ownership_probe
+        self._wait_seconds = max(0.1, float(wait_seconds))
+        self._root_process = None
+
+    def _default_ownership_probe(self, pid):
+        from .research_browser import _process_identity, _profile_owned_processes
+        matches = _profile_owned_processes(str(self.executable), str(self.profile))
+        identity = _process_identity(pid)
+        return bool(identity and matches.get(int(pid)) == identity[:2]
+                    and Path(identity[1]).resolve() == self.executable.resolve())
+
+    def _wait_for_owned_edge(self, process):
+        deadline = time.monotonic() + self._wait_seconds
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return False
+            try:
+                if self._ownership_probe(process.pid):
+                    return True
+            except Exception:
+                return False
+            time.sleep(0.1)
+        return False
+
+    def open(self, url, new=0, autoraise=True):
+        if not _safe_google_auth_url(url):
+            raise OAuthError(code="isolated_browser", stage="browser_url")
+        with _QA_EDGE_LOCK:
+            from .research_browser import _profile_owned_processes
+            if _profile_owned_processes(str(self.executable), str(self.profile)):
+                raise OAuthError(code="isolated_browser", stage="browser_preexisting_process")
+            base = [str(self.executable), f"--user-data-dir={self.profile}",
+                    "--no-first-run", "--no-default-browser-check"]
+            try:
+                self._root_process = self._process_factory(
+                    base + ["about:blank"], shell=False, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+            except OSError:
+                raise OAuthError(code="isolated_browser", stage="browser_launch") from None
+            if not self._wait_for_owned_edge(self._root_process):
+                raise OAuthError(code="isolated_browser", stage="browser_ownership") from None
+            try:
+                # Pass the authorization URL only after the isolated profile owner is verified.
+                self._process_factory(base + [str(url)], shell=False,
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, close_fds=True)
+            except OSError:
+                raise OAuthError(code="isolated_browser", stage="browser_launch") from None
+            if not self._ownership_probe(self._root_process.pid):
+                raise OAuthError(code="isolated_browser", stage="browser_ownership") from None
+            return True
+
+
+def _register_qa_edge_browser():
+    root, executable, profile = _qa_edge_settings()
+    name = "zisu-qa-edge-" + uuid.uuid4().hex
+    controller = _QAEdgeOAuthBrowser(root, executable, profile)
+    webbrowser.register(name, None, controller, preferred=False)
+    return name
 
 
 def token_path(profile_id):
@@ -264,6 +371,11 @@ def _get_email(access_token):
 
 def begin_connect(client_file=None, *, client_config=None):
     """Run Google consent; caller MUST confirm selected channel before saving token."""
+    qa_mode = (os.environ.get("ZISU_QA_MODE", "").strip() == "1"
+               or bool(os.environ.get("ZISU_QA_ROOT", "").strip()))
+    # Validate isolation before importing/starting the consent flow. In QA mode
+    # there is deliberately no fallback to the system's default browser.
+    browser_name = _register_qa_edge_browser() if qa_mode else None
     InstalledAppFlow, Credentials, _ = _packages()
     if client_config is None and (not client_file or not Path(client_file).is_file()):
         raise OAuthError("Google Cloud에서 발급한 Desktop OAuth JSON 파일을 선택하세요.", code="client_config")
@@ -284,8 +396,12 @@ def begin_connect(client_file=None, *, client_config=None):
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(client_file), scopes=SCOPES, autogenerate_code_verifier=True)
         try:
-            credentials = flow.run_local_server(host='127.0.0.1', port=0, open_browser=True,
-                                                prompt='select_account', access_type='offline')
+            flow_args = dict(host='127.0.0.1', port=0, open_browser=True,
+                             authorization_prompt_message=None,
+                             prompt='select_account', access_type='offline')
+            if browser_name:
+                flow_args['browser'] = browser_name
+            credentials = flow.run_local_server(**flow_args)
         except Warning as warning:
             failure = _oauth_failure(warning, "token_exchange")
             if failure:

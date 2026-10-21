@@ -6,6 +6,7 @@ from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
 from mcrs import store, vph
+from mcrs.genres import REVIEW
 from mcrs.gui import Studio, ProfileDialog
 with WorkspaceTemp() as temp:
     os.environ['ZISU_DATA_DIR']=str(temp)
@@ -31,6 +32,8 @@ with WorkspaceTemp() as temp:
     store.save_candidates(first,[{"video_id":first_video,"video_title":"Morning Chill Rap instrumental","channel_title":"JP Radar","published_at":"2025-12-01T00:00:00Z","views":1200}],)
     store.save_candidates(second,[{"video_id":second_video,"video_title":"Chill Rap study","channel_title":"KR Radar","views":50},
                                   {"video_id":missing_video,"video_title":"Chill Rap unknown","channel_title":"KR Radar"}],)
+    with store.connect() as database:
+        database.execute("UPDATE candidates SET genre_decision=? WHERE profile_id=? AND video_id=?",(REVIEW,first,first_video))
     vph.record_observation(first,first_video,1000,start,video_format="longform",duration_seconds=240,path=None)
     vph.record_observation(first,first_video,1600,start+timedelta(hours=1),video_format="longform",duration_seconds=240,path=None)
     vph.record_observation(first,first_video,1700,start+timedelta(hours=2),video_format="longform",duration_seconds=240,path=None)
@@ -42,7 +45,8 @@ with WorkspaceTemp() as temp:
     assert len(app.vph_tree.get_children())==1
     current=store.get_profile(first)
     assert app.vph_tree.item(app.vph_tree.get_children()[0],"values")[0]=="JP"
-    assert app.vph_tree.item(app.vph_tree.get_children()[0],"values")[8]=="100.0"
+    assert "REVIEW" in app.vph_tree.item(app.vph_tree.get_children()[0],"values")[2]
+    assert app.vph_tree.item(app.vph_tree.get_children()[0],"values")[9]=="100.0"
     app.vph_tier_a_var.set("150");app.vph_tier_b_var.set("75");app.save_vph_thresholds()
     assert (store.get_profile(first)["vph_tier_a"],store.get_profile(first)["vph_tier_b"])==(150,75)
     assert len(vph.list_history(first,first_video))==3
@@ -94,8 +98,8 @@ with WorkspaceTemp() as temp:
     assert app.active_id==second and len(app.vph_tree.get_children())==2
     second_rows=[app.vph_tree.item(iid,"values") for iid in app.vph_tree.get_children()]
     assert all(row[0]=="KR" for row in second_rows)
-    assert {row[9] for row in second_rows}=={"REVIEW","UNKNOWN"}
-    assert any("조회수 항목 없음" in row[10] for row in second_rows)
+    assert {row[10] for row in second_rows}=={"REVIEW","UNKNOWN"}
+    assert any("조회수 항목 없음" in row[11] for row in second_rows)
     app.vph_profile_combo.current([p["id"] for p in app.vph_profiles].index(first));app._vph_profile_selected()
     assert app.active_id==first and app.vph_tier_a_var.get()=="150.0"
     assert hasattr(app,"dashboard_selected_text")
@@ -110,9 +114,14 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"autopilot_exception_tree")
     assert hasattr(app,"autopilot_controller")
     assert app.autopilot_start_button.cget("text")=="연구 시작"
-    assert app.schedule_hours.get()=="6"
-    assert app.schedule_research_minutes.get()=="30"
-    assert app.schedule_break_minutes.get()=="30"
+    assert app.schedule_hours.get()=="8"
+    assert app.schedule_research_minutes.get()=="20"
+    assert app.schedule_break_minutes.get()=="20"
+    assert app.vph_observation_slots.get()=="10"
+    assert "20" in app.vph_slots_combo.cget("values")
+    assert app.schedule_mode.get()=="fixed"
+    assert callable(app.save_research_schedule_preset)
+    assert callable(app.apply_schedule_settings_next_cycle)
     assert app.resource_low_load_var.get() is True
     assert callable(app._autopilot_schedule_worker)
     assert callable(app._autopilot_schedule_preview)

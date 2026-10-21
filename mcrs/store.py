@@ -199,6 +199,7 @@ def initialize(path=None):
           channel_title TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL DEFAULT '',
           video_url TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
           published_at TEXT NOT NULL DEFAULT '', views INTEGER NOT NULL DEFAULT 0,
+          views_known INTEGER NOT NULL DEFAULT 1,
           country TEXT NOT NULL DEFAULT '', keyword TEXT NOT NULL DEFAULT '',
           genre_decision TEXT NOT NULL, genre_score INTEGER NOT NULL,
           genre_reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT '미확인',
@@ -237,6 +238,16 @@ def initialize(path=None):
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
           FOREIGN KEY(earlier_observation_id) REFERENCES vph_observations(id),
           FOREIGN KEY(later_observation_id) REFERENCES vph_observations(id));
+        CREATE TABLE IF NOT EXISTS vph_research_jobs (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, state TEXT NOT NULL,
+          search_limit INTEGER NOT NULL DEFAULT 3, search_calls_used INTEGER NOT NULL DEFAULT 0,
+          used_queries_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
+          next_run_utc TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_vph_research_jobs_profile_state
+          ON vph_research_jobs(profile_id,state,updated_at);
         CREATE TABLE IF NOT EXISTS genre_audit (
           profile_id TEXT NOT NULL, video_id TEXT NOT NULL, video_title TEXT NOT NULL,
           description TEXT NOT NULL DEFAULT '', market TEXT NOT NULL, target_genre TEXT NOT NULL,
@@ -310,6 +321,10 @@ def initialize(path=None):
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS research_schedule_presets (
+          profile_id TEXT NOT NULL, name TEXT NOT NULL, settings_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,name), FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_research_schedules_one_active
           ON research_schedules(profile_id) WHERE state IN ('scheduled','running','paused');
         CREATE INDEX IF NOT EXISTS idx_research_schedules_recovery
@@ -349,8 +364,12 @@ def initialize(path=None):
             "comment_length TEXT NOT NULL DEFAULT 'short'",
             "vph_tier_a REAL NOT NULL DEFAULT 100",
             "vph_tier_b REAL NOT NULL DEFAULT 50",
+            "vph_observation_slots INTEGER NOT NULL DEFAULT 10",
+            "research_preferences_json TEXT NOT NULL DEFAULT '{}'",
         ):
             _add_column(db, "profiles", definition)
+        _add_column(db, "vph_research_jobs", "observation_slots INTEGER NOT NULL DEFAULT 10")
+        _add_column(db, "vph_research_jobs", "schedule_id TEXT NOT NULL DEFAULT ''")
         if migrate_legacy_subgenre:
             # Preserve the historical free-text subgenre while making it
             # visible to the new structured search/UI configuration. This
@@ -372,6 +391,7 @@ def initialize(path=None):
                    "WHERE profiles.id=research_schedules.profile_id) WHERE genre_config_snapshot_json='{}' "
                    "AND EXISTS(SELECT 1 FROM profiles WHERE profiles.id=research_schedules.profile_id)")
         _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "candidates", "views_known INTEGER NOT NULL DEFAULT 1")
         _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
         _add_column(db, "candidates", "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'")
         for definition in (
@@ -445,6 +465,65 @@ def get_profile(profile_id, path=None):
     with connect(path) as db:
         row = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
         return dict(row) if row else None
+
+def set_profile_vph_observation_slots(profile_id, slots, path=None):
+    if isinstance(slots, bool) or not isinstance(slots, int) or not 1 <= slots <= 20:
+        raise ValueError("VPH observation slots must be a whole number from 1 to 20.")
+    with connect(path) as db:
+        changed=db.execute("UPDATE profiles SET vph_observation_slots=? WHERE id=?",(slots,profile_id)).rowcount
+        if changed != 1:
+            raise ValueError("Profile not found.")
+    return slots
+
+def _validate_research_preferences(settings):
+    allowed={"total_hours","research_minutes","break_minutes","schedule_mode",
+             "research_min_minutes","research_max_minutes","break_min_minutes","break_max_minutes"}
+    if not isinstance(settings,dict) or set(settings)-allowed:
+        raise ValueError("Research preferences contain unsupported fields.")
+    result={}
+    for key,value in settings.items():
+        if key=="schedule_mode":
+            if value not in {"fixed","random"}:raise ValueError("Invalid schedule mode.")
+            result[key]=value
+        else:
+            if isinstance(value,bool) or not isinstance(value,int):raise ValueError("Schedule values must be whole numbers.")
+            lower,upper=(1,24) if key=="total_hours" else (1,180)
+            if not lower<=value<=upper:raise ValueError("Schedule value is outside the supported range.")
+            result[key]=value
+    return result
+
+def save_profile_research_preferences(profile_id,settings,path=None):
+    payload=json.dumps(_validate_research_preferences(settings),ensure_ascii=False,sort_keys=True)
+    with connect(path) as db:
+        changed=db.execute("UPDATE profiles SET research_preferences_json=? WHERE id=?",(payload,profile_id)).rowcount
+        if changed!=1:raise ValueError("Profile not found.")
+    return json.loads(payload)
+
+def profile_research_preferences(profile_id,path=None):
+    profile=get_profile(profile_id,path)
+    if not profile:return {}
+    try:return _validate_research_preferences(json.loads(profile.get("research_preferences_json") or "{}"))
+    except (TypeError,json.JSONDecodeError,ValueError):return {}
+
+def save_research_schedule_preset(profile_id,name,settings,path=None):
+    name=str(name).strip()
+    if not name or len(name)>40 or any(ord(ch)<32 for ch in name):raise ValueError("Preset name must be 1–40 printable characters.")
+    payload=json.dumps(_validate_research_preferences(settings),ensure_ascii=False,sort_keys=True)
+    with connect(path) as db:
+        db.execute("INSERT INTO research_schedule_presets(profile_id,name,settings_json) VALUES(?,?,?) "
+                   "ON CONFLICT(profile_id,name) DO UPDATE SET settings_json=excluded.settings_json,updated_at=CURRENT_TIMESTAMP",
+                   (profile_id,name,payload))
+    return name
+
+def list_research_schedule_presets(profile_id,path=None):
+    with connect(path) as db:
+        return [row[0] for row in db.execute("SELECT name FROM research_schedule_presets WHERE profile_id=? ORDER BY name",(profile_id,))]
+
+def get_research_schedule_preset(profile_id,name,path=None):
+    with connect(path) as db:
+        row=db.execute("SELECT settings_json FROM research_schedule_presets WHERE profile_id=? AND name=?",
+                       (profile_id,name)).fetchone()
+    return _validate_research_preferences(json.loads(row[0])) if row else None
 
 def list_google_accounts(path=None):
     """List account/channel relationships without exposing credentials."""
@@ -685,7 +764,8 @@ def save_candidates(profile_id, rows, path=None):
             continue
         values.append((profile_id,video_id,title,str(row.get("channel_title",""))[:500],
           str(row.get("channel_id",""))[:200],f"https://www.youtube.com/watch?v={video_id}",description,
-          str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),str(row.get("country",""))[:20],
+          str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),
+          int(row.get("views") is not None),str(row.get("country",""))[:20],
           str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason,
           profile["genre"],related_snapshot,config_snapshot))
     with connect(path) as db:
@@ -699,11 +779,11 @@ def save_candidates(profile_id, rows, path=None):
           positive_signals=excluded.positive_signals,conflict_signals=excluded.conflict_signals,
           uncertainty=excluded.uncertainty,updated_at=CURRENT_TIMESTAMP""", audit_values)
         db.executemany("""INSERT INTO candidates(profile_id,video_id,video_title,channel_title,channel_id,
-          video_url,description,published_at,views,country,keyword,genre_decision,genre_score,genre_reason,
+          video_url,description,published_at,views,views_known,country,keyword,genre_decision,genre_score,genre_reason,
           classified_genre,related_genres_json,genre_config_snapshot_json)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
           video_title=excluded.video_title,channel_title=excluded.channel_title,channel_id=excluded.channel_id,
-          views=excluded.views,description=excluded.description,country=excluded.country,
+          views=excluded.views,views_known=excluded.views_known,description=excluded.description,country=excluded.country,
           keyword=excluded.keyword,published_at=excluded.published_at,
           genre_reason=CASE WHEN candidates.genre_decision=? THEN candidates.genre_reason ELSE excluded.genre_reason END,
           genre_score=CASE WHEN candidates.genre_decision=? THEN candidates.genre_score ELSE excluded.genre_score END,
