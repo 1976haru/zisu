@@ -320,6 +320,8 @@ class Studio(tk.Tk):
         self.oauth_busy=False
         self.search_inflight=False
         self._vph_research_worker_busy=False
+        self._vph_research_error_profile=None
+        self._vph_research_error_text=""
         self._vph_research_cancel_event=threading.Event()
         self._vph_research_pause_event=threading.Event()
         self._vph_research_last_job_check=0.0
@@ -521,6 +523,9 @@ class Studio(tk.Tk):
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
         ttk.Button(actions,text="VPH 연구 레이더",command=lambda:self.tabs.select(self.frames[8])).grid(row=6,column=0,sticky="ew",padx=3,pady=3)
+        self.dashboard_vph_start_button=ttk.Button(actions,text="원클릭 VPH 자동 연구",
+            command=self.start_vph_scheduled_research,style="Accent.TButton")
+        self.dashboard_vph_start_button.grid(row=7,column=0,sticky="ew",padx=3,pady=3)
         browser_row=ttk.Frame(content);browser_row.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
@@ -577,9 +582,18 @@ class Studio(tk.Tk):
     def _dashboard_start_research(self):
         if not self.active_id:
             self.add_profile();return
+        self._vph_research_error_profile=None;self._vph_research_error_text=""
         self.tabs.select(self.frames[7])
         # Keep the existing Autopilot approval, budget and confirmation path.
         self._autopilot_start()
+
+    def start_vph_scheduled_research(self):
+        """Start the existing scheduled Autopilot/VPH pipeline from a VPH control."""
+        if not self.active_id:
+            self.add_profile();return
+        self._vph_research_error_profile=None;self._vph_research_error_text=""
+        self.tabs.select(self.frames[7])
+        self._autopilot_start(vph_one_click=True)
 
     def _dashboard_refresh(self):
         if not hasattr(self,"dashboard_channels"):return
@@ -1789,10 +1803,22 @@ class Studio(tk.Tk):
         self.reload_vph_radar()
 
     def _vph_ui(self,tab):
-        tab.columnconfigure(0,weight=1);tab.rowconfigure(2,weight=1)
+        tab.columnconfigure(0,weight=1);tab.rowconfigure(5,weight=1)
         ttk.Label(tab,text="VPH 연구 레이더",font=("Malgun Gothic",17,"bold")).grid(row=0,column=0,sticky="w",pady=(2,6))
         ttk.Label(tab,text="누적 조회수 표본의 실제 변화 속도입니다. 조회수·구독·좋아요·댓글을 자동으로 늘리거나 영상 자동재생을 하지 않습니다. 영상은 사용자가 하나씩 직접 열어 듣고 10~20분 연구 메모를 남깁니다.",wraplength=1150).grid(row=1,column=0,sticky="w",pady=(0,8))
-        controls=ttk.Frame(tab);self.vph_controls=controls;controls.grid(row=2,column=0,sticky="new")
+        buttons=ttk.Frame(tab);self.vph_buttons=buttons;buttons.grid(row=2,column=0,sticky="ew",pady=(0,4))
+        for column in range(2):buttons.columnconfigure(column,weight=1,uniform="vph-actions")
+        self.vph_start_button=ttk.Button(buttons,text="자동 연구 시작",command=self.start_vph_scheduled_research,style="Accent.TButton")
+        self.vph_start_button.grid(row=0,column=0,sticky="ew",padx=(0,3),pady=2,ipady=3)
+        self.vph_pause_button=ttk.Button(buttons,text="일시정지",command=self.pause_vph_research)
+        self.vph_pause_button.grid(row=0,column=1,sticky="ew",padx=(3,0),pady=2,ipady=3)
+        self.vph_resume_button=ttk.Button(buttons,text="재개",command=self.resume_vph_research)
+        self.vph_resume_button.grid(row=1,column=0,sticky="ew",padx=(0,3),pady=2,ipady=3)
+        self.vph_stop_button=ttk.Button(buttons,text="중지",command=self.cancel_vph_research)
+        self.vph_stop_button.grid(row=1,column=1,sticky="ew",padx=(3,0),pady=2,ipady=3)
+        self.vph_status=tk.StringVar(value="표본이 없습니다. 오프라인 연구 데이터가 있으면 여기에 표시됩니다.")
+        ttk.Label(tab,textvariable=self.vph_status,wraplength=1100).grid(row=3,column=0,sticky="ew",pady=(2,4))
+        controls=ttk.Frame(tab);self.vph_controls=controls;controls.grid(row=4,column=0,sticky="ew",pady=2)
         ttk.Label(controls,text="조사 프로필 / 채널").pack(side="left")
         self.vph_profiles=[]
         self.vph_profile_combo=ttk.Combobox(controls,state="readonly",width=42)
@@ -1815,7 +1841,9 @@ class Studio(tk.Tk):
         self.vph_slots_combo.bind("<<ComboboxSelected>>",lambda _event:self.save_vph_observation_slots())
         ttk.Button(controls,text="새로고침",command=self.reload_vph_radar).pack(side="left",padx=3)
         columns=("market","genre","group","title","channel","published","duration","format","views","vph","tier","reason")
-        self.vph_tree=ttk.Treeview(tab,columns=columns,show="headings",height=14)
+        table=ttk.Frame(tab);table.grid(row=5,column=0,sticky="nsew",pady=4)
+        table.columnconfigure(0,weight=1);table.rowconfigure(0,weight=1)
+        self.vph_tree=ttk.Treeview(table,columns=columns,show="headings",height=14)
         self.vph_tree.tag_configure("unknown",foreground="#795500")
         self.vph_tree.tag_configure("review",foreground="#9B2C2C")
         labels={"market":"시장","genre":"장르","group":"연구 그룹","title":"영상 제목","channel":"채널","published":"게시일","duration":"길이","format":"형식","views":"누적 조회수","vph":"시간당 조회","tier":"등급","reason":"판정 사유"}
@@ -1823,26 +1851,16 @@ class Studio(tk.Tk):
         for col in columns:
             self.vph_tree.heading(col,text=labels[col])
             self.vph_tree.column(col,width=widths[col],stretch=col in {"title","reason"},anchor="w")
-        self.vph_tree.grid(row=3,column=0,sticky="nsew",pady=7)
-        tab.rowconfigure(3,weight=1)
-        scroll=ttk.Scrollbar(tab,orient="vertical",command=self.vph_tree.yview)
-        scroll.grid(row=3,column=1,sticky="ns");self.vph_tree.configure(yscrollcommand=scroll.set)
-        horizontal=ttk.Scrollbar(tab,orient="horizontal",command=self.vph_tree.xview)
-        horizontal.grid(row=4,column=0,sticky="ew");self.vph_tree.configure(xscrollcommand=horizontal.set)
-        self.vph_status=tk.StringVar(value="표본이 없습니다. 오프라인 연구 데이터가 있으면 여기에 표시됩니다.")
-        ttk.Label(tab,textvariable=self.vph_status,wraplength=1100).grid(row=5,column=0,sticky="w",pady=3)
-        buttons=ttk.Frame(tab);self.vph_buttons=buttons;buttons.grid(row=6,column=0,sticky="w",pady=5)
-        self.vph_start_button=ttk.Button(buttons,text="자동 VPH 연구 시작",command=self.start_vph_research,style="Accent.TButton")
-        self.vph_start_button.pack(side="left",padx=(0,5))
-        self.vph_pause_button=ttk.Button(buttons,text="일시정지",command=self.pause_vph_research)
-        self.vph_pause_button.pack(side="left",padx=3)
-        self.vph_resume_button=ttk.Button(buttons,text="재개",command=self.resume_vph_research)
-        self.vph_resume_button.pack(side="left",padx=3)
-        self.vph_stop_button=ttk.Button(buttons,text="중지",command=self.cancel_vph_research)
-        self.vph_stop_button.pack(side="left",padx=3)
-        ttk.Button(buttons,text="선택 영상의 표본 이력",command=self.open_vph_history).pack(side="left",padx=(5,0))
-        ttk.Button(buttons,text="선택 영상 후보·수동 메모",command=self.open_vph_manual_review).pack(side="left",padx=5)
-        ttk.Label(buttons,text="VPH는 장르 적합도 다음의 보조 정렬 기준이며, 60분 미만·결측·감소 등은 수치 대신 검토 상태로 표시합니다.").pack(side="left",padx=9)
+        self.vph_tree.grid(row=0,column=0,sticky="nsew")
+        table.columnconfigure(1,weight=0)
+        scroll=ttk.Scrollbar(table,orient="vertical",command=self.vph_tree.yview)
+        scroll.grid(row=0,column=1,sticky="ns");self.vph_tree.configure(yscrollcommand=scroll.set)
+        horizontal=ttk.Scrollbar(table,orient="horizontal",command=self.vph_tree.xview)
+        horizontal.grid(row=1,column=0,sticky="ew");self.vph_tree.configure(xscrollcommand=horizontal.set)
+        history=ttk.Frame(tab);history.grid(row=6,column=0,sticky="ew",pady=3)
+        ttk.Button(history,text="선택 영상의 표본 이력",command=self.open_vph_history).pack(side="left",padx=(0,4))
+        ttk.Button(history,text="선택 영상 후보·수동 메모",command=self.open_vph_manual_review).pack(side="left",padx=4)
+        ttk.Label(history,text="VPH는 장르 적합도 다음의 보조 정렬 기준이며, 60분 미만·결측·감소 등은 수치 대신 검토 상태로 표시합니다.",wraplength=750).pack(side="left",padx=8)
         self._sync_vph_profile_choice()
         self.reload_vph_radar()
         self._refresh_vph_research_status()
@@ -1907,6 +1925,20 @@ class Studio(tk.Tk):
                 self.vph_start_button.configure(state="disabled" if job["state"] in vph_research.ACTIVE_STATES else "normal")
                 if job["state"] in {"COLLECTING_FIRST","COLLECTING_SECOND"}:
                     self.vph_stop_button.configure(state="normal")
+        profile_id=(job or {}).get("profile_id") or self.active_id
+        profile=store.get_profile(profile_id) if profile_id else None
+        if profile:
+            try:
+                preferences=store.profile_research_preferences(profile_id)
+                total=preferences.get("total_hours",8); research=preferences.get("research_minutes",20); rest=preferences.get("break_minutes",20)
+            except (KeyError,TypeError,ValueError,sqlite3.Error):
+                total,research,rest=8,20,20
+            google="조회 전용 연결됨" if oauth.is_connected(profile_id) else "연결 필요"
+            state_text=(f"프로필: {profile['name']} · {profile['market']} / {_genre_title_for_profile(profile)} · "
+                f"관측 슬롯: {profile.get('vph_observation_slots',10)} · 연구: {total}시간 ({research}/{rest}분) · "
+                f"Google: {google} · VPH: {state_text}")
+        if self._vph_research_error_profile==profile_id and self._vph_research_error_text:
+            state_text += " · 마지막 오류: "+self._vph_research_error_text
         self.vph_status.set(state_text)
         if hasattr(self,"dashboard_vph_text"):
             self.dashboard_vph_text.set("VPH 연구: "+state_text)
@@ -1927,14 +1959,19 @@ class Studio(tk.Tk):
         if self._vph_research_worker_busy:
             return
         if not self.api_key.get().strip() and not oauth.is_connected(self.active_id):
+            self._vph_research_error_profile=self.active_id
+            self._vph_research_error_text="읽기 전용 Google 연결이 필요합니다. 연결을 확인한 뒤 다시 시작하세요."
             self.vph_status.set("읽기 전용 Google 연결이 필요합니다. 연결을 확인한 뒤 다시 시작하세요.");return
+        self._vph_research_error_profile=None;self._vph_research_error_text=""
         try:
             job=vph_research.start(self.active_id,search_limit=int(self.vph_search_limit.get()))
         except RuntimeError:
             self.vph_status.set("이 프로필에는 진행 중인 자동 VPH 연구가 있습니다. 기존 체크포인트를 이어갑니다.")
             job=self._current_vph_job()
         except Exception as exc:
-            self.vph_status.set(f"연구 시작 실패: {type(exc).__name__}");return
+            self._vph_research_error_profile=self.active_id
+            self._vph_research_error_text=f"연구 시작 실패: {type(exc).__name__}"
+            self.vph_status.set(self._vph_research_error_text);return
         if job and job["state"]=="READY":
             self._launch_vph_job(job,second=False)
         else:
@@ -1983,7 +2020,8 @@ class Studio(tk.Tk):
                 if result and result.get("state")=="COMPLETED":
                     self.reload_vph_radar()
                 elif error and self.active_id==profile_id:
-                    self.vph_status.set("자동 연구 오류: "+error+" · 체크포인트 보존, 불확실 요청은 자동 재시도하지 않습니다.")
+                    self._vph_research_error_profile=profile_id
+                    self._vph_research_error_text=error+" · 체크포인트 보존, 불확실 요청은 자동 재시도하지 않습니다."
                 if self.active_id==profile_id:
                     self._refresh_vph_research_status(result or self._current_vph_job())
             self.after(0,done)
@@ -1991,7 +2029,9 @@ class Studio(tk.Tk):
 
     def _finish_vph_resource_pause(self):
         self._vph_research_worker_busy=False
-        self.vph_status.set("자원 보호로 새 API 요청을 보류했습니다. 저장된 체크포인트를 보존하고 자원 여유가 회복되면 이어갑니다.")
+        self._vph_research_error_profile=self.active_id
+        self._vph_research_error_text="자원 보호로 새 API 요청을 보류했습니다. 저장된 체크포인트를 보존하고 자원 여유가 회복되면 이어갑니다."
+        self.vph_status.set(self._vph_research_error_text)
 
     def pause_vph_research(self):
         job=self._current_vph_job()
@@ -2001,7 +2041,10 @@ class Studio(tk.Tk):
             self.vph_status.set("일시정지 요청됨 · 진행 중 요청이 끝나면 체크포인트에서 멈춥니다.")
             return
         try:self._refresh_vph_research_status(vph_research.pause(job["id"],job["profile_id"]))
-        except Exception as exc:self.vph_status.set(f"안전한 일시정지 실패: {type(exc).__name__}")
+        except Exception as exc:
+            self._vph_research_error_profile=job["profile_id"]
+            self._vph_research_error_text=f"안전한 일시정지 실패: {type(exc).__name__}"
+            self.vph_status.set(self._vph_research_error_text)
 
     def resume_vph_research(self):
         job=self._current_vph_job()
@@ -2010,7 +2053,10 @@ class Studio(tk.Tk):
             job=vph_research.resume(job["id"],job["profile_id"])
             if job["state"]=="READY":self._launch_vph_job(job,second=False)
             else:self._refresh_vph_research_status(job)
-        except Exception as exc:self.vph_status.set(f"체크포인트 재개 실패: {type(exc).__name__}")
+        except Exception as exc:
+            self._vph_research_error_profile=job["profile_id"]
+            self._vph_research_error_text=f"체크포인트 재개 실패: {type(exc).__name__}"
+            self.vph_status.set(self._vph_research_error_text)
 
     def cancel_vph_research(self):
         job=self._current_vph_job()
@@ -2020,7 +2066,10 @@ class Studio(tk.Tk):
             self.vph_status.set("중지 요청됨 · 진행 중 API 요청은 안전하게 끝난 뒤 다음 요청을 막고 체크포인트를 보존합니다.")
             return
         try:self._refresh_vph_research_status(vph_research.cancel(job["id"],job["profile_id"]))
-        except Exception as exc:self.vph_status.set(f"안전한 중지 실패: {type(exc).__name__}")
+        except Exception as exc:
+            self._vph_research_error_profile=job["profile_id"]
+            self._vph_research_error_text=f"안전한 중지 실패: {type(exc).__name__}"
+            self.vph_status.set(self._vph_research_error_text)
 
     def _vph_research_tick(self):
         now=time.monotonic()
@@ -2700,7 +2749,7 @@ class Studio(tk.Tk):
                 "가능" if item.get("retry_allowed") else "불가",item.get("status","pending"))
         self.autopilot_exception_tree.insert("","end",values=values)
 
-    def _autopilot_start(self,session_settings=None):
+    def _autopilot_start(self,session_settings=None,*,vph_one_click=False):
         profile=self.current_profile()
         if not profile:
             self._autopilot_show_exception({"type":"profile_required","impact":"조사 프로필이 없습니다.","recommended_action":"국가와 핵심 장르를 선택해 프로필을 추가하세요.","retry_allowed":False})
@@ -2714,14 +2763,19 @@ class Studio(tk.Tk):
             if active:
                 self.autopilot_stage_text.set("복구 가능한 Autopilot 세션이 있습니다. 새 작업 대신 이어하기를 선택하세요.")
                 return
-            self.ai_target_mode.set("추천 적합 수")
             try:
-                target=int(self.ai_target.get()); max_calls=int(self.ai_max_calls.get())
+                if vph_one_click:
+                    slots=int(self.vph_observation_slots.get())
+                    if not self.save_vph_observation_slots():return
+                    target=min(12,slots); max_calls=int(self.vph_search_limit.get())
+                else:
+                    self.ai_target_mode.set("추천 적합 수")
+                    target=int(self.ai_target.get()); max_calls=int(self.ai_max_calls.get())
                 plan=ai_research.preview_plan(profile["id"],target,max_search_calls=max_calls,target_mode="fit_target")
             except (ValueError,KeyError):
                 self._autopilot_show_exception({"type":"settings","impact":"목표 또는 검색 한도를 사용할 수 없습니다.","recommended_action":"상세 설정에서 추천 목표와 1~12회 검색 상한을 선택하세요.","retry_allowed":False})
                 return
-            provider_id=self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
+            provider_id="disabled" if vph_one_click else self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
             key=self.api_key.get().strip()
             if not key and not oauth.is_connected(profile["id"]):
                 self._autopilot_show_exception({"type":"google_auth","impact":"검색 권한 또는 YouTube API 키가 없습니다.","recommended_action":"이 프로필의 읽기 전용 Google 연결을 완료하거나 공개 조회용 API 키를 설정하세요.","retry_allowed":False})
@@ -2752,7 +2806,7 @@ class Studio(tk.Tk):
                      f"AI: {provider_id} / {getattr(provider,'model','none')} · AI 호출은 최대 10회/작업이며 검색 한도와 별도입니다.\n"
                      f"유료 AI 비용 추정 {cost_estimate if cost_estimate is not None else '없음'} USD, 입력 상한 {cost_limit if cost_limit is not None else '없음'} USD\n"
                      "계속을 누르면 이 승인 범위 안에서는 단계별 팝업 없이 진행합니다. 외부 권한·예산을 늘리지 않으며 사람 라벨과 댓글 게시를 자동 수행하지 않습니다.")
-            if not messagebox.askyesno("AI 자동 조사 승인",summary,parent=self):
+            if not vph_one_click and not messagebox.askyesno("AI 자동 조사 승인",summary,parent=self):
                 self.autopilot_stage_text.set("사용자 승인 취소 · 외부 요청 0회")
                 return
             config=autopilot.AutopilotConfig(profile_id=profile["id"],target=target,

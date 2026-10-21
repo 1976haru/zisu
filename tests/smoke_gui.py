@@ -16,7 +16,13 @@ with WorkspaceTemp() as temp:
     store.bind_google_account_channel(first,"UCgui001","JP main","shared@example.test")
     store.bind_google_account_channel(third,"UCgui002","JP second","SHARED@example.test")
     store.bind_google_account_channel(second,"UCgui003","KR channel","kr@example.test")
-    app=Studio()
+    start_research=[]
+    with patch.object(Studio,"start_vph_scheduled_research",lambda self:start_research.append(self)):
+        app=Studio()
+        app.vph_start_button.configure(state="normal")
+        app.vph_start_button.invoke()
+        app.dashboard_vph_start_button.invoke()
+        assert start_research==[app,app]
     app.update_idletasks()
     assert len(app.profiles)>=1
     assert app.active_id
@@ -25,6 +31,11 @@ with WorkspaceTemp() as temp:
     assert app.tabs.tab(app.tabs.tabs()[0],"text")=="쉬운 시작"
     assert hasattr(app,"dashboard_channels")
     assert hasattr(app,"vph_tree") and hasattr(app,"vph_profile_combo")
+    assert app.vph_start_button.cget("text")=="자동 연구 시작"
+    assert app.vph_start_button.master is app.vph_buttons
+    assert app.vph_buttons.grid_info().get("row")==2
+    assert app.vph_tree.master.grid_info().get("row")==5
+    assert app.dashboard_vph_start_button.cget("text")=="원클릭 VPH 자동 연구"
     start=datetime(2026,1,1,tzinfo=timezone.utc)
     first_video="vphGUI12345"
     second_video="vphGUI54321"
@@ -42,6 +53,11 @@ with WorkspaceTemp() as temp:
     vph.record_observation(second,missing_video,None,start,sample_status="missing",uncertainty_reason="view_count_missing",path=None)
     app.reload_profiles(first)
     app.tabs.select(app.frames[8]);app.update_idletasks()
+    app._vph_research_error_profile=first
+    app._vph_research_error_text="Timeout · checkpoint kept"
+    app._refresh_vph_research_status(None)
+    assert "마지막 오류: Timeout · checkpoint kept" in app.vph_status.get()
+    app._vph_research_error_profile=None;app._vph_research_error_text=""
     assert len(app.vph_tree.get_children())==1
     current=store.get_profile(first)
     assert app.vph_tree.item(app.vph_tree.get_children()[0],"values")[0]=="JP"
@@ -105,6 +121,15 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"dashboard_selected_text")
     assert callable(app._dashboard_refresh)
     assert callable(app._dashboard_start_research)
+    with patch.object(app,"_autopilot_start") as scheduled_start:
+        app._dashboard_start_research()
+        assert scheduled_start.call_count==1
+        assert app.tabs.select()==str(app.frames[7])
+    with patch.object(app,"_autopilot_start") as scheduled_start:
+        app.start_vph_scheduled_research()
+        assert scheduled_start.call_count==1
+        assert scheduled_start.call_args.kwargs=={"vph_one_click":True}
+        assert app.tabs.select()==str(app.frames[7])
     assert {str(value) for value in app.dashboard_channels.cget("show")}=={"tree","headings"}
     assert len([row for row in store.list_google_accounts() if row["email"].casefold()=="shared@example.test"])==1
     assert app.dashboard_channels.exists("account:"+store.get_profile(first)["google_account_id"])
@@ -195,6 +220,9 @@ with WorkspaceTemp() as temp:
         for widget in (app.vph_controls,app.vph_buttons,*app.vph_controls.winfo_children(),*app.vph_buttons.winfo_children()):
             assert widget.winfo_rootx()>=left-1 and widget.winfo_rootx()+widget.winfo_width()<=right+2, (scaling,widget,widget.winfo_rootx(),widget.winfo_width(),right)
             assert widget.winfo_rooty()>=top-1 and widget.winfo_rooty()+widget.winfo_height()<=bottom+2, (scaling,widget,widget.winfo_rooty(),widget.winfo_height(),bottom)
+        assert app.vph_buttons.winfo_rooty()<app.vph_tree.winfo_rooty()
+        for widget in (app.vph_start_button,app.vph_pause_button,app.vph_resume_button,app.vph_stop_button):
+            assert widget.winfo_ismapped() and widget.winfo_height()>=widget.winfo_reqheight()
     # Verify actual Tk key bindings and focus navigation on the beginner screen.
     app.tabs.select(easy_tab);app.update()
     app.dashboard_channels.selection_set("profile:"+third)
