@@ -318,6 +318,7 @@ def initialize(path=None):
           pause_reason TEXT NOT NULL DEFAULT '',
           checkpoint_json TEXT NOT NULL DEFAULT '{}',
           autopilot_session_id TEXT NOT NULL DEFAULT '',
+          auto_start_request_id TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
@@ -329,6 +330,15 @@ def initialize(path=None):
           ON research_schedules(profile_id) WHERE state IN ('scheduled','running','paused');
         CREATE INDEX IF NOT EXISTS idx_research_schedules_recovery
           ON research_schedules(profile_id,state,updated_at);
+        CREATE TABLE IF NOT EXISTS vph_auto_start_intents (
+          request_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT '',
+          settings_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN
+            ('pending','claimed','started','blocked','completed','cancelled')),
+          schedule_id TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX IF NOT EXISTS idx_vph_auto_start_profile_status
+          ON vph_auto_start_intents(profile_id,status,updated_at);
         CREATE TABLE IF NOT EXISTS autopilot_run_settings (
           session_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, settings_json TEXT NOT NULL,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -383,6 +393,9 @@ def initialize(path=None):
         _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
         _add_column(db, "research_sessions", "diversity_version TEXT NOT NULL DEFAULT 'legacy'")
         _add_column(db, "research_schedules", "pause_reason TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "research_schedules", "auto_start_request_id TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_research_schedules_auto_start_request "
+                   "ON research_schedules(auto_start_request_id) WHERE auto_start_request_id<>''")
         _add_column(db, "research_schedules", "research_extension_cycle INTEGER NOT NULL DEFAULT -1")
         _add_column(db, "research_schedules", "research_extension_seconds INTEGER NOT NULL DEFAULT 0")
         _add_column(db, "research_schedules", "research_extension_used INTEGER NOT NULL DEFAULT 0")
@@ -1091,6 +1104,123 @@ def get_autopilot_settings(profile_id, session_id, path=None):
         row = db.execute("SELECT settings_json FROM autopilot_run_settings WHERE profile_id=? AND session_id=?",
                          (profile_id, session_id)).fetchone()
     return json.loads(row["settings_json"]) if row else None
+
+
+_AUTO_START_KEYS = {"total_hours", "research_minutes", "break_minutes", "observation_slots",
+                    "search_calls", "provider_id", "paid_ai", "ai_calls", "market", "genre",
+                    "channel_id", "schedule_mode", "research_min_minutes", "research_max_minutes",
+                    "break_min_minutes", "break_max_minutes"}
+
+
+def _validate_auto_start_settings(settings):
+    if not isinstance(settings, dict) or set(settings) - _AUTO_START_KEYS:
+        raise ValueError("Invalid one-shot research settings.")
+    if settings.get("provider_id") != "disabled" or settings.get("paid_ai") is not False or settings.get("ai_calls") != 0:
+        raise ValueError("One-shot VPH research must keep external AI disabled.")
+    if not 1 <= int(settings.get("total_hours", 8)) <= 24:
+        raise ValueError("One-shot duration is outside the supported range.")
+    if not 1 <= int(settings.get("research_minutes", 20)) <= 180 or not 1 <= int(settings.get("break_minutes", 20)) <= 180:
+        raise ValueError("One-shot research/rest interval is outside the supported range.")
+    if not 1 <= int(settings.get("observation_slots", 10)) <= 10:
+        raise ValueError("One-shot observation slots must be between 1 and 10.")
+    if not 1 <= int(settings.get("search_calls", 3)) <= 3:
+        raise ValueError("One-shot search calls must be between 1 and 3.")
+    if settings.get("market") not in {None, "KR", "JP"}:
+        raise ValueError("One-shot market is invalid.")
+    if settings.get("schedule_mode", "fixed") not in {"fixed", "random"}:
+        raise ValueError("One-shot schedule mode is invalid.")
+    for key, default in (("research_min_minutes", settings.get("research_minutes", 20)),
+                         ("research_max_minutes", settings.get("research_minutes", 20)),
+                         ("break_min_minutes", settings.get("break_minutes", 20)),
+                         ("break_max_minutes", settings.get("break_minutes", 20))):
+        value=settings.get(key,default)
+        if isinstance(value,bool) or not isinstance(value,int) or not 1<=value<=180:
+            raise ValueError("One-shot schedule range is invalid.")
+    if (settings.get("research_min_minutes",settings.get("research_minutes",20)) >
+            settings.get("research_max_minutes",settings.get("research_minutes",20)) or
+            settings.get("break_min_minutes",settings.get("break_minutes",20)) >
+            settings.get("break_max_minutes",settings.get("break_minutes",20))):
+        raise ValueError("One-shot schedule range minimum exceeds maximum.")
+
+
+def create_vph_auto_start_intent(request_id, settings, path=None):
+    """Durably record one explicit one-shot request before any external call."""
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 80 or not all(
+            char.isalnum() or char in "-_" for char in request_id):
+        raise ValueError("Automatic start request ID is invalid.")
+    _validate_auto_start_settings(settings)
+    payload = json.dumps(settings, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT OR IGNORE INTO vph_auto_start_intents(request_id,settings_json,status) "
+                   "VALUES(?,?,'pending')", (request_id, payload))
+        row = db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=?", (request_id,)).fetchone()
+    item = dict(row)
+    item["settings"] = json.loads(item.pop("settings_json"))
+    return item
+
+
+def get_vph_auto_start_intent(request_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=?", (request_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["settings"] = json.loads(item.pop("settings_json"))
+    return item
+
+
+def list_open_vph_auto_start_intents(path=None):
+    with connect(path) as db:
+        rows = db.execute("SELECT * FROM vph_auto_start_intents WHERE status IN ('pending','claimed','started') "
+                          "ORDER BY created_at").fetchall()
+    items=[]
+    for row in rows:
+        item=dict(row)
+        item["settings"] = json.loads(item.pop("settings_json"))
+        items.append(item)
+    return items
+
+
+def claim_vph_auto_start_intent(request_id, profile_id, settings, path=None):
+    """Bind the one-shot intent once, after profile/market/genre are verified."""
+    _validate_auto_start_settings(settings)
+    payload=json.dumps(settings,ensure_ascii=False,sort_keys=True,allow_nan=False)
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row=db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=?",(request_id,)).fetchone()
+        profile=db.execute("SELECT market,genre,youtube_channel_id FROM profiles WHERE id=?",(profile_id,)).fetchone()
+        if not row or not profile:
+            raise ValueError("Automatic start request or profile is missing.")
+        existing=json.loads(row["settings_json"])
+        if row["status"] == "pending":
+            if settings.get("market")!=profile["market"] or settings.get("genre")!=profile["genre"] or \
+                    settings.get("channel_id","")!=profile["youtube_channel_id"]:
+                raise ValueError("Profile settings changed before the one-shot request was claimed.")
+            db.execute("UPDATE vph_auto_start_intents SET profile_id=?,settings_json=?,status='claimed',reason='',"
+                       "updated_at=CURRENT_TIMESTAMP WHERE request_id=? AND status='pending'",
+                       (profile_id,payload,request_id))
+        elif row["profile_id"] != profile_id or existing != settings or row["status"] not in {"claimed","started"}:
+            raise ValueError("One-shot request is already used or its profile/settings changed.")
+    return get_vph_auto_start_intent(request_id,path)
+
+
+def update_vph_auto_start_intent(request_id, status, path=None, *, schedule_id=None, reason=None):
+    if status not in {"claimed","started","blocked","completed","cancelled"}:
+        raise ValueError("Invalid one-shot intent state.")
+    fields=["status=?","updated_at=CURRENT_TIMESTAMP"]
+    values=[status]
+    if schedule_id is not None:
+        fields.append("schedule_id=?"); values.append(str(schedule_id))
+    if reason is not None:
+        fields.append("reason=?"); values.append(str(reason)[:160])
+    values.append(request_id)
+    with connect(path) as db:
+        changed=db.execute("UPDATE vph_auto_start_intents SET "+",".join(fields)+" WHERE request_id=?",
+                           values).rowcount
+        if changed != 1:
+            raise ValueError("One-shot request does not exist.")
+    return get_vph_auto_start_intent(request_id,path)
 
 def save_autopilot_report(profile_id, session_id, report, exceptions=(), path=None):
     report_json = json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False)

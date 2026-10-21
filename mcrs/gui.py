@@ -266,6 +266,8 @@ def _empty_genre_config():
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
+        self._auto_start_request_id=os.environ.get("ZISU_AUTO_RESEARCH_REQUEST_ID","").strip()
+        self._auto_start_bootstrap_done=False
         _write_smoke_stage("tk_root_created")
         _write_smoke_stage("database_initializing")
         store.initialize()
@@ -379,6 +381,7 @@ class Studio(tk.Tk):
         self.after(1000,self._tick)
         self.after(2500,self._vph_research_tick)
         self.after(14000,self._scheduled_tick)
+        self.after(900,self._automatic_research_bootstrap)
         if smoke_report:
             _write_smoke_stage("gui_widgets_ready")
             self.after(250, lambda: self._complete_exe_smoke(smoke_report))
@@ -911,6 +914,8 @@ class Studio(tk.Tk):
         self.after(500,self._offer_recovery)
 
     def _offer_recovery(self):
+        if self._automatic_research_bootstrap():
+            return
         profile=self.current_profile()
         if not profile:return
         sessions=store.list_resumable_sessions(profile["id"])
@@ -936,6 +941,176 @@ class Studio(tk.Tk):
         ttk.Button(actions,text="이어서 작업하기",command=continue_work,style="Accent.TButton").pack(side="left",padx=3)
         ttk.Button(actions,text="저장된 결과만 보기",command=view_only).pack(side="left",padx=3)
         ttk.Button(actions,text="새 조사 시작",command=new_search).pack(side="left",padx=3)
+
+    def _auto_start_settings(self, profile):
+        saved=store.profile_research_preferences(profile["id"])
+        defaults={"total_hours":8,"research_minutes":20,"break_minutes":20,
+            "schedule_mode":"fixed","research_min_minutes":20,"research_max_minutes":20,
+            "break_min_minutes":20,"break_max_minutes":20}
+        settings={**defaults,**saved}
+        try: slots=min(10,max(1,int(profile.get("vph_observation_slots",10))))
+        except (TypeError,ValueError): slots=10
+        try: calls=min(3,max(1,int(self.vph_search_limit.get())))
+        except (AttributeError,TypeError,ValueError): calls=3
+        return {**settings,"observation_slots":slots,"search_calls":calls,
+            "provider_id":"disabled","paid_ai":False,"ai_calls":0,
+            "market":profile["market"],"genre":profile["genre"],
+            "channel_id":profile.get("youtube_channel_id","")}
+
+    def _auto_start_set_settings(self, settings):
+        for key, attr in (("total_hours","schedule_hours"),("research_minutes","schedule_research_minutes"),
+                ("break_minutes","schedule_break_minutes"),("schedule_mode","schedule_mode"),
+                ("research_min_minutes","schedule_research_min"),("research_max_minutes","schedule_research_max"),
+                ("break_min_minutes","schedule_break_min"),("break_max_minutes","schedule_break_max")):
+            variable=getattr(self,attr,None)
+            if variable is not None: variable.set(str(settings.get(key,getattr(variable,"get")())))
+        if hasattr(self,"vph_observation_slots"):
+            self.vph_observation_slots.set(str(settings["observation_slots"]))
+        if hasattr(self,"vph_search_limit"):
+            self.vph_search_limit.set(int(settings["search_calls"]))
+
+    def _auto_start_block(self, request_id, reason):
+        try: store.update_vph_auto_start_intent(request_id,"blocked",reason=reason)
+        except (ValueError,sqlite3.Error): pass
+        self._vph_research_error_profile=self.active_id
+        self._vph_research_error_text="자동 연구 차단: "+str(reason)
+        if hasattr(self,"autopilot_stage_text"):
+            self.autopilot_stage_text.set(self._vph_research_error_text)
+        if hasattr(self,"vph_status"):
+            self._refresh_vph_research_status(self._current_vph_job())
+
+    def _automatic_research_bootstrap(self):
+        """Consume one explicit request or safely resume its persisted schedule."""
+        if self._auto_start_bootstrap_done: return False
+        self._auto_start_bootstrap_done=True
+        request_id=self._auto_start_request_id
+        intents=[]
+        try:
+            if request_id:
+                intent=store.get_vph_auto_start_intent(request_id)
+                if intent is None:
+                    seed={"total_hours":8,"research_minutes":20,"break_minutes":20,
+                        "observation_slots":10,"search_calls":3,"provider_id":"disabled",
+                        "paid_ai":False,"ai_calls":0,"market":None,"genre":None,"channel_id":"",
+                        "schedule_mode":"fixed","research_min_minutes":20,"research_max_minutes":20,
+                        "break_min_minutes":20,"break_max_minutes":20}
+                    intent=store.create_vph_auto_start_intent(request_id,seed)
+                intents=[intent]
+            else:
+                intents=store.list_open_vph_auto_start_intents()
+        except (OSError,sqlite3.Error,ValueError) as exc:
+            if hasattr(self,"autopilot_stage_text"):
+                self.autopilot_stage_text.set("자동 연구 체크포인트를 읽지 못했습니다: "+type(exc).__name__)
+            return bool(request_id)
+        intent=next((row for row in intents if row["status"] in {"pending","claimed","started"}),None)
+        if not intent:
+            terminal=next((row for row in intents if row["status"] in {"blocked","completed","cancelled"}),None)
+            if terminal:
+                if hasattr(self,"autopilot_stage_text"):
+                    self.autopilot_stage_text.set("이번 1회 자동 연구 요청 상태: "+terminal["status"]+
+                        (" · "+terminal.get("reason","") if terminal.get("reason") else ""))
+                return True
+            return False
+        request_id=intent["request_id"]
+        if intent["status"] in {"blocked","completed","cancelled"}: return True
+        connected=[]
+        for profile in self.profiles:
+            try:
+                if oauth.connection_state(profile["id"]).get("status")=="connected":
+                    connected.append(profile)
+            except Exception: continue
+        if len(connected)!=1:
+            self._auto_start_block(request_id,"연결 및 읽기 전용 scope가 검증된 프로필이 정확히 하나가 아닙니다.")
+            return True
+        profile=connected[0]
+        if intent.get("profile_id") and intent["profile_id"]!=profile["id"]:
+            self._auto_start_block(request_id,"저장된 요청과 현재 유일한 연결 프로필이 다릅니다.")
+            return True
+        current_settings=self._auto_start_settings(profile)
+        if intent["status"]=="pending":
+            try:
+                intent=store.claim_vph_auto_start_intent(request_id,profile["id"],current_settings)
+            except (ValueError,sqlite3.Error) as exc:
+                self._auto_start_block(request_id,"프로필 설정 확인 실패: "+type(exc).__name__)
+                return True
+        else:
+            saved=intent["settings"]
+            if (saved.get("market")!=profile["market"] or saved.get("genre")!=profile["genre"] or
+                    saved.get("channel_id","")!=profile.get("youtube_channel_id","") or
+                    saved.get("observation_slots")!=current_settings["observation_slots"] or
+                    saved.get("total_hours")!=current_settings["total_hours"] or
+                    saved.get("research_minutes")!=current_settings["research_minutes"] or
+                    saved.get("break_minutes")!=current_settings["break_minutes"]):
+                self._auto_start_block(request_id,"프로필·일정 설정이 저장된 요청 이후 변경됐습니다.")
+                return True
+        if profile["id"]!=self.active_id:
+            self.reload_profiles(profile["id"])
+        existing=research_scheduler.get_auto_start_request(request_id)
+        if existing:
+            return self._resume_one_shot_auto_schedule(intent,profile,existing)
+        active=research_scheduler.list_active(profile["id"])
+        if active or vph_research.latest_active(profile["id"]):
+            self._auto_start_block(request_id,"이미 진행 중인 연구 또는 VPH 작업이 있어 중복 시작을 차단했습니다.")
+            return True
+        auth=oauth.connection_state(profile["id"])
+        if auth.get("status")!="connected":
+            self._auto_start_block(request_id,"읽기 전용 OAuth 상태 확인 실패: "+str(auth.get("status","unknown")))
+            return True
+        try:
+            decision=self.resource_guard.check(sample_resources)
+            if not decision.allow_new_work:
+                self._auto_start_block(request_id,"자원 보호가 새 작업을 보류했습니다.")
+                return True
+        except Exception:
+            self._auto_start_block(request_id,"CPU/RAM 상태를 확인하지 못해 fail-closed 처리했습니다.")
+            return True
+        self._auto_start_set_settings(intent["settings"])
+        self.tabs.select(self.frames[7])
+        self._autopilot_start(vph_one_click=True,auto_request_id=request_id,
+                              auto_settings=intent["settings"])
+        return True
+
+    def _resume_one_shot_auto_schedule(self, intent, profile, schedule):
+        if schedule.get("state") in {"completed","cancelled"}:
+            store.update_vph_auto_start_intent(intent["request_id"],
+                "completed" if schedule["state"]=="completed" else "cancelled",schedule_id=schedule["id"])
+            return True
+        if schedule["state"]=="running":
+            schedule=research_scheduler.recover_interrupted_schedule(schedule["id"],profile["id"])
+        if not schedule:
+            self._auto_start_block(intent["request_id"],"저장된 자동 연구 일정을 찾지 못했습니다.")
+            return True
+        checkpoint=json.loads(schedule.get("checkpoint_json") or "{}")
+        if (checkpoint.get("auto_start_request_id")!=intent["request_id"] or
+                checkpoint.get("one_shot_settings")!=intent["settings"]):
+            self._auto_start_block(intent["request_id"],"저장된 일정 체크포인트가 요청과 일치하지 않습니다.")
+            return True
+        session_id=checkpoint.get("autopilot_session_id")
+        settings=(store.get_autopilot_settings(profile["id"],session_id) if session_id else None)
+        if settings is None:
+            settings={"provider_id":checkpoint.get("approved_provider_id"),"model":checkpoint.get("approved_model","none"),
+                "target":checkpoint.get("approved_target"),"max_search_calls":checkpoint.get("approved_max_search_calls"),
+                "cost_estimate_usd":checkpoint.get("cost_estimate_usd"),"cost_limit_usd":checkpoint.get("cost_limit_usd"),
+                "paid_external_approved":checkpoint.get("paid_external_approved"),"report_version":1}
+        current=store.profile_research_preferences(profile["id"]) or {
+            "total_hours":8,"research_minutes":20,"break_minutes":20}
+        reason=research_scheduler.automatic_resume_block_reason(schedule,profile,settings,current)
+        if reason:
+            self._auto_start_block(intent["request_id"],"안전 자동 재개 조건 불일치: "+reason)
+            return True
+        if schedule.get("search_in_flight"):
+            self._auto_start_block(intent["request_id"],"요청 완료 여부가 불확실해 재전송 없이 검토 대기합니다.")
+            return True
+        if schedule["state"]=="paused":
+            try: schedule=research_scheduler.resume(schedule["id"],profile["id"])
+            except (ValueError,research_scheduler.UnresolvedSearchCall) as exc:
+                self._auto_start_block(intent["request_id"],"일정 재개 안전 검사 실패: "+type(exc).__name__)
+                return True
+        self._auto_start_set_settings(intent["settings"])
+        self.tabs.select(self.frames[7])
+        self._autopilot_start((settings,session_id,schedule["id"]),vph_one_click=True,
+            auto_request_id=intent["request_id"],auto_settings=intent["settings"])
+        return True
 
     def _sort_tree(self, tree, col, reverse, key_name):
         rows=[]
@@ -1886,16 +2061,18 @@ class Studio(tk.Tk):
         job = job or self._current_vph_job()
         if not job:
             state_text = "자동 연구 작업 없음 · 시작 버튼을 누르면 프로필별 최대 3회 검색을 시작합니다."
-            if job and job.get("schedule_id"):
+            if self.active_id:
                 try:
-                    schedule=research_scheduler.get(job["schedule_id"],job["profile_id"])
+                    saved=next((item for item in research_scheduler.list_auto_start_schedules(self.active_id)
+                                if item["state"] in {"running","scheduled","paused"}),None)
+                    schedule=research_scheduler.get(saved["id"],self.active_id) if saved else None
                     if schedule:
                         total=max(1,int(schedule["total_minutes"])*60)
-                        state_text += (f" · 8h schedule {schedule['phase']} "
+                        state_text=(f"자동 연구 {schedule['state']} · {schedule['phase']} "
                             f"{schedule['elapsed_seconds']*100/total:.1f}% · "
-                            f"{schedule['remaining_seconds']//60} min remaining")
+                            f"남은 {schedule.get('remaining_seconds',0)//60}분 · 검색 잔여 {max(0,int(schedule['approved_search_calls'])-int(schedule['search_calls_used']))}회")
                 except (KeyError,sqlite3.Error):
-                    state_text += " · schedule checkpoint unavailable"
+                    state_text = "저장된 자동 연구 일정을 읽지 못했습니다. 새 API 요청은 보류했습니다."
             if hasattr(self,"vph_pause_button"):
                 self.vph_pause_button.configure(state="disabled")
                 self.vph_resume_button.configure(state="disabled")
@@ -2036,6 +2213,18 @@ class Studio(tk.Tk):
     def pause_vph_research(self):
         job=self._current_vph_job()
         if not job:return
+        if job.get("schedule_id"):
+            schedule=research_scheduler.get(job["schedule_id"],job["profile_id"])
+            if self.autopilot_schedule_running and job.get("schedule_id")==getattr(self,"autopilot_schedule_id",None):
+                self._autopilot_pause();return
+            if schedule and schedule["state"]=="running" and not schedule.get("search_in_flight"):
+                try:
+                    research_scheduler.pause(schedule["id"],job["profile_id"])
+                    self._refresh_vph_research_status(job)
+                    return
+                except (ValueError,sqlite3.Error):
+                    self.vph_status.set("일정 일시정지에 실패했습니다. 체크포인트를 유지하고 API 요청은 추가하지 않았습니다.")
+                    return
         if self._vph_research_worker_busy:
             self._vph_research_pause_event.set()
             self.vph_status.set("일시정지 요청됨 · 진행 중 요청이 끝나면 체크포인트에서 멈춥니다.")
@@ -2048,7 +2237,20 @@ class Studio(tk.Tk):
 
     def resume_vph_research(self):
         job=self._current_vph_job()
-        if not job or job["state"]!="PAUSED":return
+        if not job:return
+        if job.get("schedule_id"):
+            if self.autopilot_schedule_running and job.get("schedule_id")==getattr(self,"autopilot_schedule_id",None):
+                self._autopilot_resume();return
+            linked=next((item for item in research_scheduler.list_auto_start_schedules(job["profile_id"])
+                         if item["id"]==job["schedule_id"]),None)
+            request_id=linked.get("auto_start_request_id") if linked else ""
+            intent=store.get_vph_auto_start_intent(request_id) if request_id else None
+            profile=store.get_profile(job["profile_id"])
+            schedule=research_scheduler.get(job["schedule_id"],job["profile_id"])
+            if intent and profile and schedule:
+                self._resume_one_shot_auto_schedule(intent,profile,schedule)
+                return
+        if job["state"]!="PAUSED":return
         try:
             job=vph_research.resume(job["id"],job["profile_id"])
             if job["state"]=="READY":self._launch_vph_job(job,second=False)
@@ -2061,6 +2263,26 @@ class Studio(tk.Tk):
     def cancel_vph_research(self):
         job=self._current_vph_job()
         if not job:return
+        if job.get("schedule_id"):
+            schedule=research_scheduler.get(job["schedule_id"],job["profile_id"])
+            if self.autopilot_schedule_running and job.get("schedule_id")==getattr(self,"autopilot_schedule_id",None):
+                self._autopilot_stop();return
+            if schedule and schedule["state"] in {"running","paused","scheduled"}:
+                if schedule.get("search_in_flight"):
+                    self.vph_status.set("검색 결과가 불확실해 중지 요청은 보류했습니다. 같은 요청을 재전송하지 않습니다.")
+                    return
+                try:
+                    research_scheduler.cancel(schedule["id"],job["profile_id"])
+                    vph_research.finish_schedule_jobs(job["profile_id"],schedule["id"],store.db_path(),reason="schedule_stopped")
+                    linked=next((item for item in research_scheduler.list_auto_start_schedules(job["profile_id"])
+                                 if item["id"]==schedule["id"]),None)
+                    if linked:
+                        store.update_vph_auto_start_intent(linked["auto_start_request_id"],"cancelled",schedule_id=schedule["id"])
+                    self._refresh_vph_research_status(vph_research.latest_job(job["profile_id"]))
+                    return
+                except (ValueError,sqlite3.Error):
+                    self.vph_status.set("일정 중지에 실패했습니다. 기존 체크포인트를 보존했습니다.")
+                    return
         if self._vph_research_worker_busy:
             self._vph_research_cancel_event.set()
             self.vph_status.set("중지 요청됨 · 진행 중 API 요청은 안전하게 끝난 뒤 다음 요청을 막고 체크포인트를 보존합니다.")
@@ -2749,35 +2971,43 @@ class Studio(tk.Tk):
                 "가능" if item.get("retry_allowed") else "불가",item.get("status","pending"))
         self.autopilot_exception_tree.insert("","end",values=values)
 
-    def _autopilot_start(self,session_settings=None,*,vph_one_click=False):
+    def _autopilot_start(self,session_settings=None,*,vph_one_click=False,auto_request_id=None,auto_settings=None):
         profile=self.current_profile()
         if not profile:
+            if auto_request_id:self._auto_start_block(auto_request_id,"선택된 프로필이 없습니다.")
             self._autopilot_show_exception({"type":"profile_required","impact":"조사 프로필이 없습니다.","recommended_action":"국가와 핵심 장르를 선택해 프로필을 추가하세요.","retry_allowed":False})
             return
         if self.autopilot_controller.running or self.autopilot_schedule_running:
+            if auto_request_id:self._auto_start_block(auto_request_id,"다른 Autopilot 작업이 실행 중입니다.")
             self.autopilot_stage_text.set("이미 Autopilot 작업이 실행 중입니다. 중복 실행은 차단했습니다.")
             return
         if not session_settings:
             active=[s for s in store.list_resumable_sessions(profile["id"])
                     if store.get_autopilot_settings(profile["id"],s["id"])]
             if active:
+                if auto_request_id:self._auto_start_block(auto_request_id,"복구 가능한 연구 세션이 이미 있어 중복 시작을 막았습니다.")
                 self.autopilot_stage_text.set("복구 가능한 Autopilot 세션이 있습니다. 새 작업 대신 이어하기를 선택하세요.")
                 return
             try:
                 if vph_one_click:
-                    slots=int(self.vph_observation_slots.get())
-                    if not self.save_vph_observation_slots():return
-                    target=min(12,slots); max_calls=int(self.vph_search_limit.get())
+                    slots=int((auto_settings or {}).get("observation_slots",self.vph_observation_slots.get()))
+                    if not auto_request_id and not self.save_vph_observation_slots():return
+                    target=10
+                    max_calls=min(3,int((auto_settings or {}).get("search_calls",self.vph_search_limit.get())))
                 else:
                     self.ai_target_mode.set("추천 적합 수")
                     target=int(self.ai_target.get()); max_calls=int(self.ai_max_calls.get())
                 plan=ai_research.preview_plan(profile["id"],target,max_search_calls=max_calls,target_mode="fit_target")
             except (ValueError,KeyError):
+                if auto_request_id:
+                    self._auto_start_block(auto_request_id,"자동 검색 계획을 만들 수 없습니다. 프로필의 검색어와 예산을 확인하세요.")
                 self._autopilot_show_exception({"type":"settings","impact":"목표 또는 검색 한도를 사용할 수 없습니다.","recommended_action":"상세 설정에서 추천 목표와 1~12회 검색 상한을 선택하세요.","retry_allowed":False})
                 return
             provider_id="disabled" if vph_one_click else self.ai_provider_ids.get(self.ai_provider_choice.get(),"disabled")
             key=self.api_key.get().strip()
             if not key and not oauth.is_connected(profile["id"]):
+                if auto_request_id:
+                    self._auto_start_block(auto_request_id,"현재 프로필의 YouTube 읽기 전용 연결이 유효하지 않습니다.")
                 self._autopilot_show_exception({"type":"google_auth","impact":"검색 권한 또는 YouTube API 키가 없습니다.","recommended_action":"이 프로필의 읽기 전용 Google 연결을 완료하거나 공개 조회용 API 키를 설정하세요.","retry_allowed":False})
                 self.autopilot_stage_text.set("시작 전 확인 필요 · 검색은 아직 호출하지 않았습니다.")
                 return
@@ -2827,17 +3057,17 @@ class Studio(tk.Tk):
                 allow_paid_external=settings["paid_external_approved"],
                 cost_estimate_usd=settings["cost_estimate_usd"],cost_limit_usd=settings["cost_limit_usd"],
                 session_id=session_id)
-        key=self.api_key.get().strip()
+        key="" if auto_request_id else self.api_key.get().strip()
         profile_id=profile["id"]
-        low_load_enabled=bool(self.resource_low_load_var.get())
+        low_load_enabled=True if auto_request_id else bool(self.resource_low_load_var.get())
         if session_settings is None:
             schedule_id=None
         if session_settings is None:
             try:
-                if not self.save_vph_observation_slots():
+                if not auto_request_id and not self.save_vph_observation_slots():
                     return
                 start_at=None
-                start_text=self.schedule_start_time.get().strip()
+                start_text="" if auto_request_id else self.schedule_start_time.get().strip()
                 if start_text:
                     parsed=datetime.strptime(start_text,"%H:%M").time()
                     local_now=datetime.now().astimezone()
@@ -2845,20 +3075,25 @@ class Studio(tk.Tk):
                     if start_at < local_now:
                         raise ValueError("시작 시각은 오늘의 현재 시각 이후로 입력해 주세요.")
                 preferences=self._research_schedule_preferences()
+                if auto_settings:
+                    preferences={key:auto_settings[key] for key in ("total_hours","research_minutes","break_minutes",
+                        "schedule_mode","research_min_minutes","research_max_minutes","break_min_minutes","break_max_minutes")}
                 schedule_config=research_scheduler.ScheduleConfig(
-                    profile_id=profile_id,total_hours=int(self.schedule_hours.get()),
-                    research_minutes=int(self.schedule_research_minutes.get()),
-                    break_minutes=int(self.schedule_break_minutes.get()),start_at=start_at,
+                    profile_id=profile_id,total_hours=int(preferences["total_hours"]),
+                    research_minutes=int(preferences["research_minutes"]),
+                    break_minutes=int(preferences["break_minutes"]),start_at=start_at,
                     approved_search_calls=config.max_search_calls,schedule_mode=preferences["schedule_mode"],
                     research_min_minutes=preferences["research_min_minutes"],
                     research_max_minutes=preferences["research_max_minutes"],
                     break_min_minutes=preferences["break_min_minutes"],
-                    break_max_minutes=preferences["break_max_minutes"])
+                    break_max_minutes=preferences["break_max_minutes"],
+                    auto_start_request_id=auto_request_id or "")
                 schedule_config.validate()
-                store.save_profile_research_preferences(profile_id,preferences)
+                if not auto_request_id:
+                    store.save_profile_research_preferences(profile_id,preferences)
                 schedule=research_scheduler.create(schedule_config)
                 schedule_id=schedule["id"]
-                research_scheduler.checkpoint(schedule_id,profile_id,{
+                checkpoint={
                     "approved_provider_id":config.provider_id,
                     "approved_model":getattr(provider,"model","none") if provider else "none",
                     "approved_target":config.target,
@@ -2867,8 +3102,18 @@ class Studio(tk.Tk):
                     "cost_estimate_usd":config.cost_estimate_usd,
                     "cost_limit_usd":config.cost_limit_usd,
                     "processed_video_ids":[],"uncertain_request":False,
-                })
-            except (ValueError, research_scheduler.ScheduleBusy) as exc:
+                }
+                if auto_request_id:
+                    checkpoint.update(auto_start_request_id=auto_request_id,auto_start_intent=True,
+                                      one_shot_settings=auto_settings,
+                                      vph_observation_slots=int(auto_settings["observation_slots"]))
+                research_scheduler.checkpoint(schedule_id,profile_id,checkpoint)
+                if auto_request_id:
+                    store.update_vph_auto_start_intent(auto_request_id,"started",schedule_id=schedule_id)
+            except (ValueError, research_scheduler.ScheduleBusy,
+                    research_scheduler.DuplicateAutoStartRequest) as exc:
+                if auto_request_id:
+                    self._auto_start_block(auto_request_id,"일정 생성 차단: "+type(exc).__name__)
                 if schedule_id:
                     try: research_scheduler.cancel(schedule_id,profile_id)
                     except Exception: pass
@@ -2949,14 +3194,28 @@ class Studio(tk.Tk):
                     except Exception:
                         pass
                 if isinstance(exc,(APIError,oauth.OAuthError)):
+                    if auto_request_id:
+                        try:store.update_vph_auto_start_intent(auto_request_id,"blocked",reason=autopilot._safe_error(exc).get("type","api_error"))
+                        except Exception:pass
                     self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
                                                "exception":autopilot._safe_error(exc)})
                     return
+                if auto_request_id:
+                    try:store.update_vph_auto_start_intent(auto_request_id,"blocked",reason=type(exc).__name__)
+                    except Exception:pass
                 self.autopilot_events.put({"stage":"fatal","profile_id":profile_id,
                     "exception":{"type":"startup","impact":"조사를 시작하지 못했습니다.",
                                  "recommended_action":"프로필 연결·읽기 권한·저장 경로를 확인하세요. 개인 키는 로그에 기록하지 않았습니다.",
                                  "retry_allowed":False,"status":"pending"}})
             finally:
+                if auto_request_id and schedule_id:
+                    try:
+                        final_schedule=research_scheduler.get(schedule_id,profile_id)
+                        if final_schedule and final_schedule["state"]=="completed":
+                            store.update_vph_auto_start_intent(auto_request_id,"completed",schedule_id=schedule_id)
+                        elif final_schedule and final_schedule["state"]=="cancelled":
+                            store.update_vph_auto_start_intent(auto_request_id,"cancelled",schedule_id=schedule_id)
+                    except Exception:pass
                 self.autopilot_schedule_running=False
         threading.Thread(target=worker,name="zisu-autopilot",daemon=True).start()
         self.after(100,self._autopilot_poll)
@@ -2981,7 +3240,7 @@ class Studio(tk.Tk):
             return job
         if not job:
             profile=store.get_profile(profile_id)
-            slots=int(profile.get("vph_observation_slots",10))
+            slots=int(checkpoint.get("vph_observation_slots",profile.get("vph_observation_slots",10)))
             job=vph_research.start(profile_id,store.db_path(),search_limit=0,
                 observation_slots=slots,schedule_id=schedule_id)
             checkpoint.update(vph_job_id=job["id"],vph_observation_slots=slots,
@@ -3214,6 +3473,10 @@ class Studio(tk.Tk):
                         f"{item.get('phase','대기')} · 경과 {elapsed//60}분 · 남은 시간 {item.get('remaining_seconds',0)//60}분 · 검색 잔여 {item.get('search_calls_remaining',0)}회")
                 elif stage=="schedule" and event.get("message"):
                     self.autopilot_stage_text.set(event["message"])
+                    if hasattr(self,"vph_status"):
+                        self.vph_status.set("자동 연구: "+event["message"])
+                        if hasattr(self,"dashboard_vph_text"):
+                            self.dashboard_vph_text.set("VPH 연구: "+event["message"])
                 elif stage=="vph_result":
                     self.reload_vph_radar()
                     self._refresh_vph_research_status(event.get("job"))

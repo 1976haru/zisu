@@ -27,6 +27,10 @@ class ScheduleBusy(RuntimeError):
     """The profile already has a scheduled or unfinished research session."""
 
 
+class DuplicateAutoStartRequest(RuntimeError):
+    """A one-shot automatic start request has already been persisted."""
+
+
 class UnresolvedSearchCall(RuntimeError):
     """A request may have reached the API; never repeat it automatically."""
 
@@ -48,6 +52,7 @@ class ScheduleConfig:
     research_max_minutes: int | None = None
     break_min_minutes: int | None = None
     break_max_minutes: int | None = None
+    auto_start_request_id: str = ""
 
     def validate(self):
         if not self.profile_id:
@@ -71,6 +76,9 @@ class ScheduleConfig:
             raise ValueError("Search allowance must be a whole number.")
         if not 1 <= self.approved_search_calls <= MAX_SEARCH_CALLS:
             raise ValueError(f"Search allowance must be between 1 and {MAX_SEARCH_CALLS} calls.")
+        if self.auto_start_request_id and (len(self.auto_start_request_id) > 80 or
+                not all(char.isalnum() or char in "-_" for char in self.auto_start_request_id)):
+            raise ValueError("Automatic start request ID is invalid.")
         if self.start_at is not None and (self.start_at.tzinfo is None or self.start_at.utcoffset() is None):
             raise ValueError("Start time must include a timezone.")
 
@@ -171,6 +179,10 @@ def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) ->
         "break_max_minutes":config.break_max_minutes if config.break_max_minutes is not None else config.break_minutes}
     with store.connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
+        if config.auto_start_request_id and db.execute(
+                "SELECT 1 FROM research_schedules WHERE auto_start_request_id=? LIMIT 1",
+                (config.auto_start_request_id,)).fetchone():
+            raise DuplicateAutoStartRequest("This one-shot automatic start request was already used.")
         if db.execute("SELECT 1 FROM research_schedules WHERE profile_id=? "
                       "AND state IN ('scheduled','running','paused') LIMIT 1",
                       (config.profile_id,)).fetchone():
@@ -178,16 +190,94 @@ def create(config: ScheduleConfig, path=None, *, now: datetime | None = None) ->
         db.execute("""INSERT INTO research_schedules(
           id,profile_id,market,core_genre,related_genres_json,genre_config_snapshot_json,channel_id,start_at_utc,
           total_minutes,research_minutes,break_minutes,approved_search_calls,state,phase,
-          running_since_utc,checkpoint_json)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+          running_since_utc,checkpoint_json,auto_start_request_id)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
           (session_id, config.profile_id, profile["market"], profile["genre"],
            json.dumps(related, ensure_ascii=False), json.dumps(genre_config,ensure_ascii=False,sort_keys=True),
            profile.get("youtube_channel_id", ""),
            _stamp(start), config.total_hours * 60, config.research_minutes,
            config.break_minutes, config.approved_search_calls,
            "running" if active else "scheduled", "research" if active else "waiting",
-           _stamp(start) if active else "",json.dumps(checkpoint,ensure_ascii=False,sort_keys=True)))
+           _stamp(start) if active else "",json.dumps(checkpoint,ensure_ascii=False,sort_keys=True),
+           config.auto_start_request_id))
     return get(session_id, config.profile_id, path, now=now_utc)
+
+
+def get_auto_start_request(request_id: str, path=None) -> dict | None:
+    """Return a durable one-shot schedule by its non-secret request ID."""
+    if not request_id:
+        return None
+    with store.connect(path) as db:
+        row = db.execute("SELECT * FROM research_schedules WHERE auto_start_request_id=?",
+                         (request_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["checkpoint"] = json.loads(item.get("checkpoint_json") or "{}")
+    return item
+
+
+def list_auto_start_schedules(profile_id: str, path=None) -> list[dict]:
+    """List only one-shot schedules owned by a single profile."""
+    with store.connect(path) as db:
+        rows = db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
+                          "AND auto_start_request_id<>'' ORDER BY created_at DESC",
+                          (profile_id,)).fetchall()
+    items=[]
+    for row in rows:
+        item=dict(row)
+        item["checkpoint"] = json.loads(item.get("checkpoint_json") or "{}")
+        items.append(item)
+    return items
+
+
+def automatic_resume_block_reason(schedule: dict, profile: dict, settings: dict,
+                                 preferences: dict | None = None) -> str:
+    """Explain why a persisted one-shot schedule is or is not safe to resume silently."""
+    if not schedule or not profile or not schedule.get("auto_start_request_id"):
+        return "not_an_automatic_one_shot"
+    if schedule.get("profile_id") != profile.get("id"):
+        return "profile_mismatch"
+    if schedule.get("state") not in {"paused", "scheduled"} or schedule.get("search_in_flight"):
+        return "not_safely_paused"
+    pause_reason=str(schedule.get("pause_reason", ""))
+    if schedule.get("state") == "paused" and pause_reason not in {"", "process_interrupted"} and not pause_reason.startswith("system_"):
+        return "pause_reason_requires_review"
+    if (schedule.get("market") != profile.get("market") or
+            schedule.get("core_genre") != profile.get("genre") or
+            schedule.get("channel_id", "") != profile.get("youtube_channel_id", "")):
+        return "profile_settings_changed"
+    if not settings or settings.get("provider_id") != "disabled" or settings.get("paid_external_approved"):
+        return "approval_scope_changed"
+    if isinstance(settings.get("max_search_calls"), bool) or not 1 <= int(settings.get("max_search_calls", 0)) <= 3:
+        return "search_budget_changed"
+    if int(schedule.get("approved_search_calls", 0)) > 3:
+        return "schedule_budget_exceeds_one_shot_limit"
+    if preferences is not None:
+        if (int(preferences.get("total_hours", 0)) * 60 != int(schedule.get("total_minutes", -1)) or
+                int(preferences.get("research_minutes", 0)) != int(schedule.get("research_minutes", -1)) or
+                int(preferences.get("break_minutes", 0)) != int(schedule.get("break_minutes", -1))):
+            return "schedule_preferences_changed"
+        checkpoint=json.loads(schedule.get("checkpoint_json") or "{}")
+        for key in ("schedule_mode","research_min_minutes","research_max_minutes",
+                    "break_min_minutes","break_max_minutes"):
+            if key in preferences and preferences[key]!=checkpoint.get(key):
+                return "schedule_preferences_changed"
+    return ""
+
+
+def recover_interrupted_schedule(session_id: str, profile_id: str, path=None,
+                                 *, now: datetime | None = None) -> dict | None:
+    """Recover exactly one persisted schedule; leave every unrelated schedule untouched."""
+    current=_utc(now)
+    with store.connect(path) as db:
+        row=db.execute("SELECT id FROM research_schedules WHERE id=? AND profile_id=? AND state='running'",
+                       (session_id,profile_id)).fetchone()
+        if not row: return get(session_id,profile_id,path,now=current)
+        changed=db.execute("UPDATE research_schedules SET state='paused',phase='interrupted',"
+            "pause_reason='process_interrupted',running_since_utc='',updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND profile_id=? AND state='running'",(session_id,profile_id)).rowcount
+    return get(session_id,profile_id,path,now=current) if changed else None
 
 
 def get(session_id: str, profile_id: str, path=None, *, now: datetime | None = None) -> dict | None:
@@ -465,7 +555,8 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
                "cost_estimate_usd", "cost_limit_usd", "vph_job_id",
                "vph_observation_slots", "vph_discovery_complete", "schedule_plan",
                "schedule_mode", "research_min_minutes", "research_max_minutes",
-               "break_min_minutes", "break_max_minutes"}
+               "break_min_minutes", "break_max_minutes", "auto_start_request_id",
+               "auto_start_intent", "one_shot_settings"}
     if set(values) - allowed:
         raise ValueError("Checkpoint contains unsupported fields.")
     for key, value in values.items():
@@ -481,6 +572,14 @@ def checkpoint(session_id: str, profile_id: str, values: dict, path=None, *, now
         elif key == "vph_discovery_complete":
             if not isinstance(value, bool):
                 raise ValueError("VPH discovery state must be true or false.")
+        elif key == "auto_start_request_id":
+            if not isinstance(value,str) or len(value)>80 or not all(ch.isalnum() or ch in "-_" for ch in value):
+                raise ValueError("Automatic start request ID is invalid.")
+        elif key == "auto_start_intent":
+            if value is not True:
+                raise ValueError("Automatic start intent must be true.")
+        elif key == "one_shot_settings":
+            store._validate_auto_start_settings(value)
         elif key == "vph_observation_slots":
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 20:
                 raise ValueError("VPH observation slots must be between 1 and 20.")

@@ -35,6 +35,35 @@ class ResearchSchedulerTests(unittest.TestCase):
         self.assertEqual(("completed", "complete", 0),
                          (done["state"], done["phase"], done["remaining_seconds"]))
 
+    def test_one_shot_request_is_unique_and_durable(self):
+        config=scheduler.ScheduleConfig(self.jp,total_hours=8,research_minutes=20,break_minutes=20,
+            approved_search_calls=3,auto_start_request_id="once_request_001")
+        first=scheduler.create(config,self.db,now=self.now)
+        self.assertEqual("once_request_001",first["auto_start_request_id"])
+        self.assertEqual(first["id"],scheduler.get_auto_start_request("once_request_001",self.db)["id"])
+        with self.assertRaises(scheduler.DuplicateAutoStartRequest):
+            scheduler.create(config,self.db,now=self.now+timedelta(hours=9))
+
+    def test_auto_resume_requires_same_profile_approval_schedule_and_no_uncertain_call(self):
+        settings={"provider_id":"disabled","max_search_calls":3,"paid_external_approved":False}
+        schedule=scheduler.create(scheduler.ScheduleConfig(self.jp,total_hours=8,research_minutes=20,
+            break_minutes=20,approved_search_calls=3,auto_start_request_id="once_request_002"),
+            self.db,now=self.now)
+        schedule.update(state="paused",pause_reason="process_interrupted",search_in_flight=0)
+        preferences={"total_hours":8,"research_minutes":20,"break_minutes":20}
+        self.assertEqual("",scheduler.automatic_resume_block_reason(schedule,store.get_profile(self.jp,self.db),
+            settings,preferences))
+        self.assertEqual("pause_reason_requires_review",scheduler.automatic_resume_block_reason(
+            dict(schedule,pause_reason="quota_exhausted"),store.get_profile(self.jp,self.db),settings,preferences))
+        self.assertEqual("not_safely_paused",scheduler.automatic_resume_block_reason(
+            dict(schedule,search_in_flight=1),store.get_profile(self.jp,self.db),settings,preferences))
+        self.assertEqual("approval_scope_changed",scheduler.automatic_resume_block_reason(
+            schedule,store.get_profile(self.jp,self.db),dict(settings,provider_id="gemini"),preferences))
+        self.assertEqual("profile_mismatch",scheduler.automatic_resume_block_reason(
+            schedule,dict(store.get_profile(self.jp,self.db),id="another-profile"),settings,preferences))
+        self.assertEqual("schedule_preferences_changed",scheduler.automatic_resume_block_reason(
+            schedule,store.get_profile(self.jp,self.db),settings,dict(preferences,research_minutes=30)))
+
     def test_all_supported_session_lengths_complete_and_cancel_preserves_history(self):
         for hours in scheduler.TOTAL_HOURS:
             profile = store.create_profile(f"duration {hours}h", "JP", "MORNING_CHILL_RAP", path=self.db)
