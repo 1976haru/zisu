@@ -337,8 +337,18 @@ class Studio(tk.Tk):
         self.scheduler_fired=set()
         self.terms_seen=0
         self._header()
-        self.tabs=ttk.Notebook(self)
-        self.tabs.pack(fill="both",expand=True,padx=15,pady=8)
+        self.main_tabs=ttk.Notebook(self)
+        self.main_tabs.pack(fill="both",expand=True,padx=15,pady=8)
+        self.primary_pages={}
+        for key,label in (("home","연구 운영 홈"),("settings","채널·장르 설정"),
+                ("results","후보·연구 결과"),("history","실행 이력·오류"),("advanced","고급 설정")):
+            page=ttk.Frame(self.main_tabs,padding=10)
+            self.main_tabs.add(page,text=label)
+            self.primary_pages[key]=page
+        self.home_page=self.primary_pages["home"]
+        self.advanced_page=self.primary_pages["advanced"]
+        self.tabs=ttk.Notebook(self.advanced_page)
+        self.tabs.pack(fill="both",expand=True)
         self.frames=[]
         for label in ("① 계정 연결","② 장르별 채널 검색","③ 후보·장르 검토","④ 댓글 초안","⑤ 국가별 성과","⑥ 예약·도움말","⑦ AI 연구 도우미","⑧ AI 자동 조사 · Autopilot"):
             tab=ttk.Frame(self.tabs,padding=14)
@@ -360,12 +370,12 @@ class Studio(tk.Tk):
         self.decision_filter.trace_add("write",lambda *_:self._save_ui_state())
         self.ai_target.trace_add("write",lambda *_:self._save_ui_state())
         self.ai_max_calls.trace_add("write",lambda *_:self._save_ui_state())
-        easy = ttk.Frame(self.tabs, padding=22)
-        self.tabs.insert(0, easy, text="쉬운 시작")
-        self._easy_ui(easy)
+        self._easy_ui(self.home_page)
+        self._build_operator_pages()
         ttk.Label(self,textvariable=self.footer).pack(anchor="w",padx=24,pady=(0,9))
         self.reload_profiles()
         self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.main_tabs.bind("<<NotebookTabChanged>>",self._on_primary_tab_changed)
         self.report_callback_exception = self._report_ui_exception
         self._install_thread_exception_handler()
         self.bind_all("<Control-s>", lambda _e: self._save_ui_state())
@@ -394,7 +404,8 @@ class Studio(tk.Tk):
         self.update_idletasks()
         payload = {
             "app_version": APP_VERSION,
-            "gui_initialized": len(self.frames) == 9 and len(self.tabs.tabs()) == 10 and bool(self.winfo_exists()),
+            "gui_initialized": len(self.frames) == 9 and len(self.tabs.tabs()) == 9 and
+                len(self.main_tabs.tabs()) == 5 and self.main_tabs.select()==str(self.home_page) and bool(self.winfo_exists()),
             "profile_count": len(self.profiles),
             "frozen_executable": bool(getattr(sys, "frozen", False)),
             "python_executable": Path(sys.executable).name,
@@ -468,13 +479,18 @@ class Studio(tk.Tk):
         operations=ttk.LabelFrame(tab,text="원클릭 연구 운영",padding=(10,7))
         operations.grid(row=0,column=0,columnspan=2,sticky="ew",padx=8,pady=(5,3))
         operations.columnconfigure(0,weight=1);operations.columnconfigure(1,weight=1)
+        self.operator_config_summary=tk.StringVar(value="채널·장르·일정 설정을 선택하세요.")
+        ttk.Label(operations,textvariable=self.operator_config_summary,wraplength=950).grid(
+            row=0,column=0,sticky="ew",pady=(0,3))
+        ttk.Button(operations,text="설정 보기·변경",command=lambda:self.main_tabs.select(self.primary_pages["settings"])).grid(
+            row=0,column=1,sticky="e",padx=4)
         self.research_dashboard_summary=tk.StringVar(value="READY · 연구 설정과 연결 상태를 확인하세요.")
         self.research_dashboard_checkpoint=tk.StringVar(value="체크포인트: 아직 시작하지 않음")
         self.research_dashboard_results=tk.StringVar(value="결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0 · 결과 측정 전")
         ttk.Label(operations,textvariable=self.research_dashboard_summary,font=("Malgun Gothic",11,"bold"),
-                  wraplength=1150).grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,3))
+                  wraplength=1150).grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,3))
         progress=ttk.Frame(operations)
-        progress.grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,4))
+        progress.grid(row=2,column=0,columnspan=2,sticky="ew",pady=(0,4))
         progress.columnconfigure(0,weight=1);progress.columnconfigure(1,weight=1)
         self.research_schedule_progress=tk.StringVar(value="일정 경과율 0%")
         self.research_stage_progress=tk.StringVar(value="단계 진행률 0/9")
@@ -484,7 +500,7 @@ class Studio(tk.Tk):
         stage_titles={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
             "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
             "vph":"VPH 계산","final_result":"최종 결과"}
-        stage_board=ttk.Frame(operations);stage_board.grid(row=2,column=0,columnspan=2,sticky="ew",pady=2)
+        stage_board=ttk.Frame(operations);stage_board.grid(row=3,column=0,columnspan=2,sticky="ew",pady=2)
         for column in range(3):stage_board.columnconfigure(column,weight=1,uniform="stage")
         for index,key in enumerate(research_dashboard_presenter.STAGE_KEYS):
             value=tk.StringVar(value=f"○ {index+1}. {stage_titles[key]}\n대기")
@@ -492,19 +508,19 @@ class Studio(tk.Tk):
                           padx=7,pady=3,background="#f4f5f7",foreground="#30343b")
             card.grid(row=index//3,column=index%3,sticky="nsew",padx=2,pady=2)
             self.research_stage_cards[key]=value;self.research_stage_card_labels[key]=card
-        status_row=ttk.Frame(operations);status_row.grid(row=3,column=0,columnspan=2,sticky="ew",pady=(3,1))
+        status_row=ttk.Frame(operations);status_row.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(3,1))
         status_row.columnconfigure(0,weight=1);status_row.columnconfigure(1,weight=1)
         ttk.Label(status_row,textvariable=self.research_dashboard_checkpoint,wraplength=570,justify="left").grid(
             row=0,column=0,sticky="nw",padx=(0,8))
         ttk.Label(status_row,textvariable=self.research_dashboard_results,wraplength=570,justify="left").grid(
             row=0,column=1,sticky="nw",padx=(8,0))
-        controls=ttk.Frame(operations);controls.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(4,0))
+        controls=ttk.Frame(operations);controls.grid(row=5,column=0,columnspan=2,sticky="ew",pady=(4,0))
         for column in range(5):controls.columnconfigure(column,weight=1,uniform="control")
         self.dashboard_start_button=ttk.Button(controls,text="연구 시작",command=self._dashboard_start_research,style="Accent.TButton")
         self.dashboard_pause_button=ttk.Button(controls,text="일시정지",command=lambda:self._dashboard_control_research("pause"))
         self.dashboard_resume_button=ttk.Button(controls,text="재개",command=lambda:self._dashboard_control_research("resume"))
         self.dashboard_stop_button=ttk.Button(controls,text="안전 중단",command=lambda:self._dashboard_control_research("stop"))
-        self.dashboard_results_button=ttk.Button(controls,text="결과 보기",command=lambda:self.tabs.select(self.frames[2]))
+        self.dashboard_results_button=ttk.Button(controls,text="결과 보기",command=lambda:self.main_tabs.select(self.primary_pages["results"]))
         for column,button in enumerate((self.dashboard_start_button,self.dashboard_pause_button,
                 self.dashboard_resume_button,self.dashboard_stop_button,self.dashboard_results_button)):
             button.grid(row=0,column=column,sticky="ew",padx=2)
@@ -564,20 +580,20 @@ class Studio(tk.Tk):
         actions=ttk.Frame(content);actions.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
         actions.columnconfigure(0,weight=1)
         for index,(label,command,style_name) in enumerate((
-            ("Google 계정 연결",lambda:self.tabs.select(self.frames[0]),"TButton"),
+            ("Google 계정 연결",lambda:self._select_detail_tab(0),"TButton"),
             ("장르·채널 설정",self.edit_profile,"TButton"),
-            ("연구 시간 설정",lambda:self.tabs.select(self.frames[7]),"TButton"),
-            ("결과 확인",lambda:self.tabs.select(self.frames[2]),"TButton"),
+            ("연구 시간 설정",lambda:self._select_detail_tab(7),"TButton"),
+            ("결과 확인",lambda:self.main_tabs.select(self.primary_pages["results"]),"TButton"),
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
-        ttk.Button(actions,text="VPH 연구 레이더",command=lambda:self.tabs.select(self.frames[8])).grid(row=6,column=0,sticky="ew",padx=3,pady=3)
+        ttk.Button(actions,text="VPH 연구 레이더",command=lambda:self._select_detail_tab(8)).grid(row=6,column=0,sticky="ew",padx=3,pady=3)
         browser_row=ttk.Frame(content);browser_row.grid(row=15,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
             ("연구용 인터넷 창 열기",self._research_browser_open),
             ("일반 브라우저로 직접 열기",self._research_browser_manual_open),
             ("이전 작업 복원",self._offer_recovery),
-            ("도움말",lambda:self.tabs.select(self.frames[5])))):
+            ("도움말",lambda:self._select_detail_tab(5)))):
             ttk.Button(browser_row,text=label,command=command).grid(row=index,column=0,sticky="ew",padx=3,pady=2)
         ttk.Label(content,text="수동 모드로 연 일반 브라우저는 ZISU가 자동으로 닫지 않습니다. 영상 재생·댓글·좋아요·구독은 직접 수행합니다.",
                   wraplength=1000).grid(row=16,column=0,columnspan=2,sticky="w",pady=(5,12))
@@ -596,6 +612,116 @@ class Studio(tk.Tk):
         self._easy_enter_button=None
         self.bind_all("<Return>",self._easy_enter,add="+")
         self.bind_all("<Escape>",self._easy_escape,add="+")
+
+    def _build_operator_pages(self):
+        settings=self.primary_pages["settings"]
+        settings.columnconfigure(0,weight=1)
+        ttk.Label(settings,text="채널·장르 설정",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(8,10))
+        self.operator_settings_text=tk.StringVar(value="선택 프로필과 실행 설정을 불러오는 중입니다.")
+        ttk.Label(settings,textvariable=self.operator_settings_text,wraplength=1000,justify="left").grid(
+            row=1,column=0,sticky="ew",pady=8)
+        setting_actions=ttk.Frame(settings);setting_actions.grid(row=2,column=0,sticky="ew",pady=8)
+        for label,command in (("프로필 추가",self.add_profile),("채널·장르 수정",self.edit_profile),
+                ("연구 시간·검색·관측 설정",lambda:self._select_detail_tab(7)),
+                ("계정·OAuth 연결",lambda:self._select_detail_tab(0))):
+            ttk.Button(setting_actions,text=label,command=command).pack(side="left",padx=4)
+        schedule=ttk.LabelFrame(settings,text="연구 실행 범위",padding=10)
+        schedule.grid(row=4,column=0,sticky="ew",pady=10)
+        for column in range(8):schedule.columnconfigure(column,weight=1 if column in {1,3,5,7} else 0)
+        fields=(("전체 시간",self.schedule_hours,tuple(str(n) for n in (2,4,6,8,10,12))),
+                ("연구 분",self.schedule_research_minutes,tuple(str(n) for n in (5,10,15,20,30,40,60))),
+                ("휴식 분",self.schedule_break_minutes,tuple(str(n) for n in (5,10,15,20,30,40,60))),
+                ("편성 방식",self.schedule_mode,("fixed","random")))
+        for column,(label,variable,values) in enumerate(fields):
+            ttk.Label(schedule,text=label).grid(row=0,column=column*2,sticky="w",padx=3)
+            ttk.Combobox(schedule,textvariable=variable,values=values,
+                state="readonly" if label=="편성 방식" else "normal",width=10).grid(
+                    row=0,column=column*2+1,sticky="ew",padx=3)
+        ttk.Label(schedule,text="검색 상한").grid(row=1,column=0,sticky="w",padx=3,pady=8)
+        self.operator_search_limit=ttk.Combobox(schedule,textvariable=self.ai_max_calls,values=("1","2","3"),
+            state="readonly",width=6)
+        self.operator_search_limit.grid(row=1,column=1,sticky="w",padx=3)
+        ttk.Label(schedule,text="VPH 관측 슬롯").grid(row=1,column=2,sticky="w",padx=3)
+        slot_combo=ttk.Combobox(schedule,textvariable=self.vph_observation_slots,
+            values=tuple(str(value) for value in range(1,21)),state="readonly",width=7)
+        slot_combo.grid(row=1,column=3,sticky="w",padx=3)
+        self.operator_slot_combo=slot_combo
+        slot_combo.bind("<<ComboboxSelected>>",lambda _event:self.save_vph_observation_slots())
+        ttk.Button(schedule,text="일정 미리보기",command=self._autopilot_schedule_preview).grid(
+            row=1,column=4,sticky="ew",padx=3)
+        ttk.Button(schedule,text="설정 저장",command=self.save_research_schedule_preset).grid(
+            row=1,column=5,sticky="ew",padx=3)
+        ttk.Label(settings,text="검색은 읽기 전용이며 요청 상한은 최대 3회, 관측 슬롯은 최대 20개입니다. 미측정 VPH는 UNKNOWN으로 남습니다.",
+                  wraplength=1000).grid(row=5,column=0,sticky="w",pady=6)
+        ttk.Label(settings,text="설정 변경은 현재 프로필에만 적용됩니다. 진행 중인 연구의 프로필·체크포인트는 바꾸지 않습니다.",
+                  wraplength=1000).grid(row=3,column=0,sticky="w",pady=8)
+
+        results=self.primary_pages["results"];results.columnconfigure(0,weight=1)
+        ttk.Label(results,text="후보·연구 결과",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(8,10))
+        self.operator_results_text=tk.StringVar(value="결과 측정 전 · VPH UNKNOWN")
+        ttk.Label(results,textvariable=self.operator_results_text,wraplength=1000,justify="left",
+                  font=("Malgun Gothic",12)).grid(row=1,column=0,sticky="ew",pady=8)
+        ttk.Button(results,text="후보 판단 상세 보기",command=lambda:self._select_detail_tab(2)).grid(
+            row=2,column=0,sticky="w",pady=8)
+
+        history=self.primary_pages["history"];history.columnconfigure(0,weight=1)
+        ttk.Label(history,text="실행 이력·오류",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(8,10))
+        self.operator_history_text=tk.StringVar(value="마지막 체크포인트와 안전한 복구 지점이 여기에 표시됩니다.")
+        ttk.Label(history,textvariable=self.operator_history_text,wraplength=1000,justify="left").grid(
+            row=1,column=0,sticky="ew",pady=8)
+        history_actions=ttk.Frame(history);history_actions.grid(row=2,column=0,sticky="w",pady=8)
+        ttk.Button(history_actions,text="Autopilot 실행 이력",command=lambda:self._select_detail_tab(7)).pack(side="left",padx=4)
+        ttk.Button(history_actions,text="VPH 관측 이력",command=lambda:self._select_detail_tab(8)).pack(side="left",padx=4)
+
+    def _select_detail_tab(self,index):
+        frames=self.__dict__.get("frames",())
+        if 0<=index<len(frames):
+            main_tabs=self.__dict__.get("main_tabs")
+            advanced_page=self.__dict__.get("advanced_page")
+            detail_tabs=self.__dict__.get("tabs")
+            if main_tabs is not None and advanced_page is not None:
+                main_tabs.select(advanced_page)
+            if detail_tabs is not None:
+                detail_tabs.select(frames[index])
+
+    def _on_primary_tab_changed(self,_event=None):
+        self._save_ui_state()
+        if self.main_tabs.select()==str(self.home_page):
+            self._refresh_easy_step()
+            self._dashboard_refresh()
+
+    def _refresh_operator_pages(self,model=None):
+        if not hasattr(self,"operator_settings_text"):
+            return
+        profile=self.current_profile()
+        if not profile:
+            summary="선택된 프로필 없음 · 채널을 추가하거나 선택하세요."
+            result="결과 측정 전 · 후보 0 · FIT/REVIEW/EXCLUDE 0 · VPH UNKNOWN"
+            history="저장된 프로필이 없습니다. 연구는 시작되지 않았습니다."
+        else:
+            try:
+                settings=store.profile_research_preferences(profile["id"])
+            except (sqlite3.Error,ValueError):
+                settings={}
+            total=settings.get("total_hours",self.schedule_hours.get() if hasattr(self,"schedule_hours") else 8)
+            research=settings.get("research_minutes",self.schedule_research_minutes.get() if hasattr(self,"schedule_research_minutes") else 20)
+            pause=settings.get("break_minutes",self.schedule_break_minutes.get() if hasattr(self,"schedule_break_minutes") else 20)
+            slots=profile.get("vph_observation_slots",10)
+            calls=getattr(self,"ai_max_calls",None)
+            calls=calls.get() if calls is not None else 3
+            summary=(f"{profile.get('name','프로필')} · {profile.get('market','-')} · {_genre_title_for_profile(profile)}\n"
+                f"연구 {total}시간 · 연구/휴식 {research}/{pause}분 · 검색 상한 {calls}회 · 관측 슬롯 {slots}개")
+            model=model or {}
+            result=(f"{self.research_dashboard_results.get() if hasattr(self,'research_dashboard_results') else '결과 측정 전'}\n"
+                f"연구 결과 확정: {'예' if model.get('state')=='COMPLETE' else '아니요'}")
+            history=(self.research_dashboard_checkpoint.get() if hasattr(self,"research_dashboard_checkpoint") else
+                "마지막 체크포인트: 아직 시작하지 않음")
+            if model.get("error_code"):
+                history+=f"\n오류 단계: {model.get('error_stage') or '-'} · {model['error_code']} · {model.get('stop_reason') or '-'}\n다음 조치: {model.get('next_action') or '-'}"
+        self.operator_config_summary.set(summary.replace("\n"," · "))
+        self.operator_settings_text.set(summary)
+        self.operator_results_text.set(result)
+        self.operator_history_text.set(history)
 
     def _install_easy_wheel_support(self,root):
         """Add tab-local wheel scrolling without intercepting nested scrolling controls."""
@@ -618,7 +744,7 @@ class Studio(tk.Tk):
             self._easy_canvas.bindtags((tag,*canvas_tags))
 
     def _easy_mousewheel(self,event):
-        if self.tabs.select()!=str(self.tabs.tabs()[0]):
+        if self.main_tabs.select()!=str(self.home_page):
             return None
         widget=event.widget
         if widget.winfo_class() in {"Treeview","TCombobox","Combobox","Listbox","Text","TEntry","Entry","TSpinbox","Spinbox"}:
@@ -635,7 +761,7 @@ class Studio(tk.Tk):
         return "break"
 
     def _easy_enter(self, _event=None):
-        if self.tabs.select() == str(self.tabs.tabs()[0]):
+        if self.main_tabs.select() == str(self.home_page):
             focus=self.focus_get()
             if focus is self.dashboard_channels:
                 self._dashboard_open_profile()
@@ -643,7 +769,7 @@ class Studio(tk.Tk):
         return None
 
     def _easy_escape(self,_event=None):
-        if self.tabs.select()==str(self.tabs.tabs()[0]):
+        if self.main_tabs.select()==str(self.home_page):
             self.profile_combo.focus_set()
             return "break"
         return None
@@ -695,7 +821,7 @@ class Studio(tk.Tk):
             self.add_profile();return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         if not self.__dict__.get("_starting_from_easy_dashboard",False):
-            self.tabs.select(self.frames[7])
+            self._select_detail_tab(7)
         profile=self.current_profile()
         settings=self._auto_start_settings(profile)
         request_id="gui_"+uuid.uuid4().hex
@@ -787,6 +913,7 @@ class Studio(tk.Tk):
             self.research_dashboard_checkpoint.set("체크포인트: 아직 시작하지 않음")
             self.research_dashboard_results.set("결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0 · 결과 측정 전")
             self._set_research_stage_cards(None)
+            self._refresh_operator_pages(None)
             return
         try:
             model=research_dashboard_presenter.present(profile_id)
@@ -794,6 +921,7 @@ class Studio(tk.Tk):
             self.research_dashboard_summary.set("ERROR · 운영 상태를 안전하게 읽지 못했습니다.")
             self.research_dashboard_checkpoint.set("오류 단계: 상태 읽기 · 코드: dashboard_read_error · 자동 재개 불가 · 다음 조치: 저장된 체크포인트를 확인하세요.")
             self._set_research_stage_cards(None,error=True)
+            self._refresh_operator_pages(None)
             return
         remaining=model["remaining_seconds"]
         remaining_text="-" if remaining is None else f"{remaining//60}분 {remaining%60}초"
@@ -826,6 +954,7 @@ class Studio(tk.Tk):
             f"관측 {counts['observing']} · 첫/두 번째 표본 {counts['sample_1']}/{counts['sample_2']} · "
             f"VPH A/B {counts['vph_a']}/{counts['vph_b']} · UNKNOWN/REVIEW "
             f"{counts['unknown']}/{counts['vph_review']}{suffix}")
+        self._refresh_operator_pages(model)
 
     def _set_research_stage_cards(self,model,error=False):
         titles={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
@@ -1002,13 +1131,13 @@ class Studio(tk.Tk):
             count=0
         if not oauth.is_connected(profile["id"]):
             self.easy_progress.set(f"현재 채널: {profile['name']}\n2단계: 공개 영상 검색을 위해 API 키를 등록하거나 Google 읽기 전용 연결을 진행하세요.")
-            self.easy_next.configure(text="Google 연결하기",command=lambda:self.tabs.select(self.frames[0]))
+            self.easy_next.configure(text="Google 연결하기",command=lambda:self._select_detail_tab(0))
         elif count <= 0:
             self.easy_progress.set(f"현재 채널: {profile['name']}\n3단계: 연결이 준비됐어요. 장르별 영상 검색을 시작하세요.")
-            self.easy_next.configure(text="영상 검색 시작",command=lambda:self.tabs.select(self.frames[1]))
+            self.easy_next.configure(text="영상 검색 시작",command=lambda:self._select_detail_tab(1))
         else:
             self.easy_progress.set(f"현재 채널: {profile['name']} · 저장된 후보 {count}개\n다음 단계: AI 추천을 확인하거나 자동 조사를 시작하세요. 실제 청취 정답은 별도로 기록됩니다.")
-            self.easy_next.configure(text="AI 자동 조사 열기",command=lambda:self.tabs.select(self.frames[7]))
+            self.easy_next.configure(text="AI 자동 조사 열기",command=lambda:self._select_detail_tab(7))
 
     def _safe_diagnostic(self, code):
         try:
@@ -1072,10 +1201,10 @@ class Studio(tk.Tk):
         self._save_ui_state(); self._refresh_easy_step()
         try: index=self.tabs.index(self.tabs.select())
         except (tk.TclError,ValueError): return
-        if index==3:self.reload_candidates()
-        elif index==7:self._ai_refresh_saved_results()
-        elif index==8:self._autopilot_refresh_profile()
-        elif index==9:self.reload_vph_radar()
+        if index==2:self.reload_candidates()
+        elif index==6:self._ai_refresh_saved_results()
+        elif index==7:self._autopilot_refresh_profile()
+        elif index==8:self.reload_vph_radar()
 
     def _restore_ui_state(self):
         state=getattr(self,"_ui_state",{})
@@ -1098,15 +1227,14 @@ class Studio(tk.Tk):
                 wanted=set(str(state["search_term"]).splitlines())
                 for index in range(self.keyword_list.size()):
                     if self.keyword_list.get(index) in wanted:self.keyword_list.selection_set(index)
-            try:
-                index=max(0,min(int(state.get("tab_index",0)),len(self.tabs.tabs())-1))
-                self.tabs.select(self.tabs.tabs()[index])
-            except (ValueError,tk.TclError):pass
+            # Preserve detail-tab history as data, but always enter through the operations home.
+            self.main_tabs.select(self.home_page)
             self.reload_candidates()
             video_id=state.get("selected_video_id")
             if video_id and hasattr(self,"candidates") and self.candidates.exists(video_id):
                 self.candidates.selection_set(video_id); self.candidates.see(video_id)
         finally:self._restoring_ui=False
+        self.main_tabs.select(self.home_page)
         self._refresh_easy_step()
         self.after(500,self._offer_recovery)
 
@@ -1127,13 +1255,13 @@ class Studio(tk.Tk):
         ttk.Label(win,text=details,wraplength=480,justify="left").pack(anchor="w",padx=20,pady=8)
         actions=ttk.Frame(win);actions.pack(fill="x",padx=14,pady=16)
         def continue_work():
-            win.destroy();self.tabs.select(self.frames[7])
+            win.destroy();self._select_detail_tab(7)
             if store.get_autopilot_settings(profile["id"],session["id"]):self._autopilot_resume()
             else:self._ai_resume_latest()
         def view_only():
-            win.destroy();self.reload_candidates();self.tabs.select(self.frames[2])
+            win.destroy();self.reload_candidates();self._select_detail_tab(2)
         def new_search():
-            win.destroy();self.tabs.select(self.frames[7])
+            win.destroy();self._select_detail_tab(7)
             self.autopilot_stage_text.set("새 조사는 준비 화면만 열었습니다. 시작 버튼을 눌러야 외부 검색이 시작됩니다.")
         ttk.Button(actions,text="이어서 작업하기",command=continue_work,style="Accent.TButton").pack(side="left",padx=3)
         ttk.Button(actions,text="저장된 결과만 보기",command=view_only).pack(side="left",padx=3)
@@ -1145,9 +1273,20 @@ class Studio(tk.Tk):
             "schedule_mode":"fixed","research_min_minutes":20,"research_max_minutes":20,
             "break_min_minutes":20,"break_max_minutes":20}
         settings={**defaults,**saved}
+        for key,attribute in (("total_hours","schedule_hours"),("research_minutes","schedule_research_minutes"),
+                ("break_minutes","schedule_break_minutes"),("schedule_mode","schedule_mode"),
+                ("research_min_minutes","schedule_research_min"),("research_max_minutes","schedule_research_max"),
+                ("break_min_minutes","schedule_break_min"),("break_max_minutes","schedule_break_max")):
+            variable=getattr(self,attribute,None)
+            if variable is None:
+                continue
+            try:
+                settings[key]=variable.get() if key=="schedule_mode" else int(variable.get())
+            except (TypeError,ValueError,tk.TclError):
+                continue
         try: slots=min(10,max(1,int(profile.get("vph_observation_slots",10))))
         except (TypeError,ValueError): slots=10
-        try: calls=min(3,max(1,int(self.vph_search_limit.get())))
+        try: calls=min(3,max(1,int(self.ai_max_calls.get())))
         except (AttributeError,TypeError,ValueError): calls=3
         return {**settings,"observation_slots":slots,"search_calls":calls,
             "provider_id":"disabled","paid_ai":False,"ai_calls":0,
@@ -1165,6 +1304,8 @@ class Studio(tk.Tk):
             self.vph_observation_slots.set(str(settings["observation_slots"]))
         if hasattr(self,"vph_search_limit"):
             self.vph_search_limit.set(int(settings["search_calls"]))
+        if hasattr(self,"ai_max_calls"):
+            self.ai_max_calls.set(str(min(3,max(1,int(settings["search_calls"])))))
 
     def _auto_start_block(self, request_id, reason):
         try: store.update_vph_auto_start_intent(request_id,"blocked",reason=reason)
@@ -1251,7 +1392,7 @@ class Studio(tk.Tk):
             self._auto_start_block(request_id,"CPU/RAM 상태를 확인하지 못해 fail-closed 처리했습니다.")
             return True
         self._auto_start_set_settings(intent["settings"])
-        self.tabs.select(self.frames[7])
+        self._select_detail_tab(7)
         self._autopilot_start(vph_one_click=True,auto_request_id=request_id,
                               auto_settings=intent["settings"])
         return True
@@ -1293,7 +1434,7 @@ class Studio(tk.Tk):
                 self._auto_start_block(intent["request_id"],"일정 재개 안전 검사 실패: "+type(exc).__name__)
                 return True
         self._auto_start_set_settings(intent["settings"])
-        self.tabs.select(self.frames[7])
+        self._select_detail_tab(7)
         self._autopilot_start((settings,session_id,schedule["id"]),vph_one_click=True,
             auto_request_id=intent["request_id"],auto_settings=intent["settings"])
         return True
@@ -1440,7 +1581,7 @@ class Studio(tk.Tk):
                 name,market,genre,related,genre_config=dialog.result
                 ident=store.create_profile(name,market,genre,related_genres=related,genre_config=genre_config)
                 self.reload_profiles(ident)
-                self.tabs.select(self.frames[0])
+                self._select_detail_tab(0)
             except Exception as exc: messagebox.showerror("채널 추가 실패",str(exc))
 
     def start_onboarding(self):
@@ -1455,7 +1596,7 @@ class Studio(tk.Tk):
         )
         self.add_profile()
         if self.active_id:
-            self.tabs.select(self.frames[0])
+            self._select_detail_tab(0)
             self.footer.set("다음: OAuth JSON을 선택하고 Google 읽기 전용 연결을 완료하세요.")
 
     def edit_profile(self):
@@ -1648,7 +1789,7 @@ class Studio(tk.Tk):
                 try:
                     oauth.save_connection(profile_id,chosen,token_json,allow_account_change=allow_account_change)
                     self.reload_profiles(profile_id)
-                    self.tabs.select(self.frames[1])
+                    self._select_detail_tab(1)
                     messagebox.showinfo("연결 성공","읽기 전용으로 계정이 연결되었습니다. 이제 장르별 검색을 시작하세요.")
                 except (oauth.OAuthError,ValueError,OSError) as exc:
                     messagebox.showerror("연결 정보 저장 실패",str(exc))
@@ -1985,7 +2126,7 @@ class Studio(tk.Tk):
                 self.timer_text.set("알림 완료")
                 messagebox.showinfo("분석 시간","실제 감상한 점을 메모하세요. 프로그램은 영상을 자동 재생하지 않습니다.")
         now=time.monotonic()
-        if (hasattr(self,"tabs") and self.tabs.select()==str(self.tabs.tabs()[0]) and
+        if (hasattr(self,"main_tabs") and self.main_tabs.select()==str(self.home_page) and
                 now-getattr(self,"_dashboard_last_refresh",0)>=15):
             self._dashboard_last_refresh=now
             self._dashboard_refresh()
@@ -2052,7 +2193,7 @@ class Studio(tk.Tk):
         self.observation.insert("1.0",item.get("notes", ""))
         self.draft.delete("1.0",tk.END)
         self.draft.insert("1.0",item["draft"])
-        self.tabs.select(self.frames[3])
+        self._select_detail_tab(3)
 
     def _schedule_comment_save(self):
         if not getattr(self,"comment_video",None):return
@@ -2633,7 +2774,7 @@ class Studio(tk.Tk):
             self.vph_status.set("선택 영상이 현재 프로필 후보 목록에 없습니다.");return
         self.candidates.selection_set(video_id);self.candidates.focus(video_id);self.candidates.see(video_id)
         self.selected_candidate()
-        self.tabs.select(self.frames[2])
+        self._select_detail_tab(2)
         self.footer.set("선택한 VPH 영상이 후보 화면에 연결되었습니다. 직접 영상 열기를 눌러 한 편씩 듣고 메모를 작성하세요.")
 
     def _metrics_ui(self,tab):
@@ -2968,7 +3109,7 @@ class Studio(tk.Tk):
         ttk.Button(actions,text="리소스 상태 보기",command=self._resource_status).pack(side="left",padx=3)
         ttk.Label(actions,textvariable=self.resource_status_text).pack(side="left",padx=6)
         ttk.Button(actions,text="결과 보고서 내보내기",command=self._autopilot_export).pack(side="left",padx=3)
-        ttk.Button(actions,text="AI 상세 화면",command=lambda:self.tabs.select(self.frames[6])).pack(side="left",padx=3)
+        ttk.Button(actions,text="AI 상세 화면",command=lambda:self._select_detail_tab(6)).pack(side="left",padx=3)
         ttk.Label(tab,text="예외 / 사람 확인 대기함",font=("Malgun Gothic",11,"bold")).grid(row=11,column=0,sticky="w",pady=(6,2))
         self.autopilot_exception_tree=ttk.Treeview(tab,columns=("type","impact","action","retry","status"),show="headings",height=4)
         for col,label,width in (("type","유형",125),("impact","영향",220),("action","권장 조치",390),("retry","재시도",75),("status","상태",85)):

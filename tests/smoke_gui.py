@@ -17,6 +17,7 @@ with WorkspaceTemp() as temp:
     store.bind_google_account_channel(first,"UCgui001","JP main","shared@example.test")
     store.bind_google_account_channel(third,"UCgui002","JP second","SHARED@example.test")
     store.bind_google_account_channel(second,"UCgui003","KR channel","kr@example.test")
+    store.save_ui_state({"profile_id":first,"tab_index":7,"filter":"saved-filter"})
     start_research=[]
     with patch.object(Studio,"start_vph_scheduled_research",lambda self:start_research.append(self)):
         app=Studio()
@@ -27,8 +28,15 @@ with WorkspaceTemp() as temp:
     assert len(app.profiles)>=1
     assert app.active_id
     assert len(app.frames)==9
-    assert len(app.tabs.tabs())==10
-    assert app.tabs.tab(app.tabs.tabs()[0],"text")=="쉬운 시작"
+    assert len(app.tabs.tabs())==9
+    assert len(app.main_tabs.tabs())==5
+    assert [app.main_tabs.tab(tab,"text") for tab in app.main_tabs.tabs()]==[
+        "연구 운영 홈","채널·장르 설정","후보·연구 결과","실행 이력·오류","고급 설정"]
+    assert app.main_tabs.select()==str(app.home_page)
+    assert app.active_id==first
+    assert app.filter.get()=="saved-filter"
+    assert app.tabs.select()!=str(app.frames[7]) or app.main_tabs.select()==str(app.home_page)
+    assert all(app.tabs.tab(tab,"text") for tab in app.tabs.tabs())
     assert hasattr(app,"dashboard_channels")
     assert hasattr(app,"vph_tree") and hasattr(app,"vph_profile_combo")
     assert app.vph_start_button.cget("text")=="자동 연구 시작"
@@ -51,7 +59,7 @@ with WorkspaceTemp() as temp:
     vph.record_observation(second,second_video,40,start+timedelta(hours=1),path=None)
     vph.record_observation(second,missing_video,None,start,sample_status="missing",uncertainty_reason="view_count_missing",path=None)
     app.reload_profiles(first)
-    app.tabs.select(app.frames[8]);app.update_idletasks()
+    app._select_detail_tab(8);app.update_idletasks()
     app._vph_research_error_profile=first
     app._vph_research_error_text="Timeout · checkpoint kept"
     app._refresh_vph_research_status(None)
@@ -81,8 +89,9 @@ with WorkspaceTemp() as temp:
         app.open_vph_manual_review()
         assert radar_query.call_count==0
     assert app.tabs.select()==str(app.frames[2])
+    assert app.main_tabs.select()==str(app.advanced_page)
     assert app.selected_video==first_video and app.candidates.selection()==(first_video,)
-    app.tabs.select(app.frames[8])
+    app._select_detail_tab(8)
     app.autopilot_schedule_running=True
     app.vph_profile_combo.current([p["id"] for p in app.vph_profiles].index(second))
     with patch("mcrs.gui.messagebox.showinfo"):
@@ -120,16 +129,26 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"dashboard_selected_text")
     assert callable(app._dashboard_refresh)
     assert callable(app._dashboard_start_research)
-    app.tabs.select(app.tabs.tabs()[0])
+    assert app.operator_search_limit.cget("textvariable")==str(app.ai_max_calls)
+    assert app.operator_slot_combo.cget("textvariable")==str(app.vph_observation_slots)
+    app.main_tabs.select(app.home_page)
+    app.schedule_hours.set("4");app.schedule_research_minutes.set("15");app.schedule_break_minutes.set("5")
+    app.ai_max_calls.set("2")
     with patch.object(app,"_autopilot_start") as scheduled_start:
         app._dashboard_start_research()
         assert scheduled_start.call_count==1
         request_id=scheduled_start.call_args.kwargs["auto_request_id"]
-        assert app.tabs.select()==str(app.tabs.tabs()[0])
+        assert app.main_tabs.select()==str(app.home_page)
         intent=store.get_vph_auto_start_intent(request_id)
         assert intent["status"]=="claimed" and intent["profile_id"]==app.active_id
         assert scheduled_start.call_args.kwargs["vph_one_click"] is True
-        assert app.tabs.select()==str(app.tabs.tabs()[0])
+        assert scheduled_start.call_args.kwargs["auto_settings"]["total_hours"]==4
+        assert scheduled_start.call_args.kwargs["auto_settings"]["research_minutes"]==15
+        assert scheduled_start.call_args.kwargs["auto_settings"]["break_minutes"]==5
+        assert scheduled_start.call_args.kwargs["auto_settings"]["search_calls"]==2
+        assert app.main_tabs.select()==str(app.home_page)
+    app.schedule_hours.set("8");app.schedule_research_minutes.set("20");app.schedule_break_minutes.set("20")
+    app.ai_max_calls.set("3")
     store.update_vph_auto_start_intent(request_id,"cancelled")
     with patch.object(app,"_autopilot_start") as scheduled_start:
         app.start_vph_scheduled_research()
@@ -140,7 +159,7 @@ with WorkspaceTemp() as temp:
         assert app.tabs.select()==str(app.frames[7])
     store.update_vph_auto_start_intent(scheduled_start.call_args.kwargs["auto_request_id"],"cancelled")
     assert hasattr(app,"research_dashboard_frame")
-    assert app.research_dashboard_frame.master is app.tabs.nametowidget(app.tabs.tabs()[0])
+    assert app.research_dashboard_frame.master is app.home_page
     assert int(app.research_dashboard_frame.grid_info()["row"])==0
     assert len(app.research_stage_cards)==9
     assert "최종 연구 완료" not in app.research_dashboard_results.get()
@@ -216,9 +235,8 @@ with WorkspaceTemp() as temp:
     app._dashboard_open_profile()
     assert app.active_id==first
     # Mechanically exercise Tk scaling and scrollable layout; this is not a visual screenshot check.
-    easy_tab=app.tabs.tabs()[0]
-    app.tabs.select(easy_tab);app.update()
-    easy_widget=app.tabs.nametowidget(easy_tab)
+    app.main_tabs.select(app.home_page);app.update()
+    easy_widget=app.home_page
     target_height=max(650,app.winfo_height()+(605-easy_widget.winfo_height()))
     app.geometry(f"1280x{target_height}");app.update()
     target_height=app.winfo_height()+(605-easy_widget.winfo_height())
@@ -239,9 +257,9 @@ with WorkspaceTemp() as temp:
     assert app._easy_mousewheel(nested_event) is None
     linux_wheel=SimpleNamespace(widget=app.easy_dashboard,num=5,delta=0)
     assert app._easy_mousewheel(linux_wheel)=="break"
-    app.tabs.select(app.frames[1]);app.update_idletasks()
+    app._select_detail_tab(1);app.update_idletasks()
     assert app._easy_mousewheel(wheel_event) is None
-    app.tabs.select(easy_tab);app.update_idletasks()
+    app.main_tabs.select(app.home_page);app.update_idletasks()
     for scaling in (1.0,1.25,1.5,2.0):
         app.tk.call("tk","scaling",scaling)
         app.update_idletasks()
@@ -262,7 +280,7 @@ with WorkspaceTemp() as temp:
                     assert child.winfo_width()>0 and child.winfo_height()>0
                     assert child.winfo_height()+2>=child.winfo_reqheight()
         assert app.easy_next.cget("text")
-        easy_widget=app.tabs.nametowidget(easy_tab)
+        easy_widget=app.home_page
         assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= easy_widget.winfo_rooty()+easy_widget.winfo_height()
         for card in app.research_stage_card_labels.values():
             assert card.winfo_width()>0 and card.winfo_height()+2>=card.winfo_reqheight()
@@ -271,9 +289,9 @@ with WorkspaceTemp() as temp:
             assert button.winfo_width()>0 and button.winfo_height()+2>=button.winfo_reqheight()
         app.dashboard_start_button.focus_set();app.update_idletasks()
         assert app.focus_get() is app.dashboard_start_button
-    vph_tab=app.tabs.tabs()[9]
+    vph_tab=app.frames[8]
     for scaling in (1.0,1.25,1.5,2.0):
-        app.tk.call("tk","scaling",scaling);app.tabs.select(vph_tab);app.update()
+        app.tk.call("tk","scaling",scaling);app._select_detail_tab(8);app.update()
         assert app.vph_tree.winfo_width()>0 and app.vph_tree.winfo_height()>0
         assert app.vph_tree.cget("xscrollcommand") and app.vph_tree.cget("yscrollcommand")
         viewport=app.frames[8]
@@ -286,7 +304,7 @@ with WorkspaceTemp() as temp:
         for widget in (app.vph_start_button,app.vph_pause_button,app.vph_resume_button,app.vph_stop_button):
             assert widget.winfo_ismapped() and widget.winfo_height()>=widget.winfo_reqheight()
     # Verify actual Tk key bindings and focus navigation on the beginner screen.
-    app.tabs.select(easy_tab);app.update()
+    app.main_tabs.select(app.home_page);app.update()
     app.dashboard_channels.selection_set("profile:"+third)
     app.dashboard_channels.focus_set();app.event_generate("<Return>");app.update()
     assert app.active_id==third
@@ -329,9 +347,9 @@ with WorkspaceTemp() as temp:
     app.select_profile()
     assert app.active_id == second and app.active_id != first
     assert "KR" in app.active_account_banner.get() and "Chill Rap" in app.active_account_banner.get()
-    app.tabs.select(app.frames[1])
+    app._select_detail_tab(1)
     app.update()
-    app.tabs.select(app.frames[5])
+    app._select_detail_tab(5)
     app.update()
     entered = threading.Event()
     release = threading.Event()
