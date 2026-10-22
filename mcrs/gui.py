@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path
 import tkinter as tk
@@ -27,6 +28,7 @@ from . import timers
 from . import autopilot
 from . import vph, vph_research
 from . import research_scheduler
+from . import research_dashboard_presenter
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .research_browser import (ResearchBrowserManager, BrowserError, BrowserResourceDeferred,
                                BrowserOwnershipUncertain, open_manual_research_url)
@@ -514,8 +516,20 @@ class Studio(tk.Tk):
         self.dashboard_vph_text=tk.StringVar(value="VPH 연구: 자동 작업 없음")
         ttk.Label(content,textvariable=self.dashboard_vph_text,wraplength=1000).grid(row=11,column=0,columnspan=2,sticky="w",pady=3)
         self.easy_next=ttk.Button(content,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
-        self.easy_next.grid(row=11,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
-        actions=ttk.Frame(content);actions.grid(row=12,column=0,columnspan=2,sticky="ew",pady=4)
+        self.easy_next.grid(row=12,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
+        operations=ttk.LabelFrame(content,text="원클릭 연구 운영",padding=10)
+        operations.grid(row=13,column=0,columnspan=2,sticky="ew",pady=6)
+        operations.columnconfigure(0,weight=1);operations.columnconfigure(1,weight=1)
+        self.research_dashboard_summary=tk.StringVar(value="READY · 연구 설정과 연결 상태를 확인하세요.")
+        self.research_dashboard_flow=tk.StringVar(value="설정/인증 → 자동 검색 → 장르 평가 → 관측 대상 → 첫 표본 → 두 번째 표본 → VPH → 결과")
+        self.research_dashboard_checkpoint=tk.StringVar(value="체크포인트: 아직 시작하지 않음")
+        self.research_dashboard_results=tk.StringVar(value="결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0")
+        ttk.Label(operations,textvariable=self.research_dashboard_summary,font=("Malgun Gothic",12,"bold"),wraplength=1000).grid(row=0,column=0,columnspan=2,sticky="ew",pady=3)
+        ttk.Label(operations,textvariable=self.research_dashboard_flow,wraplength=1000).grid(row=1,column=0,columnspan=2,sticky="ew",pady=3)
+        ttk.Label(operations,textvariable=self.research_dashboard_checkpoint,wraplength=1000).grid(row=2,column=0,sticky="nw",padx=(0,8),pady=3)
+        ttk.Label(operations,textvariable=self.research_dashboard_results,wraplength=1000).grid(row=2,column=1,sticky="nw",padx=(8,0),pady=3)
+        self.research_dashboard_frame=operations
+        actions=ttk.Frame(content);actions.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
         actions.columnconfigure(0,weight=1)
         for index,(label,command,style_name) in enumerate((
             ("Google 계정 연결",lambda:self.tabs.select(self.frames[0]),"TButton"),
@@ -529,7 +543,7 @@ class Studio(tk.Tk):
         self.dashboard_vph_start_button=ttk.Button(actions,text="원클릭 VPH 자동 연구",
             command=self.start_vph_scheduled_research,style="Accent.TButton")
         self.dashboard_vph_start_button.grid(row=7,column=0,sticky="ew",padx=3,pady=3)
-        browser_row=ttk.Frame(content);browser_row.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
+        browser_row=ttk.Frame(content);browser_row.grid(row=15,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
             ("연구용 인터넷 창 열기",self._research_browser_open),
@@ -538,9 +552,9 @@ class Studio(tk.Tk):
             ("도움말",lambda:self.tabs.select(self.frames[5])))):
             ttk.Button(browser_row,text=label,command=command).grid(row=index,column=0,sticky="ew",padx=3,pady=2)
         ttk.Label(content,text="수동 모드로 연 일반 브라우저는 ZISU가 자동으로 닫지 않습니다. 영상 재생·댓글·좋아요·구독은 직접 수행합니다.",
-                  wraplength=1000).grid(row=15,column=0,columnspan=2,sticky="w",pady=(5,12))
+                  wraplength=1000).grid(row=16,column=0,columnspan=2,sticky="w",pady=(5,12))
         performance=ttk.LabelFrame(content,text="실제 YouTube 채널 성과 · 읽기 전용",padding=10)
-        performance.grid(row=16,column=0,columnspan=2,sticky="ew",pady=(8,4))
+        performance.grid(row=17,column=0,columnspan=2,sticky="ew",pady=(8,4))
         performance.columnconfigure(0,weight=1)
         ttk.Label(performance,text="연구 후보·메모 수와 별개의 YouTube Analytics 측정값입니다. 가져오지 못한 값은 0이 아니라 미수집으로 표시합니다.",wraplength=1000).grid(row=0,column=0,columnspan=3,sticky="w",pady=(0,4))
         ttk.Label(performance,text="기간:").grid(row=1,column=0,sticky="w")
@@ -587,16 +601,30 @@ class Studio(tk.Tk):
             self.add_profile();return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         self.tabs.select(self.frames[7])
-        # Keep the existing Autopilot approval, budget and confirmation path.
-        self._autopilot_start()
+        self.start_vph_scheduled_research()
 
     def start_vph_scheduled_research(self):
-        """Start the existing scheduled Autopilot/VPH pipeline from a VPH control."""
+        """Persist one explicit request, then start the existing pipeline once."""
         if not self.active_id:
             self.add_profile();return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         self.tabs.select(self.frames[7])
-        self._autopilot_start(vph_one_click=True)
+        profile=self.current_profile()
+        settings=self._auto_start_settings(profile)
+        request_id="gui_"+uuid.uuid4().hex
+        try:
+            if any(item.get("profile_id") in {"",profile["id"]}
+                   for item in store.list_open_vph_auto_start_intents()):
+                raise ValueError("unfinished_one_shot_exists")
+            store.create_vph_auto_start_intent(request_id,settings)
+            store.claim_vph_auto_start_intent(request_id,profile["id"],settings)
+        except (ValueError,sqlite3.Error) as exc:
+            self._vph_research_error_profile=self.active_id
+            self._vph_research_error_text="자동 연구 시작 차단: "+str(exc)
+            if store.get_vph_auto_start_intent(request_id):
+                self._auto_start_block(request_id,str(exc))
+            return
+        self._autopilot_start(vph_one_click=True,auto_request_id=request_id,auto_settings=settings)
 
     def _dashboard_refresh(self):
         if not hasattr(self,"dashboard_channels"):return
@@ -634,6 +662,7 @@ class Studio(tk.Tk):
         profile=store.dashboard_summary(self.active_id) if self.active_id else None
         if not profile:
             self._refresh_analytics_panel(None)
+            self._refresh_research_dashboard(None)
             self.dashboard_selected_text.set("현재 선택: 조사 채널을 추가하거나 위 목록에서 선택하세요")
             self.dashboard_today_text.set("오늘 저장·갱신한 후보: 0");self.dashboard_ai_text.set("AI 분석: 아직 없음")
             self.dashboard_review_text.set("사람 확인 필요: 0 · 사람 검증: 0")
@@ -660,7 +689,49 @@ class Studio(tk.Tk):
         dedicated=browser.get() if browser else "전용 창 상태 확인 전"
         self.dashboard_browser_text.set(dedicated+" · 일반 브라우저 수동 모드는 ZISU가 자동 종료하지 않습니다")
 
+        self._refresh_research_dashboard(profile["id"])
         self._refresh_analytics_panel(profile)
+
+    def _refresh_research_dashboard(self,profile_id=None):
+        if not hasattr(self,"research_dashboard_summary"):
+            return
+        if not profile_id:
+            self.research_dashboard_summary.set("READY · 연구 프로필을 선택하세요.")
+            self.research_dashboard_flow.set("설정/인증 → 자동 검색 → 장르 평가 → 관측 대상 → 첫 표본 → 두 번째 표본 → VPH → 결과")
+            self.research_dashboard_checkpoint.set("체크포인트: 아직 시작하지 않음")
+            self.research_dashboard_results.set("결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0")
+            return
+        try:
+            model=research_dashboard_presenter.present(profile_id)
+        except (ValueError,sqlite3.Error,OSError):
+            self.research_dashboard_summary.set("ERROR · 운영 상태를 안전하게 읽지 못했습니다.")
+            return
+        remaining=model["remaining_seconds"]
+        remaining_text="-" if remaining is None else f"{remaining//60}분 {remaining%60}초"
+        next_time=model["next_run_utc"] or "-"
+        self.research_dashboard_summary.set(
+            f"{model['state']} · 일정 {model['schedule_progress_percent']}% · "
+            f"단계 {model['stage_progress_completed']}/{model['stage_progress_total']} · "
+            f"현재 {model['current_phase']} · 다음 {next_time} · 남음 {remaining_text}")
+        labels={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
+            "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
+            "vph":"VPH","final_result":"최종 결과"}
+        self.research_dashboard_flow.set(" → ".join(
+            ("✓ " if model["stages"][key] else "○ ")+labels[key]
+            for key in research_dashboard_presenter.STAGE_KEYS))
+        checkpoint=(f"마지막 성공: {model['last_success_stage']} · 요청 {model['request_id'] or '-'} · "
+            f"일정 {model['schedule_id'] or '-'} · 자동 재개 {'가능' if model['auto_resume'] else '불가'}")
+        if model["error_code"]:
+            checkpoint+=(f"\n오류 단계: {model['error_stage'] or '-'} · 코드: {model['error_code']} · "
+                f"사유: {model['stop_reason'] or '-'} · 다음 조치: {model['next_action']}")
+        self.research_dashboard_checkpoint.set(checkpoint)
+        counts=model["counts"]
+        suffix=" · 실측 불충분" if model["insufficient_measurement"] else " · 최종 연구 완료"
+        self.research_dashboard_results.set(
+            f"후보 {counts['candidates']} · FIT {counts['fit']} · REVIEW {counts['review']} · EXCLUDE {counts['exclude']}\n"
+            f"관측 {counts['observing']} · 첫/두 번째 표본 {counts['sample_1']}/{counts['sample_2']} · "
+            f"VPH A/B {counts['vph_a']}/{counts['vph_b']} · UNKNOWN/REVIEW "
+            f"{counts['unknown']}/{counts['vph_review']}{suffix}")
 
     def _dashboard_insert_profile(self,parent,profile):
         profile_id=profile["id"];node="profile:"+profile_id
@@ -988,14 +1059,7 @@ class Studio(tk.Tk):
         try:
             if request_id:
                 intent=store.get_vph_auto_start_intent(request_id)
-                if intent is None:
-                    seed={"total_hours":8,"research_minutes":20,"break_minutes":20,
-                        "observation_slots":10,"search_calls":3,"provider_id":"disabled",
-                        "paid_ai":False,"ai_calls":0,"market":None,"genre":None,"channel_id":"",
-                        "schedule_mode":"fixed","research_min_minutes":20,"research_max_minutes":20,
-                        "break_min_minutes":20,"break_max_minutes":20}
-                    intent=store.create_vph_auto_start_intent(request_id,seed)
-                intents=[intent]
+                intents=[intent] if intent else []
             else:
                 intents=store.list_open_vph_auto_start_intents()
         except (OSError,sqlite3.Error,ValueError) as exc:
@@ -1013,18 +1077,14 @@ class Studio(tk.Tk):
             return False
         request_id=intent["request_id"]
         if intent["status"] in {"blocked","completed","cancelled"}: return True
-        connected=[]
-        for profile in self.profiles:
-            try:
-                if oauth.connection_state(profile["id"]).get("status")=="connected":
-                    connected.append(profile)
-            except Exception: continue
-        if len(connected)!=1:
-            self._auto_start_block(request_id,"연결 및 읽기 전용 scope가 검증된 프로필이 정확히 하나가 아닙니다.")
+        profile=next((row for row in self.profiles if row["id"]==intent.get("profile_id")),None)
+        if not profile:
+            self._auto_start_block(request_id,"저장된 요청의 프로필을 찾을 수 없습니다.")
             return True
-        profile=connected[0]
-        if intent.get("profile_id") and intent["profile_id"]!=profile["id"]:
-            self._auto_start_block(request_id,"저장된 요청과 현재 유일한 연결 프로필이 다릅니다.")
+        try: connection=oauth.connection_state(profile["id"])
+        except Exception: connection={"status":"error"}
+        if connection.get("status")!="connected":
+            self._auto_start_block(request_id,"저장된 프로필의 읽기 전용 연결이 유효하지 않습니다.")
             return True
         current_settings=self._auto_start_settings(profile)
         if intent["status"]=="pending":
@@ -3212,7 +3272,12 @@ class Studio(tk.Tk):
                     try:
                         final_schedule=research_scheduler.get(schedule_id,profile_id)
                         if final_schedule and final_schedule["state"]=="completed":
-                            store.update_vph_auto_start_intent(auto_request_id,"completed",schedule_id=schedule_id)
+                            final_job=vph_research.latest_job(profile_id,store.db_path())
+                            if final_job and final_job.get("schedule_id")==schedule_id and final_job.get("state")=="COMPLETED":
+                                store.update_vph_auto_start_intent(auto_request_id,"completed",schedule_id=schedule_id)
+                            else:
+                                store.update_vph_auto_start_intent(auto_request_id,"blocked",schedule_id=schedule_id,
+                                    reason="insufficient_vph_measurement")
                         elif final_schedule and final_schedule["state"]=="cancelled":
                             store.update_vph_auto_start_intent(auto_request_id,"cancelled",schedule_id=schedule_id)
                     except Exception:pass

@@ -1182,6 +1182,51 @@ def list_open_vph_auto_start_intents(path=None):
     return items
 
 
+def research_dashboard_snapshot(profile_id, path=None):
+    """Read persisted one-click research state without advancing any engine."""
+    with connect(path) as db:
+        profile_row=db.execute("SELECT * FROM profiles WHERE id=?",(profile_id,)).fetchone()
+        intent_row=db.execute("SELECT * FROM vph_auto_start_intents WHERE profile_id=? "
+            "ORDER BY created_at DESC,request_id DESC LIMIT 1",(profile_id,)).fetchone()
+        schedule_row=db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
+            "ORDER BY created_at DESC,id DESC LIMIT 1",(profile_id,)).fetchone()
+        job_row=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? "
+            "ORDER BY created_at DESC,id DESC LIMIT 1",(profile_id,)).fetchone()
+        candidate_rows=db.execute("SELECT predicted_decision AS genre_decision,COUNT(*) AS count FROM genre_audit "
+            "WHERE profile_id=? GROUP BY predicted_decision",(profile_id,)).fetchall()
+        if not candidate_rows:
+            candidate_rows=db.execute("SELECT genre_decision,COUNT(*) AS count FROM candidates "
+                "WHERE profile_id=? GROUP BY genre_decision",(profile_id,)).fetchall()
+        observation_rows=db.execute("SELECT video_id,COUNT(*) AS count FROM vph_observations "
+            "WHERE profile_id=? GROUP BY video_id",(profile_id,)).fetchall()
+        evaluation_rows=db.execute("""WITH latest AS (
+            SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.video_id ORDER BY e.id DESC) AS rank
+            FROM vph_evaluations e WHERE e.profile_id=?)
+            SELECT state,tier,COUNT(*) AS count FROM latest WHERE rank=1 GROUP BY state,tier""",
+            (profile_id,)).fetchall()
+    profile=dict(profile_row) if profile_row else None
+    intent=dict(intent_row) if intent_row else None
+    if intent:
+        intent["settings"]=json.loads(intent.pop("settings_json"))
+    schedule=dict(schedule_row) if schedule_row else None
+    if schedule:
+        schedule["checkpoint"]=json.loads(schedule.get("checkpoint_json") or "{}")
+    job=dict(job_row) if job_row else None
+    if job:
+        job["targets"]=json.loads(job.get("targets_json") or "[]")
+    candidate_counts={row["genre_decision"]:row["count"] for row in candidate_rows}
+    candidate_counts["total"]=sum(candidate_counts.values())
+    first=sum(1 for row in observation_rows if row["count"]>=1)
+    second=sum(1 for row in observation_rows if row["count"]>=2)
+    return {"profile":profile,"intent":intent,"schedule":schedule,"job":job,
+        "candidate_counts":candidate_counts,"first_sample_count":first,"second_sample_count":second,
+        "observing_count":len(observation_rows),
+        "vph_a_count":sum(row["count"] for row in evaluation_rows if row["state"]=="VALID" and row["tier"]=="A"),
+        "vph_b_count":sum(row["count"] for row in evaluation_rows if row["state"]=="VALID" and row["tier"]=="B"),
+        "vph_unknown_count":sum(row["count"] for row in evaluation_rows if row["state"]=="UNKNOWN"),
+        "vph_review_count":sum(row["count"] for row in evaluation_rows if row["state"]=="REVIEW")}
+
+
 def claim_vph_auto_start_intent(request_id, profile_id, settings, path=None):
     """Bind the one-shot intent once, after profile/market/genre are verified."""
     _validate_auto_start_settings(settings)

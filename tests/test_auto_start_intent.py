@@ -68,27 +68,63 @@ class AutoStartIntentTests(unittest.TestCase):
         self.assertEqual("completed", completed["status"])
         self.assertEqual([], store.list_open_vph_auto_start_intents(self.db))
 
-    def test_bootstrap_blocks_ambiguous_connected_profile_instead_of_choosing_one(self):
-        request_id = "request_ambiguous_1"
-        store.create_vph_auto_start_intent(request_id, dict(self.settings, market=None, genre=None), self.db)
+    def test_gui_click_persists_once_and_duplicate_click_is_blocked(self):
+        app=Studio.__new__(Studio)
+        app.active_id=self.live_profile
+        app.frames=[None]*8
+        app.tabs=Mock()
+        app._vph_research_error_profile=None
+        app._vph_research_error_text=""
+        app.current_profile=Mock(return_value=store.get_profile(self.live_profile))
+        app._auto_start_settings=Mock(return_value=dict(self.settings))
+        app._autopilot_start=Mock()
+        app._auto_start_block=Mock(side_effect=lambda request_id,reason:
+            store.update_vph_auto_start_intent(request_id,"blocked",reason=reason))
+        with patch("mcrs.gui.uuid.uuid4",return_value=SimpleNamespace(hex="one_click")):
+            app.start_vph_scheduled_research()
+        intent=store.get_vph_auto_start_intent("gui_one_click")
+        self.assertEqual(("claimed",self.live_profile),(intent["status"],intent["profile_id"]))
+        app._autopilot_start.assert_called_once_with(vph_one_click=True,
+            auto_request_id="gui_one_click",auto_settings=self.settings)
+        with patch("mcrs.gui.uuid.uuid4",return_value=SimpleNamespace(hex="duplicate")):
+            app.start_vph_scheduled_research()
+        app._autopilot_start.assert_called_once()
+        self.assertIsNone(store.get_vph_auto_start_intent("gui_duplicate"))
+
+    def test_saved_profile_with_invalid_oauth_becomes_blocked_without_dispatch(self):
+        request_id="request_auth_blocked"
+        store.create_vph_auto_start_intent(request_id,self.settings)
+        store.claim_vph_auto_start_intent(request_id,self.live_profile,self.settings)
+        app=Studio.__new__(Studio)
+        app._auto_start_request_id=""
+        app._auto_start_bootstrap_done=False
+        app.profiles=[store.get_profile(self.live_profile)]
+        app.active_id=self.live_profile
+        app._auto_start_block=Mock(side_effect=lambda rid,reason:
+            store.update_vph_auto_start_intent(rid,"blocked",reason=reason))
+        app._autopilot_start=Mock()
+        with patch("mcrs.gui.oauth.connection_state",return_value={"status":"expired"}):
+            self.assertTrue(app._automatic_research_bootstrap())
+        self.assertEqual("blocked",store.get_vph_auto_start_intent(request_id)["status"])
+        app._autopilot_start.assert_not_called()
+
+    def test_environment_request_does_not_create_or_start_unapproved_work(self):
+        request_id = "request_missing_1"
         app = Studio.__new__(Studio)
         app._auto_start_request_id = request_id
         app._auto_start_bootstrap_done = False
-        second = store.create_profile("Second connected", "JP", "CHILL_RAP")
-        app.profiles = [store.get_profile(self.live_profile), store.get_profile(second)]
+        app.profiles = [store.get_profile(self.live_profile)]
         app.active_id = self.live_profile
-        blocked = Mock(side_effect=lambda rid, reason: store.update_vph_auto_start_intent(
-            rid, "blocked", reason=reason))
-        app._auto_start_block = blocked
         with patch("mcrs.gui.oauth.connection_state", return_value={"status": "connected"}):
-            self.assertTrue(app._automatic_research_bootstrap())
-        blocked.assert_called_once()
-        self.assertEqual("blocked", store.get_vph_auto_start_intent(request_id)["status"])
+            self.assertFalse(app._automatic_research_bootstrap())
+        self.assertIsNone(store.get_vph_auto_start_intent(request_id))
         self.assertEqual([], store.list_open_vph_auto_start_intents())
 
     def test_bootstrap_claims_exact_profile_and_dispatches_only_one_shot_engine(self):
         request_id = "request_dispatch_1"
-        store.create_vph_auto_start_intent(request_id, dict(self.settings, market=None, genre=None), self.db)
+        exact=dict(self.settings, market="KR", genre="MORNING_CHILL_RAP")
+        store.create_vph_auto_start_intent(request_id,exact)
+        store.claim_vph_auto_start_intent(request_id,self.live_profile,exact)
         app = Studio.__new__(Studio)
         app._auto_start_request_id = request_id
         app._auto_start_bootstrap_done = False
@@ -98,7 +134,7 @@ class AutoStartIntentTests(unittest.TestCase):
         app.resource_guard.check.return_value = SimpleNamespace(allow_new_work=True)
         app.tabs = Mock()
         app.frames = [None] * 8
-        app._auto_start_settings = Mock(return_value=dict(self.settings, market="KR", genre="MORNING_CHILL_RAP"))
+        app._auto_start_settings = Mock(return_value=exact)
         app._auto_start_set_settings = Mock()
         app._autopilot_start = Mock()
         with (patch("mcrs.gui.oauth.connection_state", return_value={"status": "connected"}),
@@ -107,7 +143,7 @@ class AutoStartIntentTests(unittest.TestCase):
             self.assertTrue(app._automatic_research_bootstrap())
         app._auto_start_set_settings.assert_called_once()
         app._autopilot_start.assert_called_once_with(vph_one_click=True,
-            auto_request_id=request_id, auto_settings=dict(self.settings, market="KR", genre="MORNING_CHILL_RAP"))
+            auto_request_id=request_id, auto_settings=exact)
         self.assertEqual("claimed", store.get_vph_auto_start_intent(request_id)["status"])
         self.assertFalse(app._automatic_research_bootstrap())
         app._autopilot_start.assert_called_once()

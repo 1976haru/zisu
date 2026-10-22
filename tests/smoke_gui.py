@@ -124,12 +124,23 @@ with WorkspaceTemp() as temp:
     with patch.object(app,"_autopilot_start") as scheduled_start:
         app._dashboard_start_research()
         assert scheduled_start.call_count==1
+        request_id=scheduled_start.call_args.kwargs["auto_request_id"]
+        intent=store.get_vph_auto_start_intent(request_id)
+        assert intent["status"]=="claimed" and intent["profile_id"]==app.active_id
+        assert scheduled_start.call_args.kwargs["vph_one_click"] is True
         assert app.tabs.select()==str(app.frames[7])
+    store.update_vph_auto_start_intent(request_id,"cancelled")
     with patch.object(app,"_autopilot_start") as scheduled_start:
         app.start_vph_scheduled_research()
         assert scheduled_start.call_count==1
-        assert scheduled_start.call_args.kwargs=={"vph_one_click":True}
+        assert scheduled_start.call_args.kwargs["vph_one_click"] is True
+        assert scheduled_start.call_args.kwargs["auto_request_id"].startswith("gui_")
+        assert scheduled_start.call_args.kwargs["auto_settings"]["paid_ai"] is False
         assert app.tabs.select()==str(app.frames[7])
+    store.update_vph_auto_start_intent(scheduled_start.call_args.kwargs["auto_request_id"],"cancelled")
+    assert hasattr(app,"research_dashboard_frame")
+    assert app.research_dashboard_summary.get().split(" · ",1)[0] in {
+        "READY","RUNNING","BREAK","WAITING_SAMPLE_2","BLOCKED","ERROR","COMPLETE"}
     assert {str(value) for value in app.dashboard_channels.cget("show")}=={"tree","headings"}
     assert len([row for row in store.list_google_accounts() if row["email"].casefold()=="shared@example.test"])==1
     assert app.dashboard_channels.exists("account:"+store.get_profile(first)["google_account_id"])
