@@ -571,9 +571,6 @@ class Studio(tk.Tk):
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
         ttk.Button(actions,text="VPH 연구 레이더",command=lambda:self.tabs.select(self.frames[8])).grid(row=6,column=0,sticky="ew",padx=3,pady=3)
-        self.dashboard_vph_start_button=ttk.Button(actions,text="원클릭 VPH 자동 연구",
-            command=self.start_vph_scheduled_research,style="Accent.TButton")
-        self.dashboard_vph_start_button.grid(row=7,column=0,sticky="ew",padx=3,pady=3)
         browser_row=ttk.Frame(content);browser_row.grid(row=15,column=0,columnspan=2,sticky="ew",pady=4)
         browser_row.columnconfigure(0,weight=1)
         for index,(label,command) in enumerate((
@@ -669,8 +666,9 @@ class Studio(tk.Tk):
         if not self.active_id:
             self.add_profile();return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
-        self.tabs.select(self.frames[7])
-        self.start_vph_scheduled_research()
+        self._starting_from_easy_dashboard=True
+        try:self.start_vph_scheduled_research()
+        finally:self._starting_from_easy_dashboard=False
 
     def _dashboard_control_research(self,action):
         """Route a dashboard control only to the selected profile's persisted job."""
@@ -696,7 +694,8 @@ class Studio(tk.Tk):
         if not self.active_id:
             self.add_profile();return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
-        self.tabs.select(self.frames[7])
+        if not self.__dict__.get("_starting_from_easy_dashboard",False):
+            self.tabs.select(self.frames[7])
         profile=self.current_profile()
         settings=self._auto_start_settings(profile)
         request_id="gui_"+uuid.uuid4().hex

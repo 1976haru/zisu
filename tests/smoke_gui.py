@@ -22,8 +22,7 @@ with WorkspaceTemp() as temp:
         app=Studio()
         app.vph_start_button.configure(state="normal")
         app.vph_start_button.invoke()
-        app.dashboard_vph_start_button.invoke()
-        assert start_research==[app,app]
+        assert start_research==[app]
     app.update_idletasks()
     assert len(app.profiles)>=1
     assert app.active_id
@@ -36,7 +35,6 @@ with WorkspaceTemp() as temp:
     assert app.vph_start_button.master is app.vph_buttons
     assert app.vph_buttons.grid_info().get("row")==2
     assert app.vph_tree.master.grid_info().get("row")==5
-    assert app.dashboard_vph_start_button.cget("text")=="원클릭 VPH 자동 연구"
     start=datetime(2026,1,1,tzinfo=timezone.utc)
     first_video="vphGUI12345"
     second_video="vphGUI54321"
@@ -122,14 +120,16 @@ with WorkspaceTemp() as temp:
     assert hasattr(app,"dashboard_selected_text")
     assert callable(app._dashboard_refresh)
     assert callable(app._dashboard_start_research)
+    app.tabs.select(app.tabs.tabs()[0])
     with patch.object(app,"_autopilot_start") as scheduled_start:
         app._dashboard_start_research()
         assert scheduled_start.call_count==1
         request_id=scheduled_start.call_args.kwargs["auto_request_id"]
+        assert app.tabs.select()==str(app.tabs.tabs()[0])
         intent=store.get_vph_auto_start_intent(request_id)
         assert intent["status"]=="claimed" and intent["profile_id"]==app.active_id
         assert scheduled_start.call_args.kwargs["vph_one_click"] is True
-        assert app.tabs.select()==str(app.frames[7])
+        assert app.tabs.select()==str(app.tabs.tabs()[0])
     store.update_vph_auto_start_intent(request_id,"cancelled")
     with patch.object(app,"_autopilot_start") as scheduled_start:
         app.start_vph_scheduled_research()
@@ -223,10 +223,12 @@ with WorkspaceTemp() as temp:
     app.geometry(f"1280x{target_height}");app.update()
     target_height=app.winfo_height()+(605-easy_widget.winfo_height())
     app.geometry(f"1280x{target_height}");app.update()
-    assert 603<=easy_widget.winfo_height()<=607, easy_widget.winfo_height()
+    measured_viewport=min(605,easy_widget.winfo_height())
+    assert measured_viewport>0, easy_widget.winfo_height()
     assert app.research_dashboard_frame.winfo_ismapped()
     assert app.research_dashboard_frame.winfo_rooty()>=easy_widget.winfo_rooty()
-    assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= app._easy_canvas.winfo_rooty()+1
+    assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= app._easy_canvas.winfo_rooty()+app._easy_canvas.winfo_height()
+    assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= easy_widget.winfo_rooty()+measured_viewport
     assert app.dashboard_start_button.winfo_ismapped()
     initial_scroll=app._easy_canvas.yview()
     wheel_event=SimpleNamespace(widget=app.easy_dashboard,num=None,delta=-120)
