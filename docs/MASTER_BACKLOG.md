@@ -227,3 +227,12 @@ Sequence: the core offline implementation of active V4.6.0 P0/P1/P2 and V46-GENR
 - Updated GUI smoke verifies both route bindings and button placement at Tk scales 100%, 125%, 150%, and 200%, including scrollable table behavior. PASS locally; not Windows CI or a packaged EXE test.
 - Error status is preserved across polling refreshes. One QA integrity check passed read-only, but the live GUI PID is the older packaged build and process environment inspection is denied; the known QA database has no token/candidate/sample records. User screenshot connection state cannot be attributed to that DB. Do not call the OAuth/API/VPH live gate complete until the exact source/artifact process, QA DB and connected profile are matched and two real samples are saved.
 - No weighted backlog estimate is raised from a layout/callback smoke. New local changes are `mcrs/gui.py`, `tests/smoke_gui.py`, and these status/backlog notes; uncommitted, no CI on this SHA. Existing six-hour soak and earlier Windows CI evidence remain separate, unchanged evidence.
+
+### V46.0 operator-home usability closeout (2026-10-23)
+
+- Completed locally: eliminate duplicate title space; add separate schedule/stage progress bars; make schedule/research-break/search/observation-slot settings visible in the home summary; explicitly show the second VPH sample's next UTC and remaining wait; route the results page to actual candidate and VPH-detail views; block starting without an active profile and clear stale progress. The Autopilot/scheduler/VPH engine was not reimplemented.
+- Offline validation: 344 unittest (343 PASS, 1 opt-in browser SKIP), GUI smoke PASS, acceptance 29/29, stress 10,000/12 with zero failures, compileall and diff check PASS. Tk scaling smoke covers 100/125/150/200%; actual visual review remains separate.
+- P0: fresh remote SHA and Windows Push/PR CI for this new commit, then protected install only after same-SHA CI/artifact and DB/package rollback checks. Current remote query is blocked by configured `127.0.0.1:9` proxy refusal; no push/install was attempted.
+- P1: live VPH first and second sample, normal desktop visual inspection and latest-SHA six-hour wall-clock soak remain unverified.
+- P2: finalize distribution after P0/P1 evidence; no new feature scope added.
+- Next action: re-query remote branch SHA through the configured approved network route, then continue only if it still matches the stated base.

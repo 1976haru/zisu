@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
-from mcrs import store, vph
+from mcrs import store, vph, research_dashboard_presenter
 from mcrs.genres import REVIEW
 from mcrs.gui import Studio, ProfileDialog
 with WorkspaceTemp() as temp:
@@ -131,6 +131,9 @@ with WorkspaceTemp() as temp:
     assert callable(app._dashboard_start_research)
     assert app.operator_search_limit.cget("textvariable")==str(app.ai_max_calls)
     assert app.operator_slot_combo.cget("textvariable")==str(app.vph_observation_slots)
+    assert "연구/휴식" in app.operator_config_summary.get()
+    assert "검색 상한" in app.operator_config_summary.get()
+    assert "관측 슬롯" in app.operator_config_summary.get()
     app.main_tabs.select(app.home_page)
     app.schedule_hours.set("4");app.schedule_research_minutes.set("15");app.schedule_break_minutes.set("5")
     app.ai_max_calls.set("2")
@@ -158,6 +161,17 @@ with WorkspaceTemp() as temp:
         assert scheduled_start.call_args.kwargs["auto_settings"]["paid_ai"] is False
         assert app.tabs.select()==str(app.frames[7])
     store.update_vph_auto_start_intent(scheduled_start.call_args.kwargs["auto_request_id"],"cancelled")
+    saved_profile=app.active_id
+    app.active_id=None
+    with patch.object(app,"add_profile") as add_profile:
+        app._dashboard_start_research()
+        assert add_profile.call_count==0
+        assert "시작을 차단" in app.research_dashboard_summary.get()
+    app._refresh_research_dashboard(None)
+    assert float(app.research_schedule_bar.cget("value"))==0
+    assert float(app.research_stage_bar.cget("value"))==0
+    app.active_id=saved_profile
+    app._refresh_research_dashboard(saved_profile)
     assert hasattr(app,"research_dashboard_frame")
     assert app.research_dashboard_frame.master is app.home_page
     assert int(app.research_dashboard_frame.grid_info()["row"])==0
@@ -178,6 +192,27 @@ with WorkspaceTemp() as temp:
     app._refresh_research_dashboard(app.active_id)
     assert app.research_dashboard_summary.get().split(" · ",1)[0] in {
         "READY","RUNNING","BREAK","WAITING_SAMPLE_2","BLOCKED","ERROR","COMPLETE"}
+    waiting_model=research_dashboard_presenter.present(app.active_id)
+    waiting_model.update(state="WAITING_SAMPLE_2",remaining_seconds=3901,
+                         next_run_utc="2026-10-23T07:00:00+00:00")
+    waiting_model["counts"].update(sample_1=1,sample_2=0)
+    with patch("mcrs.gui.research_dashboard_presenter.present",return_value=waiting_model):
+        app._refresh_research_dashboard(app.active_id)
+    assert "두 번째 표본 대기" in app.research_dashboard_summary.get()
+    assert "2차 예정 UTC 2026-10-23T07:00:00+00:00" in app.research_dashboard_results.get()
+    assert "남은 65분 1초" in app.research_dashboard_results.get()
+    assert float(app.research_schedule_bar.cget("value"))==waiting_model["schedule_progress_percent"]
+    assert float(app.research_stage_bar.cget("value"))==100*waiting_model["stage_progress_completed"]/9
+    app._refresh_research_dashboard(app.active_id)
+    app.main_tabs.select(app.primary_pages["results"]);app.update_idletasks()
+    app.operator_candidate_results_button.invoke();app.update_idletasks()
+    assert app.main_tabs.select()==str(app.advanced_page)
+    assert app.tabs.select()==str(app.frames[2])
+    app.main_tabs.select(app.primary_pages["results"]);app.update_idletasks()
+    app.operator_vph_results_button.invoke();app.update_idletasks()
+    assert app.main_tabs.select()==str(app.advanced_page)
+    assert app.tabs.select()==str(app.frames[8])
+    app.main_tabs.select(app.home_page)
     assert {str(value) for value in app.dashboard_channels.cget("show")}=={"tree","headings"}
     assert len([row for row in store.list_google_accounts() if row["email"].casefold()=="shared@example.test"])==1
     assert app.dashboard_channels.exists("account:"+store.get_profile(first)["google_account_id"])

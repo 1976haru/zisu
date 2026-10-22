@@ -338,7 +338,7 @@ class Studio(tk.Tk):
         self.terms_seen=0
         self._header()
         self.main_tabs=ttk.Notebook(self)
-        self.main_tabs.pack(fill="both",expand=True,padx=15,pady=8)
+        self.main_tabs.pack(fill="both",expand=True,padx=10,pady=4)
         self.primary_pages={}
         for key,label in (("home","연구 운영 홈"),("settings","채널·장르 설정"),
                 ("results","후보·연구 결과"),("history","실행 이력·오류"),("advanced","고급 설정")):
@@ -450,7 +450,7 @@ class Studio(tk.Tk):
         self.destroy()
 
     def _header(self):
-        top=ttk.Frame(self,padding=(18,14))
+        top=ttk.Frame(self,padding=(14,8))
         top.pack(fill="x")
         identity=ttk.Frame(top)
         identity.pack(side="left",anchor="w")
@@ -463,8 +463,8 @@ class Studio(tk.Tk):
         ttk.Label(brand_text,text=f"{DISPLAY_NAME} · {KOREAN_NAME} · {DISPLAY_VERSION}",
                   font=("Malgun Gothic",17,"bold")).pack(anchor="w")
         ttk.Label(brand_text,text=SLOGAN,font=("Malgun Gothic",9)).pack(anchor="w")
-        bar=ttk.Frame(self,padding=(18,0))
-        bar.pack(fill="x",pady=(0,9))
+        bar=ttk.Frame(self,padding=(14,0))
+        bar.pack(fill="x",pady=(0,5))
         ttk.Label(bar,text="작업 채널").pack(side="left")
         self.profile_combo=ttk.Combobox(bar,textvariable=self.profile_choice,state="readonly",width=49)
         self.profile_combo.pack(side="left",padx=10)
@@ -496,6 +496,10 @@ class Studio(tk.Tk):
         self.research_stage_progress=tk.StringVar(value="단계 진행률 0/9")
         ttk.Label(progress,textvariable=self.research_schedule_progress).grid(row=0,column=0,sticky="w")
         ttk.Label(progress,textvariable=self.research_stage_progress).grid(row=0,column=1,sticky="e")
+        self.research_schedule_bar=ttk.Progressbar(progress,maximum=100,mode="determinate")
+        self.research_schedule_bar.grid(row=1,column=0,sticky="ew",padx=(0,8),pady=(2,0))
+        self.research_stage_bar=ttk.Progressbar(progress,maximum=100,mode="determinate")
+        self.research_stage_bar.grid(row=1,column=1,sticky="ew",padx=(8,0),pady=(2,0))
         self.research_stage_cards={};self.research_stage_card_labels={}
         stage_titles={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
             "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
@@ -525,7 +529,8 @@ class Studio(tk.Tk):
                 self.dashboard_resume_button,self.dashboard_stop_button,self.dashboard_results_button)):
             button.grid(row=0,column=column,sticky="ew",padx=2)
         self.research_dashboard_frame=operations
-        canvas=tk.Canvas(tab,highlightthickness=0,background=BG)
+        canvas=tk.Canvas(tab,highlightthickness=0,
+                         background=ttk.Style(self).lookup("TFrame","background") or BG)
         scrollbar=ttk.Scrollbar(tab,orient="vertical",command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=1,column=0,sticky="nsew"); scrollbar.grid(row=1,column=1,sticky="ns")
@@ -535,9 +540,8 @@ class Studio(tk.Tk):
         content.bind("<Configure>",lambda _e:canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>",lambda event:canvas.itemconfigure(self._easy_canvas_window,width=event.width))
         content.columnconfigure(0,weight=1); content.columnconfigure(1,weight=1)
-        ttk.Label(content,text=f"{DISPLAY_NAME} · {KOREAN_NAME} · {DISPLAY_VERSION}",font=("Malgun Gothic",20,"bold")).grid(row=0,column=0,sticky="w",pady=(3,4))
-        ttk.Label(content,text=f"{SLOGAN}  Google 계정과 채널은 구분되며, 채널별 조사 기록과 인증은 서로 섞이지 않습니다.",
-                  wraplength=1000).grid(row=1,column=0,columnspan=2,sticky="w",pady=(0,8))
+        # Product title and channel identity already live in the fixed app header.
+        # Drop the repeated heading so the useful home content starts sooner.
         self.easy_progress=tk.StringVar(value="먼저 조사 채널을 만들거나 기존 채널을 선택하세요.")
         ttk.Label(content,textvariable=self.easy_progress,wraplength=1000,font=("Malgun Gothic",13,"bold")).grid(row=2,column=0,columnspan=2,sticky="ew",pady=5)
         account_panel=ttk.LabelFrame(content,text="Google 계정 → YouTube 채널 → 조사 프로필",padding=8)
@@ -661,8 +665,15 @@ class Studio(tk.Tk):
         self.operator_results_text=tk.StringVar(value="결과 측정 전 · VPH UNKNOWN")
         ttk.Label(results,textvariable=self.operator_results_text,wraplength=1000,justify="left",
                   font=("Malgun Gothic",12)).grid(row=1,column=0,sticky="ew",pady=8)
-        ttk.Button(results,text="후보 판단 상세 보기",command=lambda:self._select_detail_tab(2)).grid(
-            row=2,column=0,sticky="w",pady=8)
+        result_actions=ttk.Frame(results);result_actions.grid(row=2,column=0,sticky="w",pady=8)
+        self.operator_candidate_results_button=ttk.Button(
+            result_actions,text="후보 목록·판정 열기",command=lambda:self._select_detail_tab(2))
+        self.operator_candidate_results_button.pack(
+            side="left",padx=(0,6))
+        self.operator_vph_results_button=ttk.Button(
+            result_actions,text="VPH 표본·관측 이력 열기",command=lambda:self._select_detail_tab(8))
+        self.operator_vph_results_button.pack(
+            side="left",padx=6)
 
         history=self.primary_pages["history"];history.columnconfigure(0,weight=1)
         ttk.Label(history,text="실행 이력·오류",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(8,10))
@@ -695,7 +706,13 @@ class Studio(tk.Tk):
             return
         profile=self.current_profile()
         if not profile:
-            summary="선택된 프로필 없음 · 채널을 추가하거나 선택하세요."
+            total=self.schedule_hours.get() if hasattr(self,"schedule_hours") else "8"
+            research=self.schedule_research_minutes.get() if hasattr(self,"schedule_research_minutes") else "20"
+            pause=self.schedule_break_minutes.get() if hasattr(self,"schedule_break_minutes") else "20"
+            calls=self.ai_max_calls.get() if hasattr(self,"ai_max_calls") else "3"
+            slots=self.vph_observation_slots.get() if hasattr(self,"vph_observation_slots") else "10"
+            summary=(f"프로필 미선택 · 연구 시작 차단 · 기본 설정 미리보기: 연구 {total}시간 · "
+                f"연구/휴식 {research}/{pause}분 · 검색 상한 {calls}회 · 관측 슬롯 {slots}개")
             result="결과 측정 전 · 후보 0 · FIT/REVIEW/EXCLUDE 0 · VPH UNKNOWN"
             history="저장된 프로필이 없습니다. 연구는 시작되지 않았습니다."
         else:
@@ -790,7 +807,10 @@ class Studio(tk.Tk):
 
     def _dashboard_start_research(self):
         if not self.active_id:
-            self.add_profile();return
+            self.research_dashboard_summary.set("READY · 프로필 미선택으로 연구 시작을 차단했습니다.")
+            self.research_dashboard_checkpoint.set("조치: 채널·장르 설정에서 프로필을 선택한 뒤 다시 확인하세요.")
+            self.dashboard_start_button.configure(state="disabled")
+            return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         self._starting_from_easy_dashboard=True
         try:self.start_vph_scheduled_research()
@@ -818,7 +838,10 @@ class Studio(tk.Tk):
     def start_vph_scheduled_research(self):
         """Persist one explicit request, then start the existing pipeline once."""
         if not self.active_id:
-            self.add_profile();return
+            if hasattr(self,"research_dashboard_summary"):
+                self.research_dashboard_summary.set("READY · 프로필 미선택으로 연구 시작을 차단했습니다.")
+                self.research_dashboard_checkpoint.set("조치: 채널·장르 설정에서 프로필을 선택한 뒤 다시 확인하세요.")
+            return
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         if not self.__dict__.get("_starting_from_easy_dashboard",False):
             self._select_detail_tab(7)
@@ -910,6 +933,10 @@ class Studio(tk.Tk):
             return
         if not profile_id:
             self.research_dashboard_summary.set("READY · 연구 프로필을 선택하세요.")
+            self.research_schedule_progress.set("일정 경과율 0%")
+            self.research_stage_progress.set("단계 진행률 0/9")
+            self.research_schedule_bar.configure(value=0)
+            self.research_stage_bar.configure(value=0)
             self.research_dashboard_checkpoint.set("체크포인트: 아직 시작하지 않음")
             self.research_dashboard_results.set("결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0 · 결과 측정 전")
             self._set_research_stage_cards(None)
@@ -919,6 +946,10 @@ class Studio(tk.Tk):
             model=research_dashboard_presenter.present(profile_id)
         except (ValueError,sqlite3.Error,OSError):
             self.research_dashboard_summary.set("ERROR · 운영 상태를 안전하게 읽지 못했습니다.")
+            self.research_schedule_progress.set("일정 경과율 확인 불가")
+            self.research_stage_progress.set("단계 진행률 확인 불가")
+            self.research_schedule_bar.configure(value=0)
+            self.research_stage_bar.configure(value=0)
             self.research_dashboard_checkpoint.set("오류 단계: 상태 읽기 · 코드: dashboard_read_error · 자동 재개 불가 · 다음 조치: 저장된 체크포인트를 확인하세요.")
             self._set_research_stage_cards(None,error=True)
             self._refresh_operator_pages(None)
@@ -926,13 +957,21 @@ class Studio(tk.Tk):
         remaining=model["remaining_seconds"]
         remaining_text="-" if remaining is None else f"{remaining//60}분 {remaining%60}초"
         next_time=model["next_run_utc"] or "-"
+        phase_text={"research":"연구 중","break":"휴식 중","waiting":"예약 대기",
+                    "paused":"일시정지","ready":"시작 전"}.get(model["current_phase"],model["current_phase"])
+        if model["state"]=="WAITING_SAMPLE_2":
+            phase_text="두 번째 표본 대기"
         self.research_dashboard_summary.set(
             f"{model['state']} · 일정 {model['schedule_progress_percent']}% · "
             f"단계 {model['stage_progress_completed']}/{model['stage_progress_total']} · "
-            f"현재 {model['current_phase']} · 다음 {next_time} · 남음 {remaining_text}")
+            f"{phase_text} · 다음 동작 UTC {next_time} · 남은 시간 {remaining_text}")
         self.research_schedule_progress.set(f"일정 경과율 {model['schedule_progress_percent']}%")
         self.research_stage_progress.set(
             f"단계 진행률 {model['stage_progress_completed']}/{model['stage_progress_total']}")
+        self.research_schedule_bar.configure(value=model["schedule_progress_percent"])
+        stage_percent=(100*model["stage_progress_completed"]/model["stage_progress_total"]
+                       if model["stage_progress_total"] else 0)
+        self.research_stage_bar.configure(value=stage_percent)
         self._set_research_stage_cards(model)
         checkpoint=(f"마지막 성공: {model['last_success_stage']} · 요청 {model['request_id'] or '-'} · "
             f"일정 {model['schedule_id'] or '-'} · 자동 재개 {'가능' if model['auto_resume'] else '불가'}")
@@ -949,9 +988,16 @@ class Studio(tk.Tk):
             suffix=" · 실측 불충분"
         else:
             suffix=" · 연구 진행 중"
+        sample_state=f"표본 저장: 첫째 {counts['sample_1']} · 둘째 {counts['sample_2']}"
+        if model["state"]=="WAITING_SAMPLE_2":
+            sample_state+=f" · 2차 예정 UTC {next_time} (남은 {remaining_text})"
+        elif not counts["sample_1"]:
+            sample_state+=" · 첫 표본 대기"
+        elif not counts["sample_2"]:
+            sample_state+=" · 두 번째 표본 대기"
         self.research_dashboard_results.set(
             f"후보 {counts['candidates']} · FIT {counts['fit']} · REVIEW {counts['review']} · EXCLUDE {counts['exclude']}\n"
-            f"관측 {counts['observing']} · 첫/두 번째 표본 {counts['sample_1']}/{counts['sample_2']} · "
+            f"관측 중 {counts['observing']} · {sample_state}\n"
             f"VPH A/B {counts['vph_a']}/{counts['vph_b']} · UNKNOWN/REVIEW "
             f"{counts['unknown']}/{counts['vph_review']}{suffix}")
         self._refresh_operator_pages(model)
