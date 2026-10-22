@@ -73,11 +73,12 @@ def present(profile_id, path=None, *, now=None):
     counts = snapshot.get("candidate_counts", {})
     first_count = int(snapshot.get("first_sample_count", 0))
     second_count = int(snapshot.get("second_sample_count", 0))
+    searched = bool((schedule and schedule.get("search_calls_used", 0)) or job)
     stages = {
         "setup": bool(profile),
-        "auth": bool(intent or schedule),
-        "search": bool(counts.get("total", 0) or (schedule and schedule.get("search_calls_used", 0))),
-        "genre_evaluation": bool(counts.get("total", 0)),
+        "auth": bool(profile.get("google_account_id") or schedule or job),
+        "search": searched,
+        "genre_evaluation": bool(job),
         "target_selection": bool(job and job.get("targets")),
         "sample_1": first_count > 0,
         "sample_2": second_count > 0,
@@ -113,6 +114,7 @@ def present(profile_id, path=None, *, now=None):
         "genre": profile.get("genre", ""),
         "request_id": (intent or {}).get("request_id", ""),
         "schedule_id": (schedule or {}).get("id", ""),
+        "job_id": (job or {}).get("id", ""),
         "schedule_progress_percent": schedule_progress,
         "stage_progress_completed": completed,
         "stage_progress_total": len(STAGE_KEYS),
@@ -126,6 +128,25 @@ def present(profile_id, path=None, *, now=None):
         "stop_reason": reason,
         "auto_resume": state in {"RUNNING", "BREAK", "WAITING_SAMPLE_2"} or (state == "BLOCKED" and error_code.startswith("system_")),
         "next_action": next_action,
+        "can_start": bool(
+            state == "READY" and
+            (not intent or intent.get("status") in {"completed", "cancelled"}) and
+            (not schedule or schedule.get("state") in {"completed", "cancelled"}) and
+            (not job or job.get("state") in {"COMPLETED", "CANCELLED"})
+        ),
+        "can_pause": state in {"RUNNING", "WAITING_SAMPLE_2"} and bool(
+            (schedule and schedule.get("state") == "running" and not schedule.get("search_in_flight")) or
+            (job and job.get("state") in {"READY", "COLLECTING_FIRST", "WAITING_SECOND", "COLLECTING_SECOND"})
+        ),
+        "can_resume": bool(
+            (schedule and schedule.get("state") == "paused" and not schedule.get("search_in_flight")) or
+            (job and job.get("state") == "PAUSED")
+        ),
+        "can_stop": bool(
+            (schedule and schedule.get("state") in {"scheduled", "running", "paused"} and
+             not schedule.get("search_in_flight")) or
+            (job and job.get("state") in {"READY", "COLLECTING_FIRST", "WAITING_SECOND", "COLLECTING_SECOND", "PAUSED"})
+        ),
         "counts": {
             "candidates": int(counts.get("total", 0)),
             "fit": int(counts.get(genres.FIT, 0)),
@@ -139,5 +160,5 @@ def present(profile_id, path=None, *, now=None):
             "unknown": int(snapshot.get("vph_unknown_count", 0)),
             "vph_review": int(snapshot.get("vph_review_count", 0)),
         },
-        "insufficient_measurement": bool(job) and not (job.get("state") == "COMPLETED" and second_count > 0),
+        "insufficient_measurement": bool(job) and not (state == "COMPLETE" and second_count > 0),
     }

@@ -464,11 +464,55 @@ class Studio(tk.Tk):
         ttk.Label(bar,textvariable=self.profile_description).pack(side="left",padx=12)
 
     def _easy_ui(self, tab):
-        tab.columnconfigure(0, weight=1); tab.rowconfigure(0, weight=1)
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+        operations=ttk.LabelFrame(tab,text="원클릭 연구 운영",padding=(10,7))
+        operations.grid(row=0,column=0,columnspan=2,sticky="ew",padx=8,pady=(5,3))
+        operations.columnconfigure(0,weight=1);operations.columnconfigure(1,weight=1)
+        self.research_dashboard_summary=tk.StringVar(value="READY · 연구 설정과 연결 상태를 확인하세요.")
+        self.research_dashboard_checkpoint=tk.StringVar(value="체크포인트: 아직 시작하지 않음")
+        self.research_dashboard_results=tk.StringVar(value="결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0 · 결과 측정 전")
+        ttk.Label(operations,textvariable=self.research_dashboard_summary,font=("Malgun Gothic",11,"bold"),
+                  wraplength=1150).grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,3))
+        progress=ttk.Frame(operations)
+        progress.grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,4))
+        progress.columnconfigure(0,weight=1);progress.columnconfigure(1,weight=1)
+        self.research_schedule_progress=tk.StringVar(value="일정 경과율 0%")
+        self.research_stage_progress=tk.StringVar(value="단계 진행률 0/9")
+        ttk.Label(progress,textvariable=self.research_schedule_progress).grid(row=0,column=0,sticky="w")
+        ttk.Label(progress,textvariable=self.research_stage_progress).grid(row=0,column=1,sticky="e")
+        self.research_stage_cards={};self.research_stage_card_labels={}
+        stage_titles={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
+            "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
+            "vph":"VPH 계산","final_result":"최종 결과"}
+        stage_board=ttk.Frame(operations);stage_board.grid(row=2,column=0,columnspan=2,sticky="ew",pady=2)
+        for column in range(3):stage_board.columnconfigure(column,weight=1,uniform="stage")
+        for index,key in enumerate(research_dashboard_presenter.STAGE_KEYS):
+            value=tk.StringVar(value=f"○ {index+1}. {stage_titles[key]}\n대기")
+            card=tk.Label(stage_board,textvariable=value,anchor="w",justify="left",relief="solid",bd=1,
+                          padx=7,pady=3,background="#f4f5f7",foreground="#30343b")
+            card.grid(row=index//3,column=index%3,sticky="nsew",padx=2,pady=2)
+            self.research_stage_cards[key]=value;self.research_stage_card_labels[key]=card
+        status_row=ttk.Frame(operations);status_row.grid(row=3,column=0,columnspan=2,sticky="ew",pady=(3,1))
+        status_row.columnconfigure(0,weight=1);status_row.columnconfigure(1,weight=1)
+        ttk.Label(status_row,textvariable=self.research_dashboard_checkpoint,wraplength=570,justify="left").grid(
+            row=0,column=0,sticky="nw",padx=(0,8))
+        ttk.Label(status_row,textvariable=self.research_dashboard_results,wraplength=570,justify="left").grid(
+            row=0,column=1,sticky="nw",padx=(8,0))
+        controls=ttk.Frame(operations);controls.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(4,0))
+        for column in range(5):controls.columnconfigure(column,weight=1,uniform="control")
+        self.dashboard_start_button=ttk.Button(controls,text="연구 시작",command=self._dashboard_start_research,style="Accent.TButton")
+        self.dashboard_pause_button=ttk.Button(controls,text="일시정지",command=lambda:self._dashboard_control_research("pause"))
+        self.dashboard_resume_button=ttk.Button(controls,text="재개",command=lambda:self._dashboard_control_research("resume"))
+        self.dashboard_stop_button=ttk.Button(controls,text="안전 중단",command=lambda:self._dashboard_control_research("stop"))
+        self.dashboard_results_button=ttk.Button(controls,text="결과 보기",command=lambda:self.tabs.select(self.frames[2]))
+        for column,button in enumerate((self.dashboard_start_button,self.dashboard_pause_button,
+                self.dashboard_resume_button,self.dashboard_stop_button,self.dashboard_results_button)):
+            button.grid(row=0,column=column,sticky="ew",padx=2)
+        self.research_dashboard_frame=operations
         canvas=tk.Canvas(tab,highlightthickness=0,background=BG)
         scrollbar=ttk.Scrollbar(tab,orient="vertical",command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0,column=0,sticky="nsew"); scrollbar.grid(row=0,column=1,sticky="ns")
+        canvas.grid(row=1,column=0,sticky="nsew"); scrollbar.grid(row=1,column=1,sticky="ns")
         content=ttk.Frame(canvas,padding=(12,10)); self.easy_dashboard=content
         self._easy_canvas=canvas
         self._easy_canvas_window=canvas.create_window((0,0),window=content,anchor="nw")
@@ -517,25 +561,12 @@ class Studio(tk.Tk):
         ttk.Label(content,textvariable=self.dashboard_vph_text,wraplength=1000).grid(row=11,column=0,columnspan=2,sticky="w",pady=3)
         self.easy_next=ttk.Button(content,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
         self.easy_next.grid(row=12,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
-        operations=ttk.LabelFrame(content,text="원클릭 연구 운영",padding=10)
-        operations.grid(row=13,column=0,columnspan=2,sticky="ew",pady=6)
-        operations.columnconfigure(0,weight=1);operations.columnconfigure(1,weight=1)
-        self.research_dashboard_summary=tk.StringVar(value="READY · 연구 설정과 연결 상태를 확인하세요.")
-        self.research_dashboard_flow=tk.StringVar(value="설정/인증 → 자동 검색 → 장르 평가 → 관측 대상 → 첫 표본 → 두 번째 표본 → VPH → 결과")
-        self.research_dashboard_checkpoint=tk.StringVar(value="체크포인트: 아직 시작하지 않음")
-        self.research_dashboard_results=tk.StringVar(value="결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0")
-        ttk.Label(operations,textvariable=self.research_dashboard_summary,font=("Malgun Gothic",12,"bold"),wraplength=1000).grid(row=0,column=0,columnspan=2,sticky="ew",pady=3)
-        ttk.Label(operations,textvariable=self.research_dashboard_flow,wraplength=1000).grid(row=1,column=0,columnspan=2,sticky="ew",pady=3)
-        ttk.Label(operations,textvariable=self.research_dashboard_checkpoint,wraplength=1000).grid(row=2,column=0,sticky="nw",padx=(0,8),pady=3)
-        ttk.Label(operations,textvariable=self.research_dashboard_results,wraplength=1000).grid(row=2,column=1,sticky="nw",padx=(8,0),pady=3)
-        self.research_dashboard_frame=operations
         actions=ttk.Frame(content);actions.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
         actions.columnconfigure(0,weight=1)
         for index,(label,command,style_name) in enumerate((
             ("Google 계정 연결",lambda:self.tabs.select(self.frames[0]),"TButton"),
             ("장르·채널 설정",self.edit_profile,"TButton"),
             ("연구 시간 설정",lambda:self.tabs.select(self.frames[7]),"TButton"),
-            ("연구 시작",self._dashboard_start_research,"Accent.TButton"),
             ("결과 확인",lambda:self.tabs.select(self.frames[2]),"TButton"),
             ("Google 연결 도우미",self.open_google_wizard,"TButton"))):
             ttk.Button(actions,text=label,command=command,style=style_name).grid(row=index,column=0,sticky="ew",padx=3,pady=3)
@@ -564,9 +595,47 @@ class Studio(tk.Tk):
         self.analytics_dashboard_text=tk.StringVar(value="아직 성과를 가져오지 않았습니다.")
         ttk.Label(performance,textvariable=self.analytics_dashboard_text,wraplength=1000,justify="left").grid(row=2,column=0,columnspan=2,sticky="w",pady=4)
         ttk.Label(performance,text="노출수·썸네일 클릭률은 reports.query 미지원 지표입니다. 별도 Reporting API Reach 보고서는 아직 연결되지 않았습니다.",wraplength=1000,foreground="#8a4b08").grid(row=3,column=0,columnspan=3,sticky="w",pady=4)
+        self._install_easy_wheel_support(content)
         self._easy_enter_button=None
         self.bind_all("<Return>",self._easy_enter,add="+")
         self.bind_all("<Escape>",self._easy_escape,add="+")
+
+    def _install_easy_wheel_support(self,root):
+        """Add tab-local wheel scrolling without intercepting nested scrolling controls."""
+        tag=f"ZisuEasyWheel{id(self)}"
+        self._easy_wheel_tag=tag
+        self.bind_class(tag,"<MouseWheel>",self._easy_mousewheel,add="+")
+        self.bind_class(tag,"<Button-4>",self._easy_mousewheel,add="+")
+        self.bind_class(tag,"<Button-5>",self._easy_mousewheel,add="+")
+        excluded={"Treeview","TCombobox","Combobox","Listbox","Text","TEntry","Entry","TSpinbox","Spinbox"}
+        pending=[root]
+        while pending:
+            widget=pending.pop();pending.extend(widget.winfo_children())
+            if widget.winfo_class() in excluded:
+                continue
+            tags=list(widget.bindtags())
+            if tag not in tags:
+                widget.bindtags((tag,*tags))
+        canvas_tags=list(self._easy_canvas.bindtags())
+        if tag not in canvas_tags:
+            self._easy_canvas.bindtags((tag,*canvas_tags))
+
+    def _easy_mousewheel(self,event):
+        if self.tabs.select()!=str(self.tabs.tabs()[0]):
+            return None
+        widget=event.widget
+        if widget.winfo_class() in {"Treeview","TCombobox","Combobox","Listbox","Text","TEntry","Entry","TSpinbox","Spinbox"}:
+            return None
+        if getattr(event,"num",None)==4:
+            units=-1
+        elif getattr(event,"num",None)==5:
+            units=1
+        else:
+            delta=int(getattr(event,"delta",0) or 0)
+            if not delta:return None
+            units=-1 if delta>0 else 1
+        self._easy_canvas.yview_scroll(units,"units")
+        return "break"
 
     def _easy_enter(self, _event=None):
         if self.tabs.select() == str(self.tabs.tabs()[0]):
@@ -602,6 +671,25 @@ class Studio(tk.Tk):
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         self.tabs.select(self.frames[7])
         self.start_vph_scheduled_research()
+
+    def _dashboard_control_research(self,action):
+        """Route a dashboard control only to the selected profile's persisted job."""
+        if action not in {"pause","resume","stop"} or not self.active_id:
+            return
+        try:
+            model=research_dashboard_presenter.present(self.active_id)
+            job=self._current_vph_job()
+        except (ValueError,sqlite3.Error,OSError):
+            self.research_dashboard_checkpoint.set("제어 차단: 현재 연구 세션을 안전하게 확인하지 못했습니다.")
+            return
+        allowed={"pause":model["can_pause"],"resume":model["can_resume"],"stop":model["can_stop"]}[action]
+        if (not allowed or not job or job.get("profile_id")!=self.active_id or
+                job.get("id")!=model.get("job_id")):
+            self.research_dashboard_checkpoint.set("제어 차단: 선택한 프로필의 현재 연구 세션과 일치하지 않습니다.")
+            return
+        {"pause":self.pause_vph_research,"resume":self.resume_vph_research,
+         "stop":self.cancel_vph_research}[action]()
+        self._refresh_research_dashboard(self.active_id)
 
     def start_vph_scheduled_research(self):
         """Persist one explicit request, then start the existing pipeline once."""
@@ -697,14 +785,16 @@ class Studio(tk.Tk):
             return
         if not profile_id:
             self.research_dashboard_summary.set("READY · 연구 프로필을 선택하세요.")
-            self.research_dashboard_flow.set("설정/인증 → 자동 검색 → 장르 평가 → 관측 대상 → 첫 표본 → 두 번째 표본 → VPH → 결과")
             self.research_dashboard_checkpoint.set("체크포인트: 아직 시작하지 않음")
-            self.research_dashboard_results.set("결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0")
+            self.research_dashboard_results.set("결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0 · 결과 측정 전")
+            self._set_research_stage_cards(None)
             return
         try:
             model=research_dashboard_presenter.present(profile_id)
         except (ValueError,sqlite3.Error,OSError):
             self.research_dashboard_summary.set("ERROR · 운영 상태를 안전하게 읽지 못했습니다.")
+            self.research_dashboard_checkpoint.set("오류 단계: 상태 읽기 · 코드: dashboard_read_error · 자동 재개 불가 · 다음 조치: 저장된 체크포인트를 확인하세요.")
+            self._set_research_stage_cards(None,error=True)
             return
         remaining=model["remaining_seconds"]
         remaining_text="-" if remaining is None else f"{remaining//60}분 {remaining%60}초"
@@ -713,12 +803,10 @@ class Studio(tk.Tk):
             f"{model['state']} · 일정 {model['schedule_progress_percent']}% · "
             f"단계 {model['stage_progress_completed']}/{model['stage_progress_total']} · "
             f"현재 {model['current_phase']} · 다음 {next_time} · 남음 {remaining_text}")
-        labels={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
-            "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
-            "vph":"VPH","final_result":"최종 결과"}
-        self.research_dashboard_flow.set(" → ".join(
-            ("✓ " if model["stages"][key] else "○ ")+labels[key]
-            for key in research_dashboard_presenter.STAGE_KEYS))
+        self.research_schedule_progress.set(f"일정 경과율 {model['schedule_progress_percent']}%")
+        self.research_stage_progress.set(
+            f"단계 진행률 {model['stage_progress_completed']}/{model['stage_progress_total']}")
+        self._set_research_stage_cards(model)
         checkpoint=(f"마지막 성공: {model['last_success_stage']} · 요청 {model['request_id'] or '-'} · "
             f"일정 {model['schedule_id'] or '-'} · 자동 재개 {'가능' if model['auto_resume'] else '불가'}")
         if model["error_code"]:
@@ -726,12 +814,51 @@ class Studio(tk.Tk):
                 f"사유: {model['stop_reason'] or '-'} · 다음 조치: {model['next_action']}")
         self.research_dashboard_checkpoint.set(checkpoint)
         counts=model["counts"]
-        suffix=" · 실측 불충분" if model["insufficient_measurement"] else " · 최종 연구 완료"
+        if model["state"]=="COMPLETE":
+            suffix=" · 최종 연구 완료"
+        elif model["state"]=="READY":
+            suffix=" · 결과 측정 전"
+        elif model["insufficient_measurement"]:
+            suffix=" · 실측 불충분"
+        else:
+            suffix=" · 연구 진행 중"
         self.research_dashboard_results.set(
             f"후보 {counts['candidates']} · FIT {counts['fit']} · REVIEW {counts['review']} · EXCLUDE {counts['exclude']}\n"
             f"관측 {counts['observing']} · 첫/두 번째 표본 {counts['sample_1']}/{counts['sample_2']} · "
             f"VPH A/B {counts['vph_a']}/{counts['vph_b']} · UNKNOWN/REVIEW "
             f"{counts['unknown']}/{counts['vph_review']}{suffix}")
+
+    def _set_research_stage_cards(self,model,error=False):
+        titles={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
+            "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
+            "vph":"VPH 계산","final_result":"최종 결과"}
+        stages=(model or {}).get("stages",{})
+        incomplete=[key for key in research_dashboard_presenter.STAGE_KEYS if not stages.get(key)]
+        current=("sample_2" if model and model.get("state")=="WAITING_SAMPLE_2" else
+                 incomplete[0] if incomplete and model and model.get("state") not in {"READY","COMPLETE"} else None)
+        error_key=(model or {}).get("error_stage","")
+        if error_key not in research_dashboard_presenter.STAGE_KEYS:
+            error_key=current or (incomplete[0] if incomplete else "final_result")
+        for index,key in enumerate(research_dashboard_presenter.STAGE_KEYS):
+            if stages.get(key):
+                symbol,status,background,foreground="✓","완료","#e5f4ea","#185c37"
+            elif (error or (model and model.get("state")=="ERROR")) and key==error_key:
+                symbol,status,background,foreground="!","오류","#fde8e7","#9d1c17"
+            elif model and model.get("state")=="BLOCKED" and key==error_key:
+                symbol,status,background,foreground="!","차단","#fff1cf","#7a4b00"
+            elif key==current:
+                symbol,status,background,foreground="▶","진행 중","#e5efff","#174a8b"
+            else:
+                symbol,status,background,foreground="○","대기","#f4f5f7","#30343b"
+            self.research_stage_cards[key].set(f"{symbol} {index+1}. {titles[key]}\n{status}")
+            self.research_stage_card_labels[key].configure(background=background,foreground=foreground)
+        if hasattr(self,"dashboard_start_button"):
+            enabled=lambda value:"normal" if value else "disabled"
+            self.dashboard_start_button.configure(state=enabled(bool(model and model.get("can_start"))))
+            self.dashboard_pause_button.configure(state=enabled(bool(model and model.get("can_pause"))))
+            self.dashboard_resume_button.configure(state=enabled(bool(model and model.get("can_resume"))))
+            self.dashboard_stop_button.configure(state=enabled(bool(model and model.get("can_stop"))))
+            self.dashboard_results_button.configure(state=enabled(bool(model)))
 
     def _dashboard_insert_profile(self,parent,profile):
         profile_id=profile["id"];node="profile:"+profile_id

@@ -2,6 +2,7 @@
 import os, sys, threading, time, tkinter as tk
 from tkinter import ttk
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
@@ -139,6 +140,23 @@ with WorkspaceTemp() as temp:
         assert app.tabs.select()==str(app.frames[7])
     store.update_vph_auto_start_intent(scheduled_start.call_args.kwargs["auto_request_id"],"cancelled")
     assert hasattr(app,"research_dashboard_frame")
+    assert app.research_dashboard_frame.master is app.tabs.nametowidget(app.tabs.tabs()[0])
+    assert int(app.research_dashboard_frame.grid_info()["row"])==0
+    assert len(app.research_stage_cards)==9
+    assert "최종 연구 완료" not in app.research_dashboard_results.get()
+    assert "결과 측정 전" in app.research_dashboard_results.get()
+    assert app.dashboard_start_button.cget("text")=="연구 시작"
+    assert app.dashboard_pause_button.cget("text")=="일시정지"
+    assert app.dashboard_resume_button.cget("text")=="재개"
+    assert app.dashboard_stop_button.cget("text")=="안전 중단"
+    synthetic={"state":"ERROR","error_stage":"search","stages":{key:False for key in app.research_stage_cards},
+               "can_start":False,"can_pause":False,"can_resume":False,"can_stop":False}
+    app._set_research_stage_cards(synthetic)
+    assert "!" in app.research_stage_cards["search"].get() and "오류" in app.research_stage_cards["search"].get()
+    synthetic["state"]="BLOCKED"
+    app._set_research_stage_cards(synthetic)
+    assert "차단" in app.research_stage_cards["search"].get()
+    app._refresh_research_dashboard(app.active_id)
     assert app.research_dashboard_summary.get().split(" · ",1)[0] in {
         "READY","RUNNING","BREAK","WAITING_SAMPLE_2","BLOCKED","ERROR","COMPLETE"}
     assert {str(value) for value in app.dashboard_channels.cget("show")}=={"tree","headings"}
@@ -200,6 +218,26 @@ with WorkspaceTemp() as temp:
     # Mechanically exercise Tk scaling and scrollable layout; this is not a visual screenshot check.
     easy_tab=app.tabs.tabs()[0]
     app.tabs.select(easy_tab);app.update()
+    easy_widget=app.tabs.nametowidget(easy_tab)
+    target_height=max(650,app.winfo_height()+(605-easy_widget.winfo_height()))
+    app.geometry(f"1280x{target_height}");app.update()
+    assert 603<=easy_widget.winfo_height()<=607, easy_widget.winfo_height()
+    assert app.research_dashboard_frame.winfo_ismapped()
+    assert app.research_dashboard_frame.winfo_rooty()>=easy_widget.winfo_rooty()
+    assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= app._easy_canvas.winfo_rooty()+1
+    assert app.dashboard_start_button.winfo_ismapped()
+    initial_scroll=app._easy_canvas.yview()
+    wheel_event=SimpleNamespace(widget=app.easy_dashboard,num=None,delta=-120)
+    assert app._easy_mousewheel(wheel_event)=="break"
+    app.update_idletasks()
+    assert app._easy_canvas.yview()[0]>=initial_scroll[0]
+    nested_event=SimpleNamespace(widget=app.dashboard_channels,num=None,delta=-120)
+    assert app._easy_mousewheel(nested_event) is None
+    linux_wheel=SimpleNamespace(widget=app.easy_dashboard,num=5,delta=0)
+    assert app._easy_mousewheel(linux_wheel)=="break"
+    app.tabs.select(app.frames[1]);app.update_idletasks()
+    assert app._easy_mousewheel(wheel_event) is None
+    app.tabs.select(easy_tab);app.update_idletasks()
     for scaling in (1.0,1.25,1.5,2.0):
         app.tk.call("tk","scaling",scaling)
         app.update_idletasks()
@@ -220,6 +258,15 @@ with WorkspaceTemp() as temp:
                     assert child.winfo_width()>0 and child.winfo_height()>0
                     assert child.winfo_height()+2>=child.winfo_reqheight()
         assert app.easy_next.cget("text")
+        easy_widget=app.tabs.nametowidget(easy_tab)
+        assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= easy_widget.winfo_rooty()+easy_widget.winfo_height()
+        for card in app.research_stage_card_labels.values():
+            assert card.winfo_width()>0 and card.winfo_height()+2>=card.winfo_reqheight()
+        for button in (app.dashboard_start_button,app.dashboard_pause_button,
+                       app.dashboard_resume_button,app.dashboard_stop_button,app.dashboard_results_button):
+            assert button.winfo_width()>0 and button.winfo_height()+2>=button.winfo_reqheight()
+        app.dashboard_start_button.focus_set();app.update_idletasks()
+        assert app.focus_get() is app.dashboard_start_button
     vph_tab=app.tabs.tabs()[9]
     for scaling in (1.0,1.25,1.5,2.0):
         app.tk.call("tk","scaling",scaling);app.tabs.select(vph_tab);app.update()

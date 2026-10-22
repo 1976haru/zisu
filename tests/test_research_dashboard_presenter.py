@@ -1,8 +1,11 @@
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from mcrs import genres, research_dashboard_presenter as presenter, store, vph
+from mcrs.gui import Studio
 from tests.support import WorkspaceTemp
 
 
@@ -45,6 +48,19 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertTrue(model["stages"]["sample_1"])
         self.assertFalse(model["stages"]["sample_2"])
         self.assertTrue(model["insufficient_measurement"])
+        self.assertTrue(model["can_pause"])
+        self.assertTrue(model["can_stop"])
+        self.assertFalse(model["can_resume"])
+
+    def test_ready_is_not_complete_and_can_start(self):
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("READY",model["state"])
+        self.assertFalse(model["stages"]["final_result"])
+        self.assertEqual(1,model["stage_progress_completed"])
+        self.assertTrue(model["can_start"])
+        self.assertFalse(model["can_pause"])
+        self.assertFalse(model["can_resume"])
+        self.assertFalse(model["can_stop"])
 
     def test_uncertain_request_is_blocked_and_never_complete(self):
         self._persist_flow(job="READY")
@@ -62,6 +78,31 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertGreater(model["schedule_progress_percent"],0)
         self.assertFalse(model["stages"]["sample_1"])
 
+    def test_running_and_error_states_keep_safe_controls(self):
+        self._persist_flow(job="COLLECTING_FIRST")
+        running=presenter.present(self.profile,self.db)
+        self.assertEqual("RUNNING",running["state"])
+        self.assertTrue(running["can_pause"])
+        self.assertTrue(running["can_stop"])
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET state='FAILED',message='safe failure' WHERE id='job_1'")
+        failed=presenter.present(self.profile,self.db)
+        self.assertEqual("ERROR",failed["state"])
+        self.assertEqual("vph_failed",failed["error_code"])
+        self.assertFalse(failed["stages"]["final_result"])
+
+    def test_historical_candidates_do_not_complete_current_ready_stages(self):
+        store.save_candidates(self.profile,[{"video_id":"hist0000001","video_title":"Old candidate",
+            "genre_decision":genres.FIT,"genre_score":90}],path=self.db)
+        with store.connect(self.db) as db:
+            db.execute("UPDATE candidates SET genre_decision=? WHERE profile_id=? AND video_id=?",
+                       (genres.FIT,self.profile,"hist0000001"))
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("READY",model["state"])
+        self.assertFalse(model["stages"]["search"])
+        self.assertFalse(model["stages"]["genre_evaluation"])
+        self.assertEqual(1,model["counts"]["candidates"])
+
     def test_complete_requires_real_second_sample_and_completed_vph_job(self):
         self._persist_flow(intent="completed",schedule="completed",phase="complete",job="COMPLETED")
         first=datetime(2026,1,1,tzinfo=timezone.utc)
@@ -72,6 +113,18 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertTrue(model["stages"]["final_result"])
         self.assertEqual(1,model["counts"]["sample_2"])
         self.assertFalse(model["insufficient_measurement"])
+        self.assertFalse(model["can_start"])
+        self.assertFalse(model["can_stop"])
+
+    def test_user_paused_schedule_exposes_resume_only(self):
+        self._persist_flow(schedule="paused",phase="paused",job="PAUSED")
+        with store.connect(self.db) as db:
+            db.execute("UPDATE research_schedules SET pause_reason='user_paused' WHERE id='schedule_1'")
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("BLOCKED",model["state"])
+        self.assertFalse(model["can_pause"])
+        self.assertTrue(model["can_resume"])
+        self.assertTrue(model["can_stop"])
 
     def test_profile_isolation(self):
         self._persist_flow()
@@ -80,6 +133,35 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertEqual("READY",model["state"])
         self.assertEqual(0,model["counts"]["candidates"])
         self.assertEqual("",model["request_id"])
+
+    def test_dashboard_control_rejects_job_from_another_profile(self):
+        checkpoint=SimpleNamespace(set=MagicMock())
+        target=SimpleNamespace(
+            active_id=self.profile,
+            research_dashboard_checkpoint=checkpoint,
+            _current_vph_job=MagicMock(return_value={"id":"other_job","profile_id":"other_profile"}),
+            pause_vph_research=MagicMock(),resume_vph_research=MagicMock(),cancel_vph_research=MagicMock(),
+            _refresh_research_dashboard=MagicMock(),
+        )
+        model={"can_pause":True,"can_resume":False,"can_stop":True,"job_id":"job_1"}
+        with patch.object(presenter,"present",return_value=model):
+            Studio._dashboard_control_research(target,"pause")
+        target.pause_vph_research.assert_not_called()
+        checkpoint.set.assert_called_once()
+
+    def test_dashboard_control_routes_matching_session_only(self):
+        target=SimpleNamespace(
+            active_id=self.profile,
+            research_dashboard_checkpoint=SimpleNamespace(set=MagicMock()),
+            _current_vph_job=MagicMock(return_value={"id":"job_1","profile_id":self.profile}),
+            pause_vph_research=MagicMock(),resume_vph_research=MagicMock(),cancel_vph_research=MagicMock(),
+            _refresh_research_dashboard=MagicMock(),
+        )
+        model={"can_pause":True,"can_resume":False,"can_stop":True,"job_id":"job_1"}
+        with patch.object(presenter,"present",return_value=model):
+            Studio._dashboard_control_research(target,"pause")
+        target.pause_vph_research.assert_called_once_with()
+        target._refresh_research_dashboard.assert_called_once_with(self.profile)
 
 
 if __name__ == "__main__":
