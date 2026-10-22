@@ -221,6 +221,8 @@ with WorkspaceTemp() as temp:
     easy_widget=app.tabs.nametowidget(easy_tab)
     target_height=max(650,app.winfo_height()+(605-easy_widget.winfo_height()))
     app.geometry(f"1280x{target_height}");app.update()
+    target_height=app.winfo_height()+(605-easy_widget.winfo_height())
+    app.geometry(f"1280x{target_height}");app.update()
     assert 603<=easy_widget.winfo_height()<=607, easy_widget.winfo_height()
     assert app.research_dashboard_frame.winfo_ismapped()
     assert app.research_dashboard_frame.winfo_rooty()>=easy_widget.winfo_rooty()
