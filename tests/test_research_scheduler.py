@@ -119,6 +119,52 @@ class ResearchSchedulerTests(unittest.TestCase):
                                          now=resumed_at + timedelta(minutes=5, seconds=1))
         self.assertEqual(1801, one_second_later["elapsed_seconds"])
 
+    def test_network_transition_pauses_at_checkpoint_and_requires_explicit_resume(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp), self.db, now=self.now)
+        paused = scheduler.pause_for_network_change(session["id"], self.jp, self.db,
+            now=self.now + timedelta(minutes=3))
+        self.assertEqual(("paused", "network_review", "network_changed"),
+                         (paused["state"], paused["phase"], paused["pause_reason"]))
+        item = scheduler.get(session["id"], self.jp, self.db, now=self.now + timedelta(hours=2))
+        self.assertEqual(paused["elapsed_seconds"], item["elapsed_seconds"])
+        with self.assertRaises(ValueError):
+            scheduler.resume(session["id"], self.jp, self.db)
+        resumed = scheduler.resume(session["id"], self.jp, self.db,
+                                    external_recovery_confirmed=True)
+        self.assertEqual(("running", ""), (resumed["state"], resumed["pause_reason"]))
+
+    def test_network_transition_does_not_clear_or_replay_an_uncertain_search(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp), self.db, now=self.now)
+        scheduler.claim_search_call(session["id"], self.jp, self.db, now=lambda:self.now)
+        with self.assertRaises(scheduler.UnresolvedSearchCall):
+            scheduler.pause_for_network_change(session["id"], self.jp, self.db,
+                now=self.now + timedelta(seconds=1))
+        saved = scheduler.get(session["id"], self.jp, self.db, now=self.now + timedelta(seconds=2))
+        self.assertTrue(saved["search_in_flight"])
+        self.assertEqual("running", saved["state"])
+
+    def test_network_preflight_stops_before_reserving_the_next_search(self):
+        session = scheduler.create(scheduler.ScheduleConfig(self.jp, approved_search_calls=2),
+                                   self.db, now=self.now)
+        requests = []
+        transitioned = [False]
+        def network_check():
+            if not transitioned[0]:
+                transitioned[0] = True
+                scheduler.pause_for_network_change(session["id"], self.jp, self.db, now=self.now)
+                return False
+            return True
+        result = scheduler.run_autopilot_block(session["id"], self.jp,
+            autopilot.AutopilotController(self.db),
+            autopilot.AutopilotConfig(self.jp, target=5, max_search_calls=2),
+            lambda *_args: requests.append(True), self.db, now=self.now,
+            network_check=network_check)
+        saved = scheduler.get(session["id"], self.jp, self.db, now=self.now)
+        self.assertEqual([], requests)
+        self.assertEqual(("paused", "network_changed", 0, 0),
+            (saved["state"], saved["pause_reason"], saved["search_calls_used"], saved["search_in_flight"]))
+        self.assertEqual("paused", result.state)
+
     def test_future_start_and_profile_snapshot_are_isolated(self):
         start = self.now + timedelta(hours=1)
         waiting = scheduler.create(scheduler.ScheduleConfig(self.jp, start_at=start), self.db, now=self.now)

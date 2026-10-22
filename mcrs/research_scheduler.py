@@ -403,6 +403,25 @@ def pause(session_id: str, profile_id: str, path=None, *, now: datetime | None =
     return get(session_id, profile_id, path, now=current)
 
 
+def pause_for_network_change(session_id: str, profile_id: str, path=None, *, now: datetime | None = None) -> dict:
+    """Checkpoint a network transition and require an operator-confirmed resume."""
+    current = _utc(now)
+    item = get(session_id, profile_id, path, now=current)
+    if not item or item["state"] != "running":
+        raise ValueError("Only a running research session can be network-paused.")
+    if item["search_in_flight"]:
+        raise UnresolvedSearchCall("The external request is unresolved; it must not be replayed.")
+    with store.connect(path) as db:
+        changed = db.execute(
+            "UPDATE research_schedules SET state='paused',phase='network_review',pause_reason='network_changed',"
+            "elapsed_seconds=?,running_since_utc='',updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND profile_id=? AND state='running' AND search_in_flight=0",
+            (item["elapsed_seconds"], session_id, profile_id)).rowcount
+        if changed != 1:
+            raise UnresolvedSearchCall("The schedule changed while the network transition was being checkpointed.")
+    return get(session_id, profile_id, path, now=current)
+
+
 def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None = None,
            external_recovery_confirmed: bool = False) -> dict:
     current = _utc(now)
@@ -412,7 +431,7 @@ def resume(session_id: str, profile_id: str, path=None, *, now: datetime | None 
     if item["search_in_flight"]:
         raise UnresolvedSearchCall("A search may have reached YouTube; it must be reconciled before resuming.")
     confirmation_reasons = {"auth_required", "permission_denied", "quota_exhausted",
-                            "quota_local_limit", "rate_limited"}
+                            "quota_local_limit", "rate_limited", "network_changed", "network_wait"}
     if item.get("pause_reason") in confirmation_reasons and not external_recovery_confirmed:
         raise ValueError("External authentication or quota state must be confirmed before resume.")
     profile = store.get_profile(profile_id, path)
@@ -768,7 +787,8 @@ def acknowledge_uncertain_search_consumed(session_id: str, profile_id: str, path
 def run_autopilot_block(session_id: str, profile_id: str, controller, config, collector,
                         path=None, *, provider=None, on_event=None,
                         resource_guard: ResourceGuard | None = None,
-                        resource_sampler=sample_resources, now: datetime | None = None):
+                        resource_sampler=sample_resources, now: datetime | None = None,
+                        network_check: Callable[[], bool] | None = None):
     """Run the existing bounded Autopilot only within this schedule's research phase.
 
     The schedule's atomic allowance is reserved before each collector call and
@@ -788,6 +808,8 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
 
     guard = resource_guard or ResourceGuard()
     def can_continue():
+        if network_check is not None and not network_check():
+            return False
         current = get(session_id, profile_id, path, now=clock())
         if not current or current["state"] != "running" or current["phase"] != "research":
             return False
@@ -798,6 +820,8 @@ def run_autopilot_block(session_id: str, profile_id: str, controller, config, co
         return True
 
     def scheduled_collector(term, market, limit, page_token=None, order="relevance", quota_context=None):
+        if network_check is not None and not network_check():
+            raise RuntimeError("Network changed; stopped before sending another external request.")
         claim_search_call(session_id, profile_id, path, now=clock())
         try:
             try:

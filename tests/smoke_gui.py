@@ -131,6 +131,20 @@ with WorkspaceTemp() as temp:
     assert callable(app._dashboard_start_research)
     assert app.operator_search_limit.cget("textvariable")==str(app.ai_max_calls)
     assert app.operator_slot_combo.cget("textvariable")==str(app.vph_observation_slots)
+    assert str(app.operator_network_mode_combo.cget("state"))=="readonly"
+    assert set(app.operator_network_mode_combo.cget("values"))=={"기본 인터넷 연결","사용자 관리 VPN"}
+    assert "VPN 연결 여부: UNKNOWN" in app.operator_network_status.get()
+    app.operator_network_mode.set("사용자 관리 VPN")
+    app._save_network_mode()
+    assert store.get_profile(first)["network_mode"]=="user_vpn"
+    app._refresh_network_mode_status(store.get_profile(first))
+    assert app.operator_network_mode.get()=="사용자 관리 VPN"
+    app._refresh_network_mode_status(store.get_profile(second))
+    assert str(app.operator_network_mode_combo.cget("state"))=="disabled"
+    app.operator_network_mode.set("기본 인터넷 연결")
+    app._save_network_mode()
+    assert store.get_profile(first)["network_mode"]=="default"
+    app._refresh_network_mode_status(store.get_profile(first))
     assert "연구/휴식" in app.operator_config_summary.get()
     assert "검색 상한" in app.operator_config_summary.get()
     assert "관측 슬롯" in app.operator_config_summary.get()

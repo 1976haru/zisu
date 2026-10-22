@@ -19,7 +19,8 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from . import store
 from .genres import GENRES, search_terms, assess, related_classification
 from . import genres as genre_engine
-from .youtube_api import lookup_videos, APIError, quota_project_identity
+from .youtube_api import lookup_videos, APIError, quota_project_identity, _network_signature
+from . import network_mode
 from . import oauth
 from . import quota_ledger
 from . import ai_research
@@ -629,6 +630,23 @@ class Studio(tk.Tk):
                 ("연구 시간·검색·관측 설정",lambda:self._select_detail_tab(7)),
                 ("계정·OAuth 연결",lambda:self._select_detail_tab(0))):
             ttk.Button(setting_actions,text=label,command=command).pack(side="left",padx=4)
+        network=ttk.LabelFrame(settings,text="일본 채널 네트워크 모드",padding=8)
+        network.grid(row=3,column=0,sticky="ew",pady=6)
+        network.columnconfigure(2,weight=1)
+        self.operator_network_choices={"기본 인터넷 연결":network_mode.DEFAULT,
+                                       "사용자 관리 VPN":network_mode.USER_MANAGED_VPN}
+        self.operator_network_mode=tk.StringVar(value="기본 인터넷 연결")
+        ttk.Label(network,text="연결 설정").grid(row=0,column=0,sticky="w",padx=(0,8))
+        self.operator_network_mode_combo=ttk.Combobox(
+            network,textvariable=self.operator_network_mode,state="readonly",width=22,
+            values=tuple(self.operator_network_choices))
+        self.operator_network_mode_combo.grid(row=0,column=1,sticky="w")
+        self.operator_network_status=tk.StringVar(
+            value="VPN 연결 여부: UNKNOWN (앱은 VPN을 제어하거나 IP 국가를 추정하지 않습니다.)")
+        ttk.Label(network,textvariable=self.operator_network_status,wraplength=720).grid(
+            row=0,column=2,sticky="w",padx=10)
+        ttk.Button(network,text="네트워크 설정 저장",command=self._save_network_mode).grid(
+            row=0,column=3,sticky="e",padx=(8,0))
         schedule=ttk.LabelFrame(settings,text="연구 실행 범위",padding=10)
         schedule.grid(row=4,column=0,sticky="ew",pady=10)
         for column in range(8):schedule.columnconfigure(column,weight=1 if column in {1,3,5,7} else 0)
@@ -658,7 +676,7 @@ class Studio(tk.Tk):
         ttk.Label(settings,text="검색은 읽기 전용이며 요청 상한은 최대 3회, 관측 슬롯은 최대 20개입니다. 미측정 VPH는 UNKNOWN으로 남습니다.",
                   wraplength=1000).grid(row=5,column=0,sticky="w",pady=6)
         ttk.Label(settings,text="설정 변경은 현재 프로필에만 적용됩니다. 진행 중인 연구의 프로필·체크포인트는 바꾸지 않습니다.",
-                  wraplength=1000).grid(row=3,column=0,sticky="w",pady=8)
+                  wraplength=1000).grid(row=6,column=0,sticky="w",pady=8)
 
         results=self.primary_pages["results"];results.columnconfigure(0,weight=1)
         ttk.Label(results,text="후보·연구 결과",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(8,10))
@@ -694,6 +712,40 @@ class Studio(tk.Tk):
                 main_tabs.select(advanced_page)
             if detail_tabs is not None:
                 detail_tabs.select(frames[index])
+
+    def _refresh_network_mode_status(self, profile=None):
+        profile=profile or self.current_profile()
+        observation=network_mode.status(profile)
+        configured=observation["configured_mode"]
+        label=next((name for name,value in self.operator_network_choices.items() if value==configured),
+                   "기본 인터넷 연결")
+        if hasattr(self,"operator_network_mode"):
+            self.operator_network_mode.set(label)
+        if hasattr(self,"operator_network_mode_combo"):
+            self.operator_network_mode_combo.configure(
+                state="readonly" if profile and profile.get("market")=="JP" else "disabled")
+        if hasattr(self,"operator_network_status"):
+            seen="인터페이스 변화 감시 가능" if observation["interface_observation"]=="available" else "인터페이스 상태 UNKNOWN"
+            self.operator_network_status.set(
+                f"설정: {label} · VPN 연결 여부: UNKNOWN · {seen}. ZISU는 VPN/IP 국가를 추정하거나 제어하지 않습니다.")
+
+    def _save_network_mode(self):
+        profile=self.current_profile()
+        if not profile:
+            messagebox.showinfo("프로필 선택", "먼저 JP 프로필을 선택하세요.", parent=self)
+            return
+        label=self.operator_network_mode.get()
+        mode=self.operator_network_choices.get(label)
+        if mode is None:
+            messagebox.showwarning("네트워크 설정", "알 수 없는 네트워크 설정입니다.", parent=self)
+            return
+        try:
+            store.set_profile_network_mode(profile["id"],mode)
+        except (ValueError,sqlite3.Error) as exc:
+            messagebox.showwarning("네트워크 설정을 저장하지 못했습니다", str(exc), parent=self)
+            self._refresh_network_mode_status(profile)
+            return
+        self._refresh_network_mode_status(store.get_profile(profile["id"]))
 
     def _on_primary_tab_changed(self,_event=None):
         self._save_ui_state()
@@ -816,12 +868,18 @@ class Studio(tk.Tk):
         try:self.start_vph_scheduled_research()
         finally:self._starting_from_easy_dashboard=False
 
+    def _dashboard_auth_ready(self,profile_id):
+        profile=store.get_profile(profile_id)
+        key_available=bool(getattr(self,"api_key",None) and self.api_key.get().strip())
+        return bool(profile and (profile.get("google_account_id") or profile.get("connected_email") or key_available))
+
     def _dashboard_control_research(self,action):
         """Route a dashboard control only to the selected profile's persisted job."""
         if action not in {"pause","resume","stop"} or not self.active_id:
             return
         try:
-            model=research_dashboard_presenter.present(self.active_id)
+            model=research_dashboard_presenter.present(
+                self.active_id,auth_ready=self._dashboard_auth_ready(self.active_id))
             job=self._current_vph_job()
         except (ValueError,sqlite3.Error,OSError):
             self.research_dashboard_checkpoint.set("제어 차단: 현재 연구 세션을 안전하게 확인하지 못했습니다.")
@@ -943,7 +1001,8 @@ class Studio(tk.Tk):
             self._refresh_operator_pages(None)
             return
         try:
-            model=research_dashboard_presenter.present(profile_id)
+            model=research_dashboard_presenter.present(
+                profile_id,auth_ready=self._dashboard_auth_ready(profile_id))
         except (ValueError,sqlite3.Error,OSError):
             self.research_dashboard_summary.set("ERROR · 운영 상태를 안전하게 읽지 못했습니다.")
             self.research_schedule_progress.set("일정 경과율 확인 불가")
@@ -1573,6 +1632,7 @@ class Studio(tk.Tk):
         profile=self.profiles[i]
         if getattr(self,"comment_video",None):self._autosave_comment()
         self.active_id=profile["id"]
+        self._refresh_network_mode_status(profile)
         if hasattr(self,"vph_observation_slots"):
             self.vph_observation_slots.set(str(profile.get("vph_observation_slots",10)))
         if hasattr(self,"schedule_hours"):
@@ -3647,6 +3707,36 @@ class Studio(tk.Tk):
     def _autopilot_schedule_worker(self,schedule_id,profile_id,config,provider,collector,resource_check,low_load_enabled,key,token,identity):
         last_result=None
         settings=autopilot.AutopilotController._settings(config,provider)
+        observed_network=_network_signature()
+
+        def checkpoint_network_transition(item):
+            nonlocal observed_network
+            current_network=_network_signature()
+            if not network_mode.changed(observed_network,current_network):
+                if current_network:
+                    observed_network=current_network
+                return False
+            if item and item.get("state")=="running" and item.get("phase")=="research":
+                try:
+                    research_scheduler.pause_for_network_change(schedule_id,profile_id,store.db_path())
+                except research_scheduler.UnresolvedSearchCall:
+                    self.autopilot_events.put({"stage":"schedule","message":
+                        "네트워크가 바뀌었고 외부 요청 결과가 불확실합니다. 요청을 재전송하지 않고 확인을 기다립니다."})
+                    return True
+                self._research_browser_boundary_close("network_changed")
+                self.autopilot_events.put({"stage":"network_changed","profile_id":profile_id,
+                    "code":"network_changed","resume_requires_confirmation":True})
+                self.autopilot_events.put({"stage":"schedule","message":
+                    "네트워크 변경을 감지해 체크포인트에서 안전 중단했습니다. 연결과 요청 결과를 확인한 뒤 재개하세요."})
+                return True
+            if current_network:
+                observed_network=current_network
+            return False
+
+        def research_network_ok():
+            item=research_scheduler.get(schedule_id,profile_id,store.db_path())
+            return not checkpoint_network_transition(item)
+
         while True:
             if self.autopilot_schedule_shutdown_event.is_set():
                 self._research_browser_boundary_close("shutdown")
@@ -3666,6 +3756,8 @@ class Studio(tk.Tk):
             if not item or item["state"] in {"completed","cancelled"}:
                 vph_research.finish_schedule_jobs(profile_id,schedule_id,store.db_path(),
                     reason="schedule_ended" if item and item["state"]=="completed" else "schedule_stopped")
+                break
+            if checkpoint_network_transition(item):
                 break
             self.autopilot_events.put({"stage":"schedule_status","item":item})
             if self.autopilot_schedule_pause_event.is_set():
@@ -3742,7 +3834,11 @@ class Studio(tk.Tk):
                 cost_limit_usd=config.cost_limit_usd,session_id=config.session_id)
             last_result=research_scheduler.run_autopilot_block(schedule_id,profile_id,
                 self.autopilot_controller,resumed_config,collector,provider=provider,
-                on_event=self.autopilot_events.put,resource_guard=self.resource_guard if low_load_enabled else None)
+                on_event=self.autopilot_events.put,resource_guard=self.resource_guard if low_load_enabled else None,
+                network_check=research_network_ok)
+            item=research_scheduler.get(schedule_id,profile_id)
+            if checkpoint_network_transition(item):
+                break
             if last_result.state=="complete":
                 item=research_scheduler.get(schedule_id,profile_id)
                 if not item or item["state"]=="completed":
@@ -3934,11 +4030,15 @@ class Studio(tk.Tk):
             schedules=[]
         for schedule in schedules:
             if schedule["state"] not in {"paused","scheduled"}: continue
+            network_changed=schedule.get("pause_reason") in {"network_changed","network_wait"}
+            resume_prompt=("네트워크 변경을 감지해 체크포인트에서 멈췄습니다. ZISU는 VPN 연결 여부나 IP 국가를 확인하지 않습니다. 연결이 안정됐는지 직접 확인했고, 불확실한 외부 요청은 재전송하지 않는 조건으로 이어갈까요?"
+                           if network_changed else
+                           "이전 작업을 확인하고 이어갈까요? 외부 요청은 자동으로 다시 보내지 않습니다.")
             if not messagebox.askyesno("이전 작업이 발견되었습니다.",
                 f"저장 시각: {schedule.get('updated_at','확인 불가')}\n"
                 f"프로필: {profile['name']}\n단계: {schedule.get('phase','확인 필요')}\n"
                 f"검색 호출: {schedule.get('search_calls_used',0)}회 사용 / {schedule.get('approved_search_calls',0)}회 승인\n\n"
-                "이전 작업을 확인하고 이어갈까요? 외부 요청은 자동으로 다시 보내지 않습니다.",parent=self):
+                +resume_prompt,parent=self):
                 return
             checkpoint=json.loads(schedule.get("checkpoint_json") or "{}")
             autopilot_session_id=checkpoint.get("autopilot_session_id")
@@ -3967,9 +4067,9 @@ class Studio(tk.Tk):
                     "recommended_action":"이전 외부 요청을 자동 재개하지 않았습니다. 예산을 확인하고 새 조사를 승인하세요.","retry_allowed":False})
                 return
             if schedule["state"]=="paused" and not str(schedule.get("pause_reason","")).startswith(("system_","process_")):
-                confirm_external=schedule.get("pause_reason") in {
+                confirm_external=network_changed or schedule.get("pause_reason") in {
                     "auth_required","permission_denied","quota_exhausted","quota_local_limit","rate_limited"}
-                if confirm_external and not messagebox.askyesno(
+                if confirm_external and not network_changed and not messagebox.askyesno(
                         "연결 또는 검색 한도 확인",
                         "Google 계정이나 검색 한도에 관한 대기 상태입니다. 문제가 해결됐는지 확인한 뒤, 저장된 예산 안에서만 이어갑니다. 계속할까요?",
                         parent=self):

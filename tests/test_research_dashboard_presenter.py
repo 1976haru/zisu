@@ -44,6 +44,7 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         vph.record_observation(self.profile,"video000001",100,datetime(2026,1,1,tzinfo=timezone.utc),path=self.db)
         model=presenter.present(self.profile,self.db,now=datetime(2026,1,1,0,30,tzinfo=timezone.utc))
         self.assertEqual("WAITING_SAMPLE_2",model["state"])
+        self.assertFalse(model["stages"]["auth"],"an existing schedule/job is not proof that credentials are connected")
         self.assertEqual(4,model["schedule_progress_percent"])
         self.assertTrue(model["stages"]["sample_1"])
         self.assertFalse(model["stages"]["sample_2"])
@@ -51,6 +52,13 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertTrue(model["can_pause"])
         self.assertTrue(model["can_stop"])
         self.assertFalse(model["can_resume"])
+
+    def test_auth_stage_requires_explicit_credential_readiness(self):
+        self._persist_flow()
+        not_ready=presenter.present(self.profile,self.db)
+        ready=presenter.present(self.profile,self.db,auth_ready=True)
+        self.assertFalse(not_ready["stages"]["auth"])
+        self.assertTrue(ready["stages"]["auth"])
 
     def test_ready_is_not_complete_and_can_start(self):
         model=presenter.present(self.profile,self.db)
@@ -138,6 +146,7 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         checkpoint=SimpleNamespace(set=MagicMock())
         target=SimpleNamespace(
             active_id=self.profile,
+            _dashboard_auth_ready=MagicMock(return_value=False),
             research_dashboard_checkpoint=checkpoint,
             _current_vph_job=MagicMock(return_value={"id":"other_job","profile_id":"other_profile"}),
             pause_vph_research=MagicMock(),resume_vph_research=MagicMock(),cancel_vph_research=MagicMock(),
@@ -152,6 +161,7 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
     def test_dashboard_control_routes_matching_session_only(self):
         target=SimpleNamespace(
             active_id=self.profile,
+            _dashboard_auth_ready=MagicMock(return_value=False),
             research_dashboard_checkpoint=SimpleNamespace(set=MagicMock()),
             _current_vph_job=MagicMock(return_value={"id":"job_1","profile_id":self.profile}),
             pause_vph_research=MagicMock(),resume_vph_research=MagicMock(),cancel_vph_research=MagicMock(),

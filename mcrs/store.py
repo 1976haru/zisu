@@ -376,6 +376,7 @@ def initialize(path=None):
             "vph_tier_b REAL NOT NULL DEFAULT 50",
             "vph_observation_slots INTEGER NOT NULL DEFAULT 10",
             "research_preferences_json TEXT NOT NULL DEFAULT '{}'",
+            "network_mode TEXT NOT NULL DEFAULT 'default' CHECK(network_mode IN ('default','user_vpn'))",
         ):
             _add_column(db, "profiles", definition)
         _add_column(db, "vph_research_jobs", "observation_slots INTEGER NOT NULL DEFAULT 10")
@@ -517,6 +518,27 @@ def profile_research_preferences(profile_id,path=None):
     if not profile:return {}
     try:return _validate_research_preferences(json.loads(profile.get("research_preferences_json") or "{}"))
     except (TypeError,json.JSONDecodeError,ValueError):return {}
+
+def set_profile_network_mode(profile_id, mode, path=None):
+    """Save a profile-local connection preference; this never controls a VPN."""
+    from .network_mode import validate_mode
+    mode=validate_mode(mode)
+    with connect(path) as db:
+        profile=db.execute("SELECT id,market FROM profiles WHERE id=?",(profile_id,)).fetchone()
+        if not profile:
+            raise ValueError("Profile not found.")
+        if mode == "user_vpn" and profile["market"] != "JP":
+            raise ValueError("User-managed VPN preference is available for JP profiles only.")
+        active=db.execute(
+            "SELECT 1 FROM research_schedules WHERE profile_id=? AND state IN ('scheduled','running','paused') "
+            "UNION ALL SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') "
+            "UNION ALL SELECT 1 FROM vph_research_jobs WHERE profile_id=? AND state IN "
+            "('READY','COLLECTING_FIRST','WAITING_SECOND','COLLECTING_SECOND','PAUSED') LIMIT 1",
+            (profile_id,profile_id,profile_id)).fetchone()
+        if active:
+            raise ValueError("Network mode cannot change while this profile has an active research checkpoint.")
+        db.execute("UPDATE profiles SET network_mode=? WHERE id=?",(mode,profile_id))
+    return mode
 
 def save_research_schedule_preset(profile_id,name,settings,path=None):
     name=str(name).strip()

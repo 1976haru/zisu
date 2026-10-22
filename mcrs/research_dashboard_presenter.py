@@ -60,13 +60,15 @@ def _state(snapshot):
     return "READY"
 
 
-def present(profile_id, path=None, *, now=None):
+def present(profile_id, path=None, *, now=None, auth_ready=None):
     """Return a safe, read-only dashboard model for exactly one profile."""
     current = _utc_now(now)
     snapshot = store.research_dashboard_snapshot(profile_id, path)
     profile = snapshot.get("profile") or {}
     intent, schedule, job = snapshot.get("intent"), snapshot.get("schedule"), snapshot.get("job")
     state = _state(snapshot)
+    if auth_ready is None:
+        auth_ready=bool(profile.get("google_account_id") or profile.get("connected_email"))
     elapsed = int((schedule or {}).get("elapsed_seconds", 0) or 0)
     total = int((schedule or {}).get("total_minutes", 0) or 0) * 60
     schedule_progress = min(100, int(elapsed * 100 / total)) if total else 0
@@ -76,7 +78,7 @@ def present(profile_id, path=None, *, now=None):
     searched = bool((schedule and schedule.get("search_calls_used", 0)) or job)
     stages = {
         "setup": bool(profile),
-        "auth": bool(profile.get("google_account_id") or schedule or job),
+        "auth": bool(auth_ready),
         "search": searched,
         "genre_evaluation": bool(job),
         "target_selection": bool(job and job.get("targets")),
