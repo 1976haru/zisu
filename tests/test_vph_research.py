@@ -25,6 +25,36 @@ class VphResearchTests(unittest.TestCase):
                 metadata={"source": "offline-fixture"}, path=self.db))
         return result
 
+    def _schedule(self, schedule_id, request_id=""):
+        with store.connect(self.db) as db:
+            db.execute("""INSERT INTO research_schedules(id,profile_id,market,core_genre,start_at_utc,
+                total_minutes,research_minutes,break_minutes,approved_search_calls,state,phase,
+                auto_start_request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (schedule_id,self.profile,"KR","MORNING_CHILL_RAP","2026-01-01T00:00:00+00:00",
+                 480,20,20,3,"running","research",request_id))
+
+    def _bind_first_sample(self, job, video_id, views=100, when=None, profile_id=None):
+        profile_id=profile_id or self.profile
+        result=vph.record_observation(profile_id,video_id,views,when or datetime.now(timezone.utc),path=self.db)
+        if profile_id!=self.profile:
+            return result
+        with store.connect(self.db) as db:
+            row=db.execute("SELECT targets_json FROM vph_research_jobs WHERE id=?",(job["id"],)).fetchone()
+            targets=json.loads(row[0] or "[]")
+            target=next((item for item in targets if item["video_id"]==video_id),None)
+            if target is None:
+                target={"video_id":video_id,"group":"CORE_FIT","positive_signals":[],
+                        "conflict_signals":[],"genre_reason":"fixture","caution":""}
+                targets.append(target)
+            observation=db.execute("SELECT observed_at_utc,view_count,sample_status FROM vph_observations WHERE id=?",
+                (result["later_observation_id"],)).fetchone()
+            target.update(first_observation_id=result["later_observation_id"],first_job_id=job["id"],
+                first_evaluation_id=result["id"],first_observed_at_utc=observation["observed_at_utc"],
+                first_status="valid" if observation["sample_status"]=="valid" and observation["view_count"] is not None else "missing")
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id=?",
+                       (json.dumps(targets),job["id"]))
+        return result
+
     def test_zero_fit_uses_meaningful_review_but_not_zero_review_or_exclude(self):
         rows = [
             {"video_id":"rev12345678", "video_title":"Korean Chill Rap Neo-Soul Lo-fi mix",
@@ -55,9 +85,16 @@ class VphResearchTests(unittest.TestCase):
         self.assertEqual(["term-one","term-two"],result["used_queries"])
         self.assertEqual("CORE_FIT",result["targets"][0]["group"])
         self.assertEqual(1,collect.call_count); self.assertEqual(1,len(vph.list_history(self.profile,row["video_id"],self.db)))
+        self.assertEqual(result["targets"][0]["first_job_id"],job["id"])
+        self.assertIsNotNone(result["targets"][0]["first_observation_id"])
         self.assertEqual("ko",calls[0][2])
         due=datetime.fromisoformat(result["next_run_utc"])
-        self.assertGreaterEqual((due-datetime.fromisoformat(result["targets"][0]["first_observed_at_utc"])).total_seconds(),3900)
+        self.assertGreaterEqual((due-datetime.fromisoformat(result["targets"][0]["first_observed_at_utc"])).total_seconds(),3901)
+        first_id=result["targets"][0]["first_observation_id"]
+        paused=vph_research.pause(job["id"],self.profile,self.db)
+        resumed=vph_research.resume(job["id"],self.profile,self.db)
+        self.assertEqual("WAITING_SECOND",resumed["state"])
+        self.assertEqual(first_id,resumed["targets"][0]["first_observation_id"])
         self.assertEqual([],vph_research.due_jobs(self.db,now=due-timedelta(seconds=1)))
         self.assertEqual(1,len(vph_research.due_jobs(self.db,now=due)))
         def second_sampler(key,profile_id,ids,**kwargs):
@@ -75,6 +112,44 @@ class VphResearchTests(unittest.TestCase):
         self.assertGreater(radar[0]["vph"],92.0)
         self.assertLess(radar[0]["vph"],93.0)
         self.assertEqual("B",radar[0]["tier"])
+        self.assertEqual(job["id"],completed["targets"][0]["first_job_id"])
+        self.assertEqual(job["id"],completed["targets"][0]["second_job_id"])
+
+    def test_successful_second_response_without_saved_observation_stays_review(self):
+        self._schedule("schedule-empty-second")
+        store.set_profile_vph_observation_slots(self.profile,1,self.db)
+        store.save_candidates(self.profile,[{"video_id":"emptysec001","video_title":"Morning Chill Rap",
+            "description":"vocal performance and steady beat"}],self.db)
+        with store.connect(self.db) as db:
+            db.execute("UPDATE candidates SET genre_decision=?,genre_score=90 WHERE profile_id=? AND video_id=?",
+                       (genres.FIT,self.profile,"emptysec001"))
+        job=vph_research.start(self.profile,self.db,search_limit=0,observation_slots=1,
+                               schedule_id="schedule-empty-second")
+        with patch("mcrs.vph_research.vph.collect_video_samples",side_effect=self._sample_first):
+            first=vph_research.run_first_phase(job["id"],self.profile,"",path=self.db,
+                searcher=lambda *args,**kwargs:[])
+        due=datetime.fromisoformat(first["next_run_utc"])
+        result=vph_research.run_second_phase(job["id"],self.profile,"",path=self.db,
+            sampler=lambda *args,**kwargs:[],now=due)
+        self.assertEqual("REVIEW",result["state"])
+        self.assertNotIn("second_observation_id",result["targets"][0])
+
+    def test_first_sample_response_without_saved_observation_stays_review(self):
+        self._schedule("schedule-empty-first")
+        store.set_profile_vph_observation_slots(self.profile,1,self.db)
+        store.save_candidates(self.profile,[{"video_id":"emptyfir001","video_title":"Morning Chill Rap",
+            "description":"vocal performance and steady beat"}],self.db)
+        with store.connect(self.db) as db:
+            db.execute("UPDATE candidates SET genre_decision=?,genre_score=90 WHERE profile_id=? AND video_id=?",
+                       (genres.FIT,self.profile,"emptyfir001"))
+        job=vph_research.start(self.profile,self.db,search_limit=0,observation_slots=1,
+                               schedule_id="schedule-empty-first")
+        with patch("mcrs.vph_research.vph.collect_video_samples",return_value=[]):
+            result=vph_research.run_first_phase(job["id"],self.profile,"",path=self.db,
+                searcher=lambda *args,**kwargs:[])
+        self.assertEqual("REVIEW",result["state"])
+        self.assertEqual(0,len(vph.list_history(self.profile,"emptyfir001",self.db)))
+        self.assertFalse(result["targets"][0].get("first_observation_id"))
 
     def test_uncertain_request_is_checkpointed_and_never_replayed(self):
         job=vph_research.start(self.profile,self.db,search_limit=1)
@@ -155,6 +230,7 @@ class VphResearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):store.set_profile_vph_observation_slots(self.profile,0,self.db)
         with self.assertRaises(ValueError):store.set_profile_vph_observation_slots(self.profile,21,self.db)
         with self.assertRaises(ValueError):store.set_profile_vph_observation_slots(self.profile,True,self.db)
+        self._schedule("sched-one")
         job=vph_research.start(self.profile,self.db,search_limit=0,schedule_id="sched-one")
         self.assertEqual(3,job["observation_slots"])
         self.assertEqual("sched-one",job["schedule_id"])
@@ -194,6 +270,21 @@ class VphResearchTests(unittest.TestCase):
         self.assertEqual(["query"],migrated["used_queries"])
         self.assertEqual(10,migrated["observation_slots"])
         self.assertEqual("",migrated["schedule_id"])
+        self.assertEqual("",migrated["request_id"])
+
+    def test_schedule_request_job_identity_is_persisted_and_not_reused(self):
+        request="request-one"
+        self._schedule("schedule-one",request)
+        with store.connect(self.db) as db:
+            db.execute("INSERT INTO vph_auto_start_intents(request_id,profile_id,settings_json,status,schedule_id) "
+                "VALUES(?,?,?,?,?)",(request,self.profile,"{}","started","schedule-one"))
+        with self.assertRaisesRegex(ValueError,"does not match"):
+            vph_research.start(self.profile,self.db,schedule_id="schedule-one",request_id="wrong-request")
+        job=vph_research.start(self.profile,self.db,schedule_id="schedule-one",request_id=request)
+        self.assertEqual((request,"schedule-one",self.profile),
+            (job["request_id"],job["schedule_id"],job["profile_id"]))
+        with self.assertRaises(RuntimeError):
+            vph_research.start(self.profile,self.db,schedule_id="schedule-one",request_id=request)
 
     def test_saved_candidates_feed_one_batched_first_sample_without_search(self):
         store.set_profile_vph_observation_slots(self.profile,1,self.db)
@@ -207,6 +298,7 @@ class VphResearchTests(unittest.TestCase):
                        (genres.FIT,"fit12345678"))
             db.execute("UPDATE candidates SET genre_decision=?,genre_score=10 WHERE video_id=?",
                        (genres.REVIEW,"review12345"))
+        self._schedule("sched")
         job=vph_research.start(self.profile,self.db,search_limit=0,observation_slots=1,schedule_id="sched")
         def collect(key,profile_id,ids,**kwargs):
             self.assertEqual(["fit12345678"],ids)
@@ -224,6 +316,7 @@ class VphResearchTests(unittest.TestCase):
         self.assertEqual(1,len(vph.list_history(self.profile,"fit12345678",self.db)))
 
     def test_schedule_window_and_end_preserve_unfinished_samples(self):
+        self._schedule("sched")
         job=vph_research.start(self.profile,self.db,search_limit=0,schedule_id="sched")
         self.assertFalse(vph_research.schedule_window_allows_sample(job,None))
         self.assertFalse(vph_research.schedule_window_allows_sample(job,{"id":"sched","state":"running","phase":"break"}))

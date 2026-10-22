@@ -1055,8 +1055,9 @@ class Studio(tk.Tk):
         elif not counts["sample_2"]:
             sample_state+=" · 두 번째 표본 대기"
         self.research_dashboard_results.set(
-            f"후보 {counts['candidates']} · FIT {counts['fit']} · REVIEW {counts['review']} · EXCLUDE {counts['exclude']}\n"
-            f"관측 중 {counts['observing']} · {sample_state}\n"
+            f"현재 연구 검색 {counts['search_calls']}회 · 후보 {counts['candidates']} · FIT {counts['fit']} · REVIEW {counts['review']} · EXCLUDE {counts['exclude']}\n"
+            f"프로필 누적 후보 {counts['cumulative_candidates']} · 누적 관측 {counts['cumulative_observing']}\n"
+            f"현재 연구 관측 {counts['observing']} · {sample_state}\n"
             f"VPH A/B {counts['vph_a']}/{counts['vph_b']} · UNKNOWN/REVIEW "
             f"{counts['unknown']}/{counts['vph_review']}{suffix}")
         self._refresh_operator_pages(model)
@@ -3680,7 +3681,8 @@ class Studio(tk.Tk):
             profile=store.get_profile(profile_id)
             slots=int(checkpoint.get("vph_observation_slots",profile.get("vph_observation_slots",10)))
             job=vph_research.start(profile_id,store.db_path(),search_limit=0,
-                observation_slots=slots,schedule_id=schedule_id)
+                observation_slots=slots,schedule_id=schedule_id,
+                request_id=item.get("auto_start_request_id", ""))
             checkpoint.update(vph_job_id=job["id"],vph_observation_slots=slots,
                               vph_discovery_complete=False)
             research_scheduler.checkpoint(schedule_id,profile_id,checkpoint)

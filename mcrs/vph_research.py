@@ -23,6 +23,14 @@ def _stamp(value):
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _stamp_not_before(value):
+    """Serialize a due instant at second precision without rounding it early."""
+    value=value.astimezone(timezone.utc)
+    if value.microsecond:
+        value=value+timedelta(seconds=1)
+    return _stamp(value)
+
+
 def _read(row):
     if not row:
         return None
@@ -75,7 +83,7 @@ def mark_interrupted(job_id, profile_id, path=None):
 
 
 def start(profile_id, path=None, *, search_limit=DEFAULT_SEARCH_CALLS,
-          observation_slots=None, schedule_id=""):
+          observation_slots=None, schedule_id="", request_id=""):
     if isinstance(search_limit, bool) or not isinstance(search_limit, int) or not 0 <= search_limit <= MAX_SEARCH_CALLS:
         raise ValueError(f"Search calls must be between 0 and {MAX_SEARCH_CALLS}.")
     store.initialize(path)
@@ -87,6 +95,25 @@ def start(profile_id, path=None, *, search_limit=DEFAULT_SEARCH_CALLS,
         raise ValueError("VPH observation slots must be between 1 and 20.")
     if not isinstance(schedule_id,str) or len(schedule_id)>128:
         raise ValueError("Research schedule identifier is invalid.")
+    if not isinstance(request_id,str) or len(request_id)>128:
+        raise ValueError("Research request identifier is invalid.")
+    if schedule_id:
+        with store.connect(path) as db:
+            linked=db.execute("SELECT profile_id,auto_start_request_id FROM research_schedules WHERE id=?",
+                              (schedule_id,)).fetchone()
+        if not linked or linked["profile_id"]!=profile_id:
+            raise ValueError("Research schedule does not belong to this profile.")
+        schedule_request=linked["auto_start_request_id"] or ""
+        if request_id and request_id!=schedule_request:
+            raise ValueError("Research request does not match the linked schedule.")
+        request_id=request_id or schedule_request
+        if request_id:
+            intent=store.get_vph_auto_start_intent(request_id,path)
+            if not intent or intent.get("profile_id")!=profile_id or intent.get("schedule_id")!=schedule_id or \
+                    intent.get("status") not in {"claimed","started"}:
+                raise ValueError("Research request is missing, stale, or not linked to this schedule.")
+    elif request_id:
+        raise ValueError("An automatic request requires its linked schedule.")
     job_id = uuid.uuid4().hex
     with store.connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
@@ -95,8 +122,11 @@ def start(profile_id, path=None, *, search_limit=DEFAULT_SEARCH_CALLS,
                             (profile_id,)).fetchone()
         if active:
             raise RuntimeError("This profile already has an active VPH research session.")
-        db.execute("INSERT INTO vph_research_jobs(id,profile_id,state,search_limit,observation_slots,schedule_id) "
-                   "VALUES(?,?,?,?,?,?)", (job_id, profile_id, "READY", search_limit,observation_slots,schedule_id))
+        if schedule_id and db.execute("SELECT 1 FROM vph_research_jobs WHERE profile_id=? AND schedule_id=? LIMIT 1",
+                                      (profile_id,schedule_id)).fetchone():
+            raise RuntimeError("This schedule already owns a VPH job; it cannot be replayed or duplicated.")
+        db.execute("INSERT INTO vph_research_jobs(id,profile_id,state,search_limit,observation_slots,schedule_id,request_id) "
+                   "VALUES(?,?,?,?,?,?,?)", (job_id, profile_id, "READY", search_limit,observation_slots,schedule_id,request_id))
     return get(job_id, profile_id, path)
 
 
@@ -110,6 +140,52 @@ def _update(job_id, profile_id, path, **values):
                              "WHERE id=? AND profile_id=?", (*values.values(), job_id, profile_id)).rowcount
     if changed != 1:
         raise ValueError("VPH research checkpoint was not saved.")
+
+
+def _returned_sample_evidence(profile_id, samples, path):
+    """Resolve only the exact observation/evaluation identifiers returned by this call."""
+    evidence={}
+    for sample in samples or []:
+        if not isinstance(sample,dict):
+            continue
+        observation_id=sample.get("later_observation_id")
+        video_id=str(sample.get("video_id") or "")
+        if isinstance(observation_id,bool) or not isinstance(observation_id,int) or not video_id:
+            continue
+        with store.connect(path) as db:
+            row=db.execute("SELECT o.id,o.profile_id,o.video_id,o.observed_at_utc,o.view_count,o.sample_status,"
+                "e.id AS evaluation_id,e.earlier_observation_id,e.state AS evaluation_state,e.vph,e.tier "
+                "FROM vph_observations o JOIN vph_evaluations e ON e.later_observation_id=o.id "
+                "WHERE o.id=? AND o.profile_id=? AND o.video_id=? AND e.profile_id=? AND e.video_id=?",
+                (observation_id,profile_id,video_id,profile_id,video_id)).fetchone()
+        if row and sample.get("id")==row["evaluation_id"]:
+            evidence[video_id]=dict(row)
+    return evidence
+
+
+def _first_evidence_matches_job(profile_id, job_id, target, path):
+    if not isinstance(target,dict) or target.get("first_job_id")!=job_id:
+        return False
+    observation_id=target.get("first_observation_id")
+    evaluation_id=target.get("first_evaluation_id")
+    video_id=str(target.get("video_id") or "")
+    if (isinstance(observation_id,bool) or not isinstance(observation_id,int) or
+            isinstance(evaluation_id,bool) or not isinstance(evaluation_id,int) or not video_id):
+        return False
+    with store.connect(path) as db:
+        row=db.execute("SELECT o.observed_at_utc,o.view_count,o.sample_status,e.id,e.reason "
+            "FROM vph_observations o JOIN vph_evaluations e ON e.later_observation_id=o.id "
+            "WHERE o.id=? AND o.profile_id=? AND o.video_id=? AND e.profile_id=? AND e.video_id=?",
+            (observation_id,profile_id,video_id,profile_id,video_id)).fetchone()
+    if not row or row["id"]!=evaluation_id or row["reason"]!="first_sample" or \
+            row["sample_status"]!="valid" or row["view_count"] is None or target.get("first_status")!="valid":
+        return False
+    try:
+        saved=datetime.fromisoformat(str(target.get("first_observed_at_utc","")).replace("Z","+00:00"))
+        actual=datetime.fromisoformat(row["observed_at_utc"].replace("Z","+00:00"))
+        return bool(saved.tzinfo and actual.tzinfo and saved.astimezone(timezone.utc)==actual.astimezone(timezone.utc))
+    except (TypeError,ValueError,AttributeError):
+        return False
 
 
 def _pause_checkpoint(job_id, profile_id, path, resume_state, message):
@@ -317,6 +393,10 @@ def run_first_phase(job_id, profile_id, key, *, access_token=None, quota_context
         metadata={item["video_id"]:{"research_group":item["group"],"genre_evidence":item["positive_signals"],
             "genre_conflicts":item["conflict_signals"],"genre_reason":item["genre_reason"],
             "review_caution":item["caution"]} for item in targets}
+        with store.connect(path) as db:
+            prior_observation_ids={row[0] for row in db.execute(
+                "SELECT id FROM vph_observations WHERE profile_id=? AND video_id IN (%s)" %
+                ",".join("?" for _ in ids),(profile_id,*ids))}
         samples = vph.collect_video_samples(key, profile_id, ids, access_token=access_token,
             quota_context={**(quota_context or {}), "profile_id": profile_id,
                            "path": str(path or store.db_path()), "session_id": job_id}, path=path,
@@ -324,23 +404,32 @@ def run_first_phase(job_id, profile_id, key, *, access_token=None, quota_context
         if should_stop():
             _update(job_id, profile_id, path, state="CANCELLED", message="첫 표본 응답 저장 후 사용자 중지; 추가 요청 없음")
             return get(job_id, profile_id, path)
-        histories = {video_id: vph.list_history(profile_id, video_id, path) for video_id in ids}
+        sample_evidence=_returned_sample_evidence(profile_id,samples,path)
+        sample_evidence={video_id:row for video_id,row in sample_evidence.items()
+                         if row["id"] not in prior_observation_ids}
         due_candidates = []
         for target in targets:
-            history = histories[target["video_id"]]
-            if history:
-                target["first_observation_id"] = history[-1]["later_observation_id"]
-                target["first_observed_at_utc"] = history[-1]["observed_at_utc"]
-                target["first_status"] = "valid" if history[-1]["view_count"] is not None else "missing"
-                due_candidates.append(datetime.fromisoformat(history[-1]["observed_at_utc"].replace("Z", "+00:00"))
-                                      + timedelta(seconds=SECOND_SAMPLE_DELAY_SECONDS))
+            evidence=sample_evidence.get(target["video_id"])
+            if evidence:
+                target["first_observation_id"]=evidence["id"]
+                target["first_job_id"]=job_id
+                target["first_observed_at_utc"]=evidence["observed_at_utc"]
+                target["first_evaluation_id"]=evidence["evaluation_id"]
+                target["first_status"]=("valid" if evidence["sample_status"]=="valid" and
+                                         evidence["view_count"] is not None else "missing")
+                if target["first_status"]=="valid":
+                    due_candidates.append(datetime.fromisoformat(evidence["observed_at_utc"].replace("Z", "+00:00"))
+                                          + timedelta(seconds=SECOND_SAMPLE_DELAY_SECONDS+1))
+            else:
+                target["first_status"]="uncertain"
+        _update(job_id,profile_id,path,targets_json=json.dumps(targets,ensure_ascii=False))
         if not due_candidates:
             _update(job_id, profile_id, path, state="REVIEW", targets_json=json.dumps(targets, ensure_ascii=False),
                     next_run_utc="", message="첫 표본의 API 메타데이터가 누락되어 자동 재시도 없이 검토 대기")
             return get(job_id, profile_id, path)
         _update(job_id, profile_id, path, state="WAITING_SECOND",
                 targets_json=json.dumps(targets, ensure_ascii=False),
-                next_run_utc=_stamp(max(due_candidates) + timedelta(seconds=1)),
+                next_run_utc=_stamp_not_before(max(due_candidates)),
                 message=f"첫 표본 저장 완료 · {len(samples)}개 · 두 번째 측정 예약")
     except APIError as exc:
         state = "REVIEW" if exc.request_uncertain else "FAILED"
@@ -399,11 +488,19 @@ def run_second_phase(job_id, profile_id, key, *, access_token=None, quota_contex
         return get(job_id, profile_id, path)
     _update(job_id, profile_id, path, state="COLLECTING_SECOND", message="두 번째 표본 측정 중")
     try:
-        ids = [item["video_id"] for item in job["targets"]]
+        targets=list(job["targets"])
+        if any(not isinstance(item,dict) or not item.get("video_id") for item in targets):
+            _update(job_id,profile_id,path,state="REVIEW",message="작업 표본 체크포인트 형식이 손상되어 재요청하지 않았습니다.")
+            return get(job_id,profile_id,path)
+        sample_targets=[item for item in targets if _first_evidence_matches_job(profile_id,job_id,item,path)]
+        ids = [item["video_id"] for item in sample_targets]
+        if not ids:
+            _update(job_id,profile_id,path,state="REVIEW",message="두 번째 표본을 요청할 유효한 작업별 첫 표본이 없습니다.")
+            return get(job_id,profile_id,path)
         metadata={item["video_id"]:{"research_group":item["group"],"genre_evidence":item["positive_signals"],
             "genre_conflicts":item["conflict_signals"],"genre_reason":item["genre_reason"],
             "review_caution":item["caution"]} for item in job["targets"]}
-        sampler(key, profile_id, ids, access_token=access_token,
+        samples=sampler(key, profile_id, ids, access_token=access_token,
                 quota_context={**(quota_context or {}), "profile_id": profile_id,
                                "path": str(path or store.db_path()), "session_id": job_id}, path=path,
                 target_metadata=metadata)
@@ -418,7 +515,41 @@ def run_second_phase(job_id, profile_id, key, *, access_token=None, quota_contex
     except Exception as exc:
         _update(job_id, profile_id, path, state="FAILED", message=f"두 번째 표본 실패: {type(exc).__name__}")
         raise
-    _update(job_id, profile_id, path, state="COMPLETED", message="VPH 계산 완료")
+    sample_evidence=_returned_sample_evidence(profile_id,samples,path)
+    valid_measurements=0
+    for target in targets:
+        first_id=target.get("first_observation_id")
+        if not first_id:
+            continue
+        evidence=sample_evidence.get(target["video_id"])
+        if not evidence:
+            target["second_status"]="missing"
+            continue
+        target["second_observation_id"]=evidence["id"]
+        target["second_job_id"]=job_id
+        target["second_evaluation_id"]=evidence["evaluation_id"]
+        target["second_observed_at_utc"]=evidence["observed_at_utc"]
+        first=next((item for item in sample_targets if item["video_id"]==target["video_id"]),None)
+        try:
+            first_time=datetime.fromisoformat(first["first_observed_at_utc"].replace("Z","+00:00")) if first else None
+            second_time=datetime.fromisoformat(evidence["observed_at_utc"].replace("Z","+00:00"))
+            elapsed=(second_time-first_time).total_seconds() if first_time else 0
+            if not first_time or not first_time.tzinfo or not second_time.tzinfo:
+                elapsed=0
+        except (TypeError,ValueError,AttributeError):
+            elapsed=0
+        linked=(evidence["id"]!=first_id and elapsed>=SECOND_SAMPLE_DELAY_SECONDS+1 and
+                evidence["sample_status"]=="valid" and evidence["view_count"] is not None and
+                evidence["earlier_observation_id"]==first_id)
+        target["second_status"]=("valid" if linked and evidence["evaluation_state"]=="VALID" else
+                                  "review" if evidence["evaluation_state"]=="REVIEW" else
+                                  "unknown" if linked else "invalid")
+        if linked and evidence["evaluation_state"]=="VALID":
+            valid_measurements+=1
+    _update(job_id,profile_id,path,targets_json=json.dumps(targets,ensure_ascii=False),
+            state="COMPLETED" if valid_measurements else "REVIEW",
+            message=("VPH 계산 완료" if valid_measurements else
+                     "유효한 작업별 두 번째 표본/VPH 평가가 확인되지 않아 REVIEW로 보존했습니다."))
     return get(job_id, profile_id, path)
 
 

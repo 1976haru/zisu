@@ -1,5 +1,15 @@
 # ZISU Integrated Project Status
 
+### Current VPH session provenance fix (2026-10-23, local worktree)
+
+- Base/parent: `29c357dffb957eab3e0eea712bb4b2f964712932`, branch `feature/v4.5-ai-research-manager`. Current VPH fix is local and uncommitted; no Windows CI or package exists for it yet. Production DB/OAuth/DPAPI, live APIs, personal Chrome, and installation were not accessed or changed.
+- The dashboard now joins one-shot request, schedule, and VPH job through exact IDs; invalid/missing links safely block instead of combining independently selected “latest” rows. It validates first/second observation and evaluation IDs against the same profile, job, and video. Legacy profile observations stay cumulative history only. Current VPH/COMPLETE requires a valid, distinct second sample at least 3,901 seconds after the job-owned first sample and matching persisted evaluation; a successful collector response without saved evidence stays REVIEW.
+- Added an additive `vph_research_jobs.request_id` column and a unique partial index, plus GUI request-ID handoff. Current-session candidate/search/sample/VPH counts are separate from cumulative profile counts; old labels and observations are unchanged.
+- Modified-source offline evidence: unittest **359 run / 358 PASS / 1 opt-in live-browser SKIP / 0 FAIL**; acceptance **29/29 PASS**; GUI smoke **PASS**; stress **10,000 candidates / 12 workers / 0 failures**; compileall and `git diff --check` **PASS**. Existing SQLite ResourceWarning remains. This does not establish Windows CI, live account behavior, or visual review.
+- Old-source soak PID 47396 remains running and untouched. Its last report was **RUNNING** at 1,501 seconds / 6 of 73 samples, with 0 external attempts, 0 DB errors, 0 exceptions, checkpoint verified, but `genre_configuration_preserved=false` and DB integrity not yet checked. Keep that concern with SHA 29c only; it is not evidence for the modified source. Do not overlap a new six-hour soak with it.
+- Pending: final diff/doc review, local commit, ordinary fast-forward push, exact-SHA Push/PR Windows CI, artifact/EXE validation, new-SHA 21,600-second offline soak, and only then protected installation. Actual API/Analytics, OAuth, Chrome, human genre evaluation, and Windows visual review remain **PENDING**.
+- Progress estimate: source fix and offline checks are complete locally; release/operational completion is not complete. Engineering and push/CI gates are estimated at 1–3 hours depending on runner queue; a new soak needs at least six wall-clock hours after PID 47396 exits, plus package and install checks. Estimate is not a verified result.
+
 ### P0/P1/P2 integrated closeout audit (2026-10-23, local worktree)
 
 - Base: branch `feature/v4.5-ai-research-manager`, SHA `973a549d6590454814446eb44fc4dd1f84d90387`; this closeout change is not yet committed or Windows-CI verified. The primary worktree, production DB/OAuth/DPAPI, live APIs and personal Chrome were not modified or accessed.

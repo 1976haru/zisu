@@ -39,9 +39,21 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         store.save_candidates(self.profile,[{"video_id":"video000001","video_title":"Morning chill rap",
             "genre_decision":genres.FIT,"genre_score":95}],path=self.db)
 
+    def _bind_first(self,video_id="video000001",when=None,views=100):
+        result=vph.record_observation(self.profile,video_id,views,when or datetime.now(timezone.utc),path=self.db)
+        with store.connect(self.db) as db:
+            row=db.execute("SELECT targets_json FROM vph_research_jobs WHERE id='job_1'").fetchone()
+            targets=json.loads(row[0] or "[]")
+            target=next((item for item in targets if item["video_id"]==video_id),targets[0])
+            target.update(first_observation_id=result["later_observation_id"],first_job_id="job_1",
+                first_evaluation_id=result["id"],first_observed_at_utc=when.isoformat() if when else
+                datetime.now(timezone.utc).isoformat(),first_status="valid")
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id='job_1'",(json.dumps(targets),))
+        return result
+
     def test_waiting_second_keeps_schedule_and_stage_progress_separate(self):
         self._persist_flow()
-        vph.record_observation(self.profile,"video000001",100,datetime(2026,1,1,tzinfo=timezone.utc),path=self.db)
+        self._bind_first(when=datetime(2026,1,1,tzinfo=timezone.utc))
         model=presenter.present(self.profile,self.db,now=datetime(2026,1,1,0,30,tzinfo=timezone.utc))
         self.assertEqual("WAITING_SAMPLE_2",model["state"])
         self.assertFalse(model["stages"]["auth"],"an existing schedule/job is not proof that credentials are connected")
@@ -109,13 +121,20 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertEqual("READY",model["state"])
         self.assertFalse(model["stages"]["search"])
         self.assertFalse(model["stages"]["genre_evaluation"])
-        self.assertEqual(1,model["counts"]["candidates"])
+        self.assertEqual(0,model["counts"]["candidates"])
+        self.assertEqual(1,model["counts"]["cumulative_candidates"])
 
     def test_complete_requires_real_second_sample_and_completed_vph_job(self):
         self._persist_flow(intent="completed",schedule="completed",phase="complete",job="COMPLETED")
         first=datetime(2026,1,1,tzinfo=timezone.utc)
-        vph.record_observation(self.profile,"video000001",100,first,path=self.db)
-        vph.record_observation(self.profile,"video000001",250,first+timedelta(seconds=3901),path=self.db)
+        first_eval=self._bind_first(when=first)
+        second_eval=vph.record_observation(self.profile,"video000001",250,first+timedelta(seconds=3901),path=self.db)
+        with store.connect(self.db) as db:
+            targets=json.loads(db.execute("SELECT targets_json FROM vph_research_jobs WHERE id='job_1'").fetchone()[0])
+            targets[0].update(second_observation_id=second_eval["later_observation_id"],second_job_id="job_1",
+                second_evaluation_id=second_eval["id"],second_observed_at_utc=(first+timedelta(seconds=3901)).isoformat(),
+                second_status="valid")
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id='job_1'",(json.dumps(targets),))
         model=presenter.present(self.profile,self.db,now=first+timedelta(seconds=4000))
         self.assertEqual("COMPLETE",model["state"])
         self.assertTrue(model["stages"]["final_result"])
@@ -123,6 +142,71 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertFalse(model["insufficient_measurement"])
         self.assertFalse(model["can_start"])
         self.assertFalse(model["can_stop"])
+        self.assertTrue(model["stages"]["vph"])
+        self.assertEqual(1,model["counts"]["vph_a"])
+
+    def test_historical_two_samples_do_not_complete_new_ready_job(self):
+        when=datetime(2026,1,1,tzinfo=timezone.utc)
+        old_first=vph.record_observation(self.profile,"video000001",100,when,path=self.db)
+        vph.record_observation(self.profile,"video000001",250,when+timedelta(seconds=3901),path=self.db)
+        job=__import__("mcrs.vph_research",fromlist=["start"]).start(self.profile,self.db)
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id=?",
+                (json.dumps([{"video_id":"video000001","group":"CORE_FIT",
+                    "first_observation_id":old_first["later_observation_id"],
+                    "first_evaluation_id":old_first["id"]}]),job["id"]))
+        model=presenter.present(self.profile,self.db,now=when+timedelta(hours=2))
+        self.assertEqual("READY",model["state"])
+        self.assertEqual((0,0),(model["counts"]["sample_1"],model["counts"]["sample_2"]))
+        self.assertGreaterEqual(model["counts"]["cumulative_second_sample"],1)
+        self.assertFalse(model["stages"]["sample_1"])
+        self.assertFalse(model["stages"]["sample_2"])
+
+    def test_missing_job_link_blocks_does_not_join_independent_latest_rows(self):
+        self._persist_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE research_schedules SET checkpoint_json=? WHERE id='schedule_1'",
+                (json.dumps({"vph_job_id":"not-job_1"}),))
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("BLOCKED",model["state"])
+        self.assertEqual("schedule_job_mismatch",model["error_code"])
+        self.assertFalse(model["can_start"])
+        self.assertFalse(model["can_pause"])
+        self.assertFalse(model["can_resume"])
+        self.assertFalse(model["can_stop"])
+
+    def test_profile_and_request_ids_are_part_of_sample_provenance(self):
+        self._persist_flow()
+        other=store.create_profile("Dashboard JP Evidence","JP","CHILL_RAP",path=self.db)
+        observation=vph.record_observation(other,"video000001",100,datetime(2026,1,1,tzinfo=timezone.utc),path=self.db)
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET request_id='wrong-request' WHERE id='job_1'")
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id='job_1'",
+                (json.dumps([{"video_id":"video000001","first_observation_id":observation["later_observation_id"],
+                    "first_evaluation_id":observation["id"],"first_job_id":"job_1","first_status":"valid"}]),))
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("BLOCKED",model["state"])
+        self.assertEqual("job_request_mismatch",model["error_code"])
+        self.assertFalse(model["stages"]["sample_1"])
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET request_id='' WHERE id='job_1'")
+        isolated=presenter.present(self.profile,self.db)
+        self.assertTrue(isolated["session_consistent"])
+        self.assertFalse(isolated["stages"]["sample_1"])
+
+    def test_previous_completed_job_is_not_joined_to_new_schedule(self):
+        self._persist_flow()
+        with store.connect(self.db) as db:
+            db.execute("INSERT INTO research_schedules(id,profile_id,market,core_genre,start_at_utc,total_minutes,"
+                "research_minutes,break_minutes,approved_search_calls,state,phase,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",("old_schedule",self.profile,"KR","MORNING_CHILL_RAP",
+                "2025-01-01T00:00:00+00:00",480,20,20,3,"completed","complete","2025-01-01 00:00:00"))
+            db.execute("INSERT INTO vph_research_jobs(id,profile_id,state,schedule_id,targets_json,created_at) "
+                "VALUES(?,?,?,?,?,?)",("old_job",self.profile,"COMPLETED","old_schedule","[]","2025-01-01 00:00:00"))
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("job_1",model["job_id"])
+        self.assertEqual("schedule_1",model["schedule_id"])
+        self.assertNotEqual("COMPLETE",model["state"])
 
     def test_user_paused_schedule_exposes_resume_only(self):
         self._persist_flow(schedule="paused",phase="paused",job="PAUSED")

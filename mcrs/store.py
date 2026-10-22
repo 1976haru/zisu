@@ -243,6 +243,7 @@ def initialize(path=None):
           search_limit INTEGER NOT NULL DEFAULT 3, search_calls_used INTEGER NOT NULL DEFAULT 0,
           used_queries_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
           next_run_utc TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '',
+          request_id TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
@@ -381,6 +382,9 @@ def initialize(path=None):
             _add_column(db, "profiles", definition)
         _add_column(db, "vph_research_jobs", "observation_slots INTEGER NOT NULL DEFAULT 10")
         _add_column(db, "vph_research_jobs", "schedule_id TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "vph_research_jobs", "request_id TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_vph_research_jobs_request_id "
+                   "ON vph_research_jobs(request_id) WHERE request_id<>''")
         if migrate_legacy_subgenre:
             # Preserve the historical free-text subgenre while making it
             # visible to the new structured search/UI configuration. This
@@ -1208,45 +1212,213 @@ def research_dashboard_snapshot(profile_id, path=None):
     """Read persisted one-click research state without advancing any engine."""
     with connect(path) as db:
         profile_row=db.execute("SELECT * FROM profiles WHERE id=?",(profile_id,)).fetchone()
-        intent_row=db.execute("SELECT * FROM vph_auto_start_intents WHERE profile_id=? "
-            "ORDER BY created_at DESC,request_id DESC LIMIT 1",(profile_id,)).fetchone()
-        schedule_row=db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
-            "ORDER BY created_at DESC,id DESC LIMIT 1",(profile_id,)).fetchone()
-        job_row=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? "
-            "ORDER BY created_at DESC,id DESC LIMIT 1",(profile_id,)).fetchone()
-        candidate_rows=db.execute("SELECT predicted_decision AS genre_decision,COUNT(*) AS count FROM genre_audit "
+        latest_intent=db.execute("SELECT * FROM vph_auto_start_intents WHERE profile_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        latest_schedule=db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        latest_job=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        relationship_error=""
+        intent_row=schedule_row=job_row=None
+        # Select one latest *related* run. A newer intent takes precedence over
+        # an older schedule; otherwise the newest schedule determines its exact
+        # intent/job. Never zip three independent profile-wide "latest" rows.
+        if latest_intent and (not latest_schedule or latest_intent["created_at"] > latest_schedule["created_at"]):
+            intent_row=latest_intent
+            if intent_row["schedule_id"]:
+                schedule_row=db.execute("SELECT * FROM research_schedules WHERE id=? AND profile_id=?",
+                    (intent_row["schedule_id"],profile_id)).fetchone()
+                if not schedule_row or schedule_row["auto_start_request_id"] != intent_row["request_id"]:
+                    relationship_error="intent_schedule_mismatch"
+                    schedule_row=None
+            elif intent_row["status"] in {"started","completed"}:
+                relationship_error="intent_schedule_missing"
+        elif latest_schedule:
+            schedule_row=latest_schedule
+            if schedule_row["auto_start_request_id"]:
+                intent_row=db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=? AND profile_id=?",
+                    (schedule_row["auto_start_request_id"],profile_id)).fetchone()
+                if not intent_row or intent_row["schedule_id"] != schedule_row["id"]:
+                    relationship_error="schedule_intent_mismatch"
+            else:
+                # A preceding one-shot request is not inherited by a later
+                # manually-created schedule.
+                intent_row=None
+        elif latest_intent:
+            intent_row=latest_intent
+            if intent_row["schedule_id"]:
+                relationship_error="intent_schedule_missing"
+        elif latest_job:
+            # Standalone legacy/manual VPH jobs remain inspectable, but only
+            # when no newer one-shot or schedule exists to which they could be
+            # accidentally attributed.
+            job_row=latest_job
+
+        if schedule_row:
+            job_row=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? AND schedule_id=? "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,schedule_row["id"])).fetchone()
+        elif intent_row and intent_row["schedule_id"] and not relationship_error:
+            job_row=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? AND schedule_id=? "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,intent_row["schedule_id"])).fetchone()
+        if job_row and intent_row and job_row["request_id"] and job_row["request_id"] != intent_row["request_id"]:
+            relationship_error="job_request_mismatch"
+        if job_row and schedule_row and job_row["schedule_id"] != schedule_row["id"]:
+            relationship_error="job_schedule_mismatch"
+
+        cumulative_candidate_rows=db.execute("SELECT predicted_decision AS genre_decision,COUNT(*) AS count FROM genre_audit "
             "WHERE profile_id=? GROUP BY predicted_decision",(profile_id,)).fetchall()
-        if not candidate_rows:
-            candidate_rows=db.execute("SELECT genre_decision,COUNT(*) AS count FROM candidates "
+        if not cumulative_candidate_rows:
+            cumulative_candidate_rows=db.execute("SELECT genre_decision,COUNT(*) AS count FROM candidates "
                 "WHERE profile_id=? GROUP BY genre_decision",(profile_id,)).fetchall()
-        observation_rows=db.execute("SELECT video_id,COUNT(*) AS count FROM vph_observations "
+        cumulative_observation_rows=db.execute("SELECT video_id,COUNT(*) AS count FROM vph_observations "
             "WHERE profile_id=? GROUP BY video_id",(profile_id,)).fetchall()
-        evaluation_rows=db.execute("""WITH latest AS (
+        cumulative_evaluation_rows=db.execute("""WITH latest AS (
             SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.video_id ORDER BY e.id DESC) AS rank
             FROM vph_evaluations e WHERE e.profile_id=?)
-            SELECT state,tier,COUNT(*) AS count FROM latest WHERE rank=1 GROUP BY state,tier""",
-            (profile_id,)).fetchall()
+            SELECT state,tier,COUNT(*) AS count FROM latest WHERE rank=1 GROUP BY state,tier""",(profile_id,)).fetchall()
+        session_targets=[]
+        if job_row:
+            try:
+                session_targets=json.loads(job_row["targets_json"] or "[]")
+                if not isinstance(session_targets,list):
+                    raise ValueError("targets_not_list")
+            except (TypeError,ValueError,json.JSONDecodeError):
+                relationship_error=relationship_error or "job_checkpoint_invalid"
+                session_targets=[]
+        checkpoint={}
+        if schedule_row:
+            try:
+                checkpoint=json.loads(schedule_row["checkpoint_json"] or "{}")
+                if not isinstance(checkpoint,dict):
+                    raise ValueError("checkpoint_not_object")
+            except (TypeError,ValueError,json.JSONDecodeError):
+                relationship_error=relationship_error or "schedule_checkpoint_invalid"
+                checkpoint={}
+        expected_job_id=checkpoint.get("vph_job_id")
+        if schedule_row and expected_job_id and (not job_row or job_row["id"]!=expected_job_id):
+            relationship_error=relationship_error or "schedule_job_mismatch"
+        raw_session_ids=checkpoint.get("processed_video_ids",[])
+        if not isinstance(raw_session_ids,list) or any(not isinstance(value,str) for value in raw_session_ids):
+            relationship_error=relationship_error or "schedule_candidate_checkpoint_invalid"
+            raw_session_ids=[]
+        session_ids=list(dict.fromkeys(value for value in raw_session_ids if value))
+        session_candidate_rows=[]
+        for offset in range(0,len(session_ids),500):
+            batch=session_ids[offset:offset+500]
+            placeholders=",".join("?" for _ in batch)
+            session_candidate_rows.extend(db.execute(f"SELECT video_id,genre_decision FROM candidates WHERE profile_id=? "
+                f"AND video_id IN ({placeholders})",(profile_id,*batch)).fetchall())
+        # Validate observation/evaluation identifiers against this exact job,
+        # profile and video. Legacy observations without persisted job links
+        # remain in cumulative history only.
+        first=second=valid=unknown=review=tier_a=tier_b=0
+        observing=set()
+        if job_row and not relationship_error:
+            for target in session_targets:
+                if not isinstance(target,dict):
+                    continue
+                video_id=str(target.get("video_id") or "")
+                if not video_id:
+                    continue
+                first_id=target.get("first_observation_id")
+                second_id=target.get("second_observation_id")
+                first_belongs=target.get("first_job_id")==job_row["id"]
+                second_belongs=target.get("second_job_id")==job_row["id"]
+                first_row=db.execute("SELECT id,profile_id,video_id,observed_at_utc,view_count,sample_status "
+                    "FROM vph_observations WHERE id=? AND profile_id=? AND video_id=?",
+                    (first_id,profile_id,video_id)).fetchone() if first_id and first_belongs else None
+                first_eval=db.execute("SELECT id,state,reason FROM vph_evaluations WHERE profile_id=? AND video_id=? "
+                    "AND later_observation_id=?",(profile_id,video_id,first_id)).fetchone() if first_row else None
+                first_valid=bool(first_row and first_eval and target.get("first_evaluation_id")==first_eval["id"]
+                    and first_row["sample_status"]=="valid" and first_row["view_count"] is not None
+                    and first_eval["reason"]=="first_sample")
+                if first_valid:
+                    first+=1
+                    observing.add(video_id)
+                second_row=db.execute("SELECT id,profile_id,video_id,observed_at_utc,view_count,sample_status "
+                    "FROM vph_observations WHERE id=? AND profile_id=? AND video_id=?",
+                    (second_id,profile_id,video_id)).fetchone() if second_id and second_belongs else None
+                eval_row=None
+                if first_valid and second_row:
+                    eval_row=db.execute("SELECT * FROM vph_evaluations WHERE profile_id=? AND video_id=? "
+                        "AND later_observation_id=?",(profile_id,video_id,second_row["id"])).fetchone()
+                elapsed=None
+                if first_valid and second_row:
+                    try:
+                        first_time=datetime.fromisoformat(first_row["observed_at_utc"].replace("Z","+00:00"))
+                        second_time=datetime.fromisoformat(second_row["observed_at_utc"].replace("Z","+00:00"))
+                        elapsed=(second_time-first_time).total_seconds() if first_time.tzinfo and second_time.tzinfo else None
+                    except (TypeError,ValueError,AttributeError):
+                        elapsed=None
+                try:
+                    evaluation_elapsed=(float(eval_row["elapsed_seconds"])
+                                        if eval_row and eval_row["elapsed_seconds"] is not None else None)
+                except (TypeError,ValueError):
+                    evaluation_elapsed=None
+                linked_second=bool(second_row and first_valid and elapsed is not None and elapsed>=3901
+                    and second_row["sample_status"]=="valid" and second_row["view_count"] is not None
+                    and eval_row and eval_row["earlier_observation_id"]==first_row["id"]
+                    and evaluation_elapsed is not None and abs(evaluation_elapsed-elapsed)<0.001
+                    and target.get("second_evaluation_id")==eval_row["id"])
+                if linked_second:
+                    second+=1
+                    observing.add(video_id)
+                    if eval_row["state"]=="VALID" and eval_row["vph"] is not None:
+                        valid+=1
+                        if eval_row["tier"]=="A": tier_a+=1
+                        elif eval_row["tier"]=="B": tier_b+=1
+                    elif eval_row["state"]=="REVIEW":
+                        review+=1
+                    else:
+                        unknown+=1
+                elif target.get("second_observation_id") or target.get("second_status") in {"missing","uncertain","invalid"}:
+                    review+=1
+                elif first_valid and job_row["state"] in {"COMPLETED","REVIEW"}:
+                    unknown+=1
+        if job_row and job_row["state"]=="COMPLETED" and valid==0:
+            relationship_error=relationship_error or "completed_job_without_valid_vph"
+        if intent_row and intent_row["status"]=="completed" and (
+                not schedule_row or schedule_row["state"]!="completed" or not job_row or job_row["state"]!="COMPLETED"):
+            relationship_error=relationship_error or "completed_intent_incomplete_run"
     profile=dict(profile_row) if profile_row else None
     intent=dict(intent_row) if intent_row else None
     if intent:
-        intent["settings"]=json.loads(intent.pop("settings_json"))
+        try:
+            intent["settings"]=json.loads(intent.pop("settings_json"))
+            if not isinstance(intent["settings"],dict):
+                raise ValueError("intent_settings_not_object")
+        except (TypeError,ValueError,json.JSONDecodeError):
+            relationship_error=relationship_error or "intent_checkpoint_invalid"
+            intent["settings"]={}
     schedule=dict(schedule_row) if schedule_row else None
     if schedule:
-        schedule["checkpoint"]=json.loads(schedule.get("checkpoint_json") or "{}")
+        schedule["checkpoint"]=checkpoint
     job=dict(job_row) if job_row else None
     if job:
-        job["targets"]=json.loads(job.get("targets_json") or "[]")
-    candidate_counts={row["genre_decision"]:row["count"] for row in candidate_rows}
-    candidate_counts["total"]=sum(candidate_counts.values())
-    first=sum(1 for row in observation_rows if row["count"]>=1)
-    second=sum(1 for row in observation_rows if row["count"]>=2)
+        job["targets"]=session_targets
+    cumulative_candidate_counts={row["genre_decision"]:row["count"] for row in cumulative_candidate_rows}
+    cumulative_candidate_counts["total"]=sum(cumulative_candidate_counts.values())
+    session_candidate_counts={}
+    for row in session_candidate_rows:
+        session_candidate_counts[row["genre_decision"]]=session_candidate_counts.get(row["genre_decision"],0)+1
+    session_candidate_counts["total"]=sum(session_candidate_counts.values())
+    cumulative_observations=sum(1 for row in cumulative_observation_rows if row["count"]>=1)
+    cumulative_second=sum(1 for row in cumulative_observation_rows if row["count"]>=2)
     return {"profile":profile,"intent":intent,"schedule":schedule,"job":job,
-        "candidate_counts":candidate_counts,"first_sample_count":first,"second_sample_count":second,
-        "observing_count":len(observation_rows),
-        "vph_a_count":sum(row["count"] for row in evaluation_rows if row["state"]=="VALID" and row["tier"]=="A"),
-        "vph_b_count":sum(row["count"] for row in evaluation_rows if row["state"]=="VALID" and row["tier"]=="B"),
-        "vph_unknown_count":sum(row["count"] for row in evaluation_rows if row["state"]=="UNKNOWN"),
-        "vph_review_count":sum(row["count"] for row in evaluation_rows if row["state"]=="REVIEW")}
+        "session_consistent":not relationship_error,"session_error":relationship_error,
+        "candidate_counts":session_candidate_counts,"session_candidate_counts":session_candidate_counts,
+        "cumulative_candidate_counts":cumulative_candidate_counts,
+        "first_sample_count":first,"second_sample_count":second,"vph_valid_count":valid,
+        "observing_count":len(observing),"vph_a_count":tier_a,"vph_b_count":tier_b,
+        "vph_unknown_count":unknown,"vph_review_count":review,
+        "cumulative_observing_count":cumulative_observations,
+        "cumulative_second_sample_count":cumulative_second,
+        "cumulative_vph_a_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="VALID" and row["tier"]=="A"),
+        "cumulative_vph_b_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="VALID" and row["tier"]=="B"),
+        "cumulative_vph_unknown_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="UNKNOWN"),
+        "cumulative_vph_review_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="REVIEW"),
+        "search_calls_current":max(int((schedule or {}).get("search_calls_used",0) or 0),
+                                    int((job or {}).get("search_calls_used",0) or 0))}
 
 
 def claim_vph_auto_start_intent(request_id, profile_id, settings, path=None):
