@@ -68,6 +68,30 @@ class AutoStartIntentTests(unittest.TestCase):
         self.assertEqual("completed", completed["status"])
         self.assertEqual([], store.list_open_vph_auto_start_intents(self.db))
 
+    def test_completed_schedule_without_linked_vph_evidence_is_not_completed_on_resume(self):
+        request_id="request_terminal_without_samples"
+        store.create_vph_auto_start_intent(request_id,self.settings)
+        store.claim_vph_auto_start_intent(request_id,self.live_profile,self.settings)
+        store.update_vph_auto_start_intent(request_id,"started",schedule_id="schedule_terminal")
+        with store.connect() as db:
+            db.execute("INSERT INTO research_schedules(id,profile_id,market,core_genre,start_at_utc,total_minutes,"
+                "research_minutes,break_minutes,approved_search_calls,state,phase,auto_start_request_id,checkpoint_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",("schedule_terminal",self.live_profile,"KR",
+                "MORNING_CHILL_RAP","2026-01-01T00:00:00+00:00",480,20,20,3,"completed","complete",
+                request_id,'{"auto_start_request_id":"request_terminal_without_samples",'
+                '"vph_job_id":"job_terminal","uncertain_request":false}'))
+            db.execute("INSERT INTO vph_research_jobs(id,profile_id,state,search_limit,observation_slots,"
+                "schedule_id,request_id,targets_json) VALUES(?,?,?,?,?,?,?,?)",
+                ("job_terminal",self.live_profile,"REVIEW",3,10,"schedule_terminal",request_id,"[]"))
+        app=Studio.__new__(Studio)
+        with patch("mcrs.gui.research_scheduler.get",return_value={"id":"schedule_terminal","state":"completed"}):
+            self.assertTrue(app._resume_one_shot_auto_schedule(
+                store.get_vph_auto_start_intent(request_id),store.get_profile(self.live_profile),
+                {"id":"schedule_terminal","state":"completed"}))
+        final=store.get_vph_auto_start_intent(request_id)
+        self.assertEqual("blocked",final["status"])
+        self.assertEqual("insufficient_vph_measurement",final["reason"])
+
     def test_gui_click_persists_once_and_duplicate_click_is_blocked(self):
         app=Studio.__new__(Studio)
         app.active_id=self.live_profile

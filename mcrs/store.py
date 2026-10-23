@@ -1380,6 +1380,23 @@ def research_dashboard_snapshot(profile_id, path=None):
         if intent_row and intent_row["status"]=="completed" and (
                 not schedule_row or schedule_row["state"]!="completed" or not job_row or job_row["state"]!="COMPLETED"):
             relationship_error=relationship_error or "completed_intent_incomplete_run"
+        # A completed schedule with a REVIEW job and no VPH targets/samples is
+        # a terminal historical run, not an in-flight request. Preserve its
+        # BLOCKED diagnosis, but allow an explicitly-created *new* request.
+        # Never apply this escape hatch to uncertain external calls or any
+        # session with observation evidence that needs review/recovery.
+        terminal_incomplete_intent=bool(intent_row and (
+            (intent_row["status"]=="completed" and relationship_error=="completed_intent_incomplete_run") or
+            (intent_row["status"]=="blocked" and intent_row["reason"]=="insufficient_vph_measurement")))
+        safe_new_request_allowed=bool(
+            terminal_incomplete_intent and
+            schedule_row and schedule_row["state"]=="completed" and
+            not schedule_row["search_in_flight"] and
+            job_row and job_row["state"]=="REVIEW" and
+            job_row["schedule_id"]==schedule_row["id"] and
+            not session_targets and first==0 and second==0 and
+            not checkpoint.get("uncertain_request",False) and
+            not checkpoint.get("uncertain_external_request",False))
     profile=dict(profile_row) if profile_row else None
     intent=dict(intent_row) if intent_row else None
     if intent:
@@ -1406,6 +1423,7 @@ def research_dashboard_snapshot(profile_id, path=None):
     cumulative_second=sum(1 for row in cumulative_observation_rows if row["count"]>=2)
     return {"profile":profile,"intent":intent,"schedule":schedule,"job":job,
         "session_consistent":not relationship_error,"session_error":relationship_error,
+        "safe_new_request_allowed":safe_new_request_allowed,
         "candidate_counts":session_candidate_counts,"session_candidate_counts":session_candidate_counts,
         "cumulative_candidate_counts":cumulative_candidate_counts,
         "first_sample_count":first,"second_sample_count":second,"vph_valid_count":valid,

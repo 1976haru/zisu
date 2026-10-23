@@ -1505,8 +1505,15 @@ class Studio(tk.Tk):
 
     def _resume_one_shot_auto_schedule(self, intent, profile, schedule):
         if schedule.get("state") in {"completed","cancelled"}:
-            store.update_vph_auto_start_intent(intent["request_id"],
-                "completed" if schedule["state"]=="completed" else "cancelled",schedule_id=schedule["id"])
+            if schedule["state"]=="cancelled":
+                store.update_vph_auto_start_intent(intent["request_id"],"cancelled",schedule_id=schedule["id"])
+            else:
+                snapshot=store.research_dashboard_snapshot(profile["id"])
+                complete=research_dashboard_presenter.completed_run_has_linked_vph_evidence(
+                    snapshot,intent["request_id"],schedule["id"])
+                store.update_vph_auto_start_intent(intent["request_id"],
+                    "completed" if complete else "blocked",schedule_id=schedule["id"],
+                    reason=None if complete else "insufficient_vph_measurement")
             return True
         if schedule["state"]=="running":
             schedule=research_scheduler.recover_interrupted_schedule(schedule["id"],profile["id"])
@@ -3646,12 +3653,12 @@ class Studio(tk.Tk):
                     try:
                         final_schedule=research_scheduler.get(schedule_id,profile_id)
                         if final_schedule and final_schedule["state"]=="completed":
-                            final_job=vph_research.latest_job(profile_id,store.db_path())
-                            if final_job and final_job.get("schedule_id")==schedule_id and final_job.get("state")=="COMPLETED":
-                                store.update_vph_auto_start_intent(auto_request_id,"completed",schedule_id=schedule_id)
-                            else:
-                                store.update_vph_auto_start_intent(auto_request_id,"blocked",schedule_id=schedule_id,
-                                    reason="insufficient_vph_measurement")
+                            snapshot=store.research_dashboard_snapshot(profile_id)
+                            complete=research_dashboard_presenter.completed_run_has_linked_vph_evidence(
+                                snapshot,auto_request_id,schedule_id)
+                            store.update_vph_auto_start_intent(auto_request_id,
+                                "completed" if complete else "blocked",schedule_id=schedule_id,
+                                reason=None if complete else "insufficient_vph_measurement")
                         elif final_schedule and final_schedule["state"]=="cancelled":
                             store.update_vph_auto_start_intent(auto_request_id,"cancelled",schedule_id=schedule_id)
                     except Exception:pass

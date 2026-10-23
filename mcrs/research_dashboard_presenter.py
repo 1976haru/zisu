@@ -63,6 +63,24 @@ def _state(snapshot):
     return "READY"
 
 
+def completed_run_has_linked_vph_evidence(snapshot, request_id, schedule_id):
+    """Require this exact one-shot run to have a completed, measured VPH job."""
+    intent=snapshot.get("intent") or {}
+    schedule=snapshot.get("schedule") or {}
+    job=snapshot.get("job") or {}
+    return bool(
+        snapshot.get("session_consistent",False) and
+        intent.get("request_id")==request_id and intent.get("schedule_id")==schedule_id and
+        schedule.get("id")==schedule_id and schedule.get("auto_start_request_id")==request_id and
+        schedule.get("state")=="completed" and not schedule.get("search_in_flight") and
+        job.get("id") and job.get("profile_id")==intent.get("profile_id") and
+        job.get("request_id")==request_id and job.get("schedule_id")==schedule_id and
+        job.get("state")=="COMPLETED" and
+        int(snapshot.get("second_sample_count",0))>0 and
+        int(snapshot.get("vph_valid_count",0))>0
+    )
+
+
 def present(profile_id, path=None, *, now=None, auth_ready=None):
     """Return a safe, read-only dashboard model for exactly one profile."""
     current = _utc_now(now)
@@ -117,6 +135,9 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
         "ERROR": "오류 단계와 안전한 오류 코드를 확인하세요.",
         "COMPLETE": "최종 결과를 확인하세요.",
     }[state]
+    if snapshot.get("safe_new_request_allowed"):
+        next_action=("이전 일정은 끝났지만 VPH 표본이 없어 완료가 아닙니다. "
+                     "이전 기록은 보존됩니다. 새 연구 시작은 새 요청 ID를 만듭니다.")
     return {
         "state": state,
         "profile_id": profile_id,
@@ -144,11 +165,13 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
         "auto_resume": state in {"RUNNING", "BREAK", "WAITING_SAMPLE_2"} or (state == "BLOCKED" and error_code.startswith("system_")),
         "next_action": next_action,
         "can_start": bool(
-            snapshot.get("session_consistent", True) and
-            state == "READY" and
-            (not intent or intent.get("status") in {"completed", "cancelled"}) and
-            (not schedule or schedule.get("state") in {"completed", "cancelled"}) and
-            (not job or job.get("state") in {"COMPLETED", "CANCELLED"})
+            snapshot.get("safe_new_request_allowed") or (
+                snapshot.get("session_consistent", True) and
+                state == "READY" and
+                (not intent or intent.get("status") in {"completed", "cancelled"}) and
+                (not schedule or schedule.get("state") in {"completed", "cancelled"}) and
+                (not job or job.get("state") in {"COMPLETED", "CANCELLED"})
+            )
         ),
         "can_pause": snapshot.get("session_consistent", True) and state in {"RUNNING", "WAITING_SAMPLE_2"} and bool(
             (schedule and schedule.get("state") == "running" and not schedule.get("search_in_flight")) or

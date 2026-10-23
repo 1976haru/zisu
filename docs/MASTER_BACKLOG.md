@@ -1,5 +1,11 @@
 # ZISU Master Backlog
 
+### Terminal incomplete one-shot recovery diagnosis (2026-10-23)
+
+- **P0 local fix:** an actual read-only production snapshot showed a completed 8-hour schedule paired with an empty `REVIEW` VPH job (0 targets, 0 observations/evaluations), while its old one-shot intent said `completed`. The historical code completed intents on schedule completion alone; current restart recovery also had an unconditional terminal-schedule completion path.
+- Completion now requires a persisted same-request/schedule/job chain and valid second-sample/VPH evidence. A terminal legacy schedule with no sample and no uncertain API request stays BLOCKED, preserves history, and permits a user-initiated fresh request ID; uncertain requests cannot use this path. No production row or credential was changed.
+- Offline evidence: 361 unittest (360 PASS / 1 opt-in browser SKIP), acceptance 29/29, GUI smoke PASS, 10,000 candidates / 12 workers / 0 failures, compileall and diff check PASS. Local commit `6754f4e20f7770cc1c0f6d6712a9ca0434d502a3` exists; remote transport via the configured proxy is blocked. Push/Windows CI/package/new-SHA 6-hour soak remain PENDING; installation remains unauthorized for this new SHA. Do not reuse prior SHA soak evidence.
+
 ### Current VPH session-provenance closeout (2026-10-23)
 
 - **P0 implementation, local only:** fixed current-session attribution in the dashboard/store and VPH collector. One-shot request, schedule, job, profile, video, first/second observation, and evaluation must agree by persisted identifiers. Legacy observations and candidates remain cumulative-only; they cannot satisfy new-job sample stages. The second sample must be distinct, valid, time-ordered, and at least 3,901 seconds after the job-owned first sample. Missing persisted evidence after an API response remains REVIEW, not COMPLETE. Added only an additive job request-ID migration; no historical rows or labels are rewritten.

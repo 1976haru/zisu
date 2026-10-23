@@ -1,5 +1,14 @@
 # ZISU Integrated Project Status
 
+### BLOCKED intent diagnosis and completion-gate fix (2026-10-23, local worktree)
+
+- Production DB was not modified. An immutable read-only analysis snapshot was created at `D:\03 zisu\.test_tmp\blocked_diagnosis_d878618_20261023\analysis_snapshot.db`; its source had no WAL/SHM sidecars. The active saved profile resolves to JP / `MORNING_CHILL_RAP`; its selected profile ID is consistent with the screen evidence.
+- Snapshot evidence: the intent and schedule IDs match; the schedule reached `completed` at 28,800/28,800 seconds and its checkpoint points to the same VPH job. That job is `REVIEW`, has no targets, no request ID, no observations/evaluations, and no first/second sample. Thus schedule elapsed=100% is accurate but does not mean research complete; 4/9 stages is consistent with setup/auth/search/genre evaluation and zero VPH evidence.
+- The intent was created 2026-10-21 with request prefix tied to the older `8892727` source. That source marked an intent completed solely when the schedule ended, and its restart-recovery branch still exists in the current source. This is a historical state-transition defect, not a DB migration/corruption issue. The existing `completed_intent_incomplete_run` dashboard guard correctly exposes the mismatch.
+- Minimal local fix: terminal schedule recovery and the normal worker finalizer now require the exact request/schedule/job link plus persisted second-sample and valid-VPH evidence before setting intent `completed`. A terminal legacy run with a REVIEW job, no targets/samples, and no uncertain request remains visibly BLOCKED but allows only a fresh explicit start (new request ID); uncertain external calls remain blocked. No production DB row was rewritten.
+- New local regression evidence: full unittest **361 run / 360 PASS / 1 opt-in browser SKIP / 0 FAIL**; offline acceptance **29/29 PASS**; GUI smoke **PASS**; stress **10,000 candidates / 12 workers / 0 failures**; compileall and `git diff --check` **PASS**. Isolated replay of the real snapshot yields BLOCKED, schedule 100%, 4/9, sample 0/0, and `can_start=True` only for a new request.
+- Local commit `6754f4e20f7770cc1c0f6d6712a9ca0434d502a3` was created with parent `d8786189700a84bc9c99ca6300ea4e0470665983`. Git's remote transport is blocked by the configured `127.0.0.1:9` proxy; no alternate write path was used. Push, exact-SHA Windows CI/package, and new-SHA 21,600-second soak remain pending; the installed `ZISU_APP` was not changed. Actual screen highlight/visual validation and real account/API tests remain pending.
+
 ### Current VPH session provenance fix (2026-10-23, local worktree)
 
 - Base/parent: `29c357dffb957eab3e0eea712bb4b2f964712932`, branch `feature/v4.5-ai-research-manager`. Current VPH fix is local and uncommitted; no Windows CI or package exists for it yet. Production DB/OAuth/DPAPI, live APIs, personal Chrome, and installation were not accessed or changed.

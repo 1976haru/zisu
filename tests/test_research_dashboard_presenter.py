@@ -130,6 +130,7 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         first_eval=self._bind_first(when=first)
         second_eval=vph.record_observation(self.profile,"video000001",250,first+timedelta(seconds=3901),path=self.db)
         with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET request_id='dashboard_request' WHERE id='job_1'")
             targets=json.loads(db.execute("SELECT targets_json FROM vph_research_jobs WHERE id='job_1'").fetchone()[0])
             targets[0].update(second_observation_id=second_eval["later_observation_id"],second_job_id="job_1",
                 second_evaluation_id=second_eval["id"],second_observed_at_utc=(first+timedelta(seconds=3901)).isoformat(),
@@ -144,6 +145,48 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertFalse(model["can_stop"])
         self.assertTrue(model["stages"]["vph"])
         self.assertEqual(1,model["counts"]["vph_a"])
+        snapshot=store.research_dashboard_snapshot(self.profile,self.db)
+        self.assertTrue(presenter.completed_run_has_linked_vph_evidence(
+            snapshot,"dashboard_request","schedule_1"))
+
+    def test_terminal_incomplete_history_allows_only_a_new_explicit_request(self):
+        self._persist_flow(intent="completed",schedule="completed",phase="complete",job="REVIEW")
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET targets_json='[]' WHERE id='job_1'")
+            db.execute("UPDATE research_schedules SET checkpoint_json=? WHERE id='schedule_1'",
+                (json.dumps({"auto_start_request_id":"dashboard_request","vph_job_id":"job_1",
+                             "uncertain_request":False}),))
+        model=presenter.present(self.profile,self.db)
+        self.assertEqual("BLOCKED",model["state"],"the historical run must not be rewritten as complete")
+        self.assertEqual("completed_intent_incomplete_run",model["error_code"])
+        self.assertEqual((0,0),(model["counts"]["sample_1"],model["counts"]["sample_2"]))
+        self.assertTrue(model["can_start"],"the button creates a distinct request after terminal, certain history")
+        self.assertIn("새 요청 ID",model["next_action"])
+        app=Studio.__new__(Studio)
+        app.active_id=self.profile
+        app._starting_from_easy_dashboard=True
+        app._vph_research_error_profile=None
+        app._vph_research_error_text=""
+        app.current_profile=MagicMock(return_value=store.get_profile(self.profile,self.db))
+        app._auto_start_settings=MagicMock(return_value=self.settings)
+        app._autopilot_start=MagicMock()
+        with patch("mcrs.gui.store.db_path",return_value=str(self.db)):
+            app.start_vph_scheduled_research()
+        app._autopilot_start.assert_called_once()
+        new_request=app._autopilot_start.call_args.kwargs["auto_request_id"]
+        self.assertNotEqual("dashboard_request",new_request)
+        self.assertEqual("claimed",store.get_vph_auto_start_intent(new_request,self.db)["status"])
+        with store.connect(self.db) as db:
+            db.execute("UPDATE research_schedules SET search_in_flight=1 WHERE id='schedule_1'")
+        uncertain=presenter.present(self.profile,self.db)
+        self.assertFalse(uncertain["can_start"],"an unresolved external call must continue to block restart")
+        with store.connect(self.db) as db:
+            db.execute("UPDATE research_schedules SET search_in_flight=0 WHERE id='schedule_1'")
+        store.update_vph_auto_start_intent("dashboard_request","blocked",self.db,
+            schedule_id="schedule_1",reason="insufficient_vph_measurement")
+        recovered=presenter.present(self.profile,self.db)
+        self.assertEqual("BLOCKED",recovered["state"])
+        self.assertTrue(recovered["can_start"],"restart recovery may terminally block history but still permit a new request")
 
     def test_historical_two_samples_do_not_complete_new_ready_job(self):
         when=datetime(2026,1,1,tzinfo=timezone.utc)
