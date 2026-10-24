@@ -847,8 +847,16 @@ def get_candidate(profile_id, video_id, path=None):
         row = db.execute("SELECT * FROM candidates WHERE profile_id=? AND video_id=?", (profile_id,video_id)).fetchone()
         return dict(row) if row else None
 
+UNREVIEWED_CANDIDATE_STATUSES = frozenset(("\ubbf8\ud655\uc778", "\ubbf8\uac80\ud1a0"))
+
+
+def is_unreviewed_candidate_status(status):
+    """Recognize both current and legacy untouched-candidate labels."""
+    return str(status or "") in UNREVIEWED_CANDIDATE_STATUSES
+
+
 def update_candidate(profile_id, video_id, status, notes, draft, path=None):
-    if status not in ("미확인", "검토 중", "보류", "완료"):
+    if status not in ("미확인", "미검토", "검토 중", "보류", "완료"):
         raise ValueError("올바르지 않은 후보 상태입니다.")
     with connect(path) as db:
         result = db.execute("UPDATE candidates SET status=?,notes=?,draft=?,updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND video_id=?", (status,notes,draft,profile_id,video_id))

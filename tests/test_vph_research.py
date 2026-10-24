@@ -315,6 +315,45 @@ class VphResearchTests(unittest.TestCase):
         self.assertEqual(1,sampled.call_count)
         self.assertEqual(1,len(vph.list_history(self.profile,"fit12345678",self.db)))
 
+    def test_legacy_unreviewed_candidates_feed_vph_without_research_search(self):
+        video="legacyfit12"
+        store.save_candidates(self.profile,[{"video_id":video,
+            "video_title":"Morning Chill Rap playlist",
+            "description":"vocal performance and steady beat"}],self.db)
+        with store.connect(self.db) as db:
+            db.execute("UPDATE candidates SET status=?,genre_decision=?,genre_score=90 WHERE profile_id=? AND video_id=?",
+                ("\ubbf8\uac80\ud1a0",genres.FIT,self.profile,video))
+        legacy_row=store.get_candidate(self.profile,video,self.db)
+        self.assertTrue(store.is_unreviewed_candidate_status(legacy_row["status"]))
+        self.assertEqual(genres.FIT,legacy_row["genre_decision"])
+        self._schedule("legacy-schedule")
+        job=vph_research.start(self.profile,self.db,search_limit=0,observation_slots=1,
+                               schedule_id="legacy-schedule")
+        with patch("mcrs.vph_research.lookup_videos",side_effect=AssertionError("search must not be repeated")), \
+             patch("mcrs.vph_research.vph.collect_video_samples",side_effect=lambda key,pid,ids,**kw:
+                   self._sample_first(key,pid,ids,**kw)) as sampled:
+            result=vph_research.run_first_phase(job["id"],self.profile,"key",path=self.db)
+        self.assertEqual("WAITING_SECOND",result["state"])
+        self.assertEqual([video],[item["video_id"] for item in result["targets"]])
+        self.assertEqual("CORE_FIT",result["targets"][0]["group"])
+        self.assertEqual(1,sampled.call_count)
+        self.assertEqual("\ubbf8\uac80\ud1a0",store.get_candidate(self.profile,video,self.db)["status"])
+
+    def test_reviewed_or_held_candidate_is_not_reused_for_vph(self):
+        video="heldfit1234"
+        store.save_candidates(self.profile,[{"video_id":video,
+            "video_title":"Morning Chill Rap playlist",
+            "description":"vocal performance and steady beat"}],self.db)
+        store.update_candidate(self.profile,video,"보류","user hold","",self.db)
+        self._schedule("held-schedule")
+        job=vph_research.start(self.profile,self.db,search_limit=0,schedule_id="held-schedule")
+        with patch("mcrs.vph_research.lookup_videos",side_effect=AssertionError("no search")), \
+             patch("mcrs.vph_research.vph.collect_video_samples",side_effect=AssertionError("held candidate sampled")):
+            result=vph_research.run_first_phase(job["id"],self.profile,"key",path=self.db)
+        self.assertEqual("REVIEW",result["state"])
+        self.assertEqual([],result["targets"])
+        self.assertIn("사용자 검토 상태 보호 1건",result["message"])
+
     def test_schedule_window_and_end_preserve_unfinished_samples(self):
         self._schedule("sched")
         job=vph_research.start(self.profile,self.db,search_limit=0,schedule_id="sched")

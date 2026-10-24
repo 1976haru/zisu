@@ -34,7 +34,8 @@ class V457AutomationTests(unittest.TestCase):
 
     def test_search_pages_continue_until_fit_goal_or_exact_call_ceiling(self):
         pages=[{"items":[{"video_id":"uncertain01","video_title":"unknown track"}],"nextPageToken":"p2"},
-               {"items":[{"video_id":"morning0001","video_title":"Morning Chill Rap mellow groove R&B"}],"nextPageToken":""}]
+               {"items":[{"video_id":"morning0001","video_title":"Morning Chill Rap mellow groove R&B",
+                           "description":"vocal performance over a steady beat"}],"nextPageToken":""}]
         calls=[]
         def collect(term,market,limit,page_token=None):
             calls.append((term,market,limit,page_token)); return pages.pop(0)
@@ -82,9 +83,10 @@ class V457AutomationTests(unittest.TestCase):
         self.assertEqual(0,store.genre_quality(self.profile,self.db)["labeled"])
 
     def test_human_label_and_metrics_remain_separate_from_ai(self):
-        row={"video_id":"morning0001","video_title":"Morning Chill Rap mellow groove R&B"}
+        row={"video_id":"morning0001","video_title":"Morning Chill Rap mellow groove R&B",
+             "description":"vocal performance over a steady beat"}
         store.save_candidates(self.profile,[row],self.db)
-        review=ai_research.review_candidate(self.profile,ai_research.Candidate(row["video_id"],row["video_title"]),None,self.db)
+        review=ai_research.review_candidate(self.profile,ai_research.Candidate(row["video_id"],row["video_title"],row["description"]),None,self.db)
         ai_research.persist_review_decisions(self.profile,[review],[row],self.db)
         store.label_genre_audit(self.profile,row["video_id"],"적합","직접 듣고 보컬과 리듬을 확인함",self.db)
         audit=store.list_genre_audit(self.profile,path=self.db)[0]

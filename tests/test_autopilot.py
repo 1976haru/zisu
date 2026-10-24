@@ -20,7 +20,7 @@ class AutopilotTests(unittest.TestCase):
     def fit_row(index):
         video_id = f"ap{index:09d}"  # exactly 11 ASCII characters
         return {"video_id": video_id, "video_title": f"Morning Chill Rap mellow groove {index}",
-                "description": "", "channel_title": f"JP Channel {index % 3}",
+                "description": "vocal performance over a steady beat", "channel_title": f"JP Channel {index % 3}",
                 "video_url": f"https://www.youtube.com/watch?v={video_id}", "keyword": "morning chill rap"}
 
     def test_one_click_pipeline_reaches_ten_fit_target_and_persists_report(self):

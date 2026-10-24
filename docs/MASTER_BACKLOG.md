@@ -258,3 +258,10 @@ Sequence: the core offline implementation of active V4.6.0 P0/P1/P2 and V46-GENR
 - P1: live VPH first and second sample, normal desktop visual inspection and latest-SHA six-hour wall-clock soak remain unverified.
 - P2: finalize distribution after P0/P1 evidence; no new feature scope added.
 - Next action: re-query remote branch SHA through the configured approved network route, then continue only if it still matches the stated base.
+
+### V46 P0: live-run saved candidate/VPH zero-target correction (2026-10-24)
+
+- Evidence: the first live run's three searches yielded 54 audited evaluations (8 FIT / 21 REVIEW / 25 EXCLUDE), of which the 29 non-EXCLUDE rows were persisted. All persisted untouched rows use legacy status `미검토`; VPH selection previously required only `미확인`, yielding zero targets at search budget 0. Eight historical FIT judgments lacked independent vocal and rhythm metadata despite existing rule documentation requiring both.
+- Local correction/tests: legacy status compatibility, strict rap FIT support gate (ambiguous cases remain REVIEW), explicit protection for user-reviewed candidates, and diagnostic rejection counts. No status migration or existing-data rewrite. This change remains local/uncommitted until full offline regression completes; same-SHA CI, deployment and live retest are pending and need separate approval.
+- P0 still open: test the reviewed local changes, commit if clean, then obtain explicit approval before any feature push or user installation. A new live run must use a new request after approved deployment; never resume/replay the cancelled request.
+- Local regression gate now passes: 364 unittest (363 PASS / 1 opt-in browser SKIP / 0 FAIL), acceptance 29/29, GUI smoke, stress 10,000/12 with zero failures, compileall, diff check, and sensitive-pattern scan. The earlier 17 failures were stale title-only FIT expectations and dependent fixtures; all were classified and updated without weakening unrelated genre assertions. Local commit is permitted; push, CI, install, live API, and soak remain pending/unauthorized for this slice.

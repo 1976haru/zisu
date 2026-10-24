@@ -44,7 +44,7 @@ class AIResearchTests(unittest.TestCase):
         provider = ai_research.MockProvider()
         ai_research.review_candidate(self.jp, self.candidate("朝のプレイリスト", "落ち着く音楽"), provider, self.db)
         self.assertEqual(provider.calls, 1)
-        ai_research.review_candidate(self.jp, self.candidate("Morning Chill Rap · 멜로딕 랩", "아침 드라이브"), provider, self.db)
+        ai_research.review_candidate(self.jp, self.candidate("Morning Chill Rap · 멜로딕 랩", "vocal performance and steady beat"), provider, self.db)
         self.assertEqual(provider.calls, 1)
         excluded = ai_research.Candidate("lmnopqrstuv", "朝 チルラップ", "睡眠用 lo-fi beats to study")
         ai_research.review_candidate(self.jp, excluded, provider, self.db)

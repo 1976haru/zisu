@@ -2069,7 +2069,7 @@ class Studio(tk.Tk):
         actions=ttk.Frame(detail)
         actions.grid(row=2,column=0,columnspan=2,sticky="ew",pady=6)
         self.item_status=tk.StringVar(value="미확인")
-        ttk.Combobox(actions,textvariable=self.item_status,values=["미확인","검토 중","보류","완료"],state="readonly",width=10).pack(side="left")
+        ttk.Combobox(actions,textvariable=self.item_status,values=["미확인","미검토","검토 중","보류","완료"],state="readonly",width=10).pack(side="left")
         for text,method in (("영상 열기",self.open_candidate),("메모 저장",self.save_candidate),("장르 수동 승인",self.approve_candidate),("댓글 초안",self.go_comment)):
             ttk.Button(actions,text=text,command=method).pack(side="left",padx=4)
         ttk.Label(actions,text="분석 알림").pack(side="left",padx=(12,4))
@@ -2533,7 +2533,7 @@ class Studio(tk.Tk):
                               f"다음 측정까지 {seconds//60}분 {seconds%60}초 · UTC {job['next_run_utc']} · 현지 {local}")
             else:
                 state_text = f"{job['message']} · 상태 {job['state']} · FIT {fit_count} / 장르 미확정 참고 {review_count} · {calls}"
-                if job["state"]=="REVIEW" and not targets:
+                if job["state"]=="REVIEW" and not targets and "관측 대상 0개" not in str(job.get("message", "")):
                     state_text += " · 검색 결과가 없거나 핵심 장르 신호가 부족함(적합도 0점·EXCLUDE 제외)"
             if hasattr(self,"vph_pause_button"):
                 can_pause = job["state"] in {"READY","WAITING_SECOND"} or (job["state"] in {"COLLECTING_FIRST","COLLECTING_SECOND"} and self._vph_research_worker_busy)

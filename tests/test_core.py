@@ -15,7 +15,7 @@ class GenreTests(unittest.TestCase):
     def test_market_queries_are_independent(self):
         for genre_id in LEGACY_GENRE_IDS: self.assertTrue(set(search_terms(genre_id,"JP")).isdisjoint(search_terms(genre_id,"KR")))
     def test_morning_needs_time_and_genre(self):
-        self.assertEqual(FIT,assess("MORNING_CHILL_RAP","아침 Morning Chill Rap 플레이리스트").decision)
+        self.assertEqual(REVIEW,assess("MORNING_CHILL_RAP","아침 Morning Chill Rap 플레이리스트").decision)
         self.assertEqual(REVIEW,assess("MORNING_CHILL_RAP","Chill Rap playlist").decision)
         self.assertEqual(REVIEW,assess("MORNING_CHILL_RAP","아침 음악 모음").decision)
     def test_morning_excludes_wrong_genres(self):
@@ -52,10 +52,10 @@ class GenreTests(unittest.TestCase):
             with self.subTest(genre=genre_id, title=title, description=description):
                 self.assertEqual(EXCLUDE, assess(genre_id, title, description).decision)
     def test_cross_genre_is_review(self): self.assertEqual(REVIEW,assess("CHILL_RAP","감성 힙합 R&B 힙합 플레이리스트").decision)
-    def test_japanese_signals(self): self.assertEqual(FIT,assess("MORNING_CHILL_RAP","朝 チルラップ プレイリスト").decision)
+    def test_japanese_signals(self): self.assertEqual(REVIEW,assess("MORNING_CHILL_RAP","朝 チルラップ プレイリスト").decision)
     def test_verdict_exposes_structured_evidence(self):
         verdict=assess("MORNING_CHILL_RAP","아침 melodic rap playlist")
-        self.assertEqual(FIT,verdict.decision)
+        self.assertEqual(REVIEW,verdict.decision)
         self.assertIn("melodic rap",verdict.positive_signals)
         self.assertEqual((),verdict.conflict_signals)
     def test_instrumental_morning_is_never_fit(self):
@@ -75,7 +75,7 @@ class StoreTests(unittest.TestCase):
         self.kr=store.create_profile("한국 칠랩 조사","KR","CHILL_RAP",self.db)
     def tearDown(self): self.temp.__exit__(None,None,None)
     def video(self,video_id="aBcDeF12345"):
-        return {"video_id":video_id,"video_title":"아침 Morning Chill Rap","description":"감성 힙합","channel_title":"Example"}
+        return {"video_id":video_id,"video_title":"아침 Morning Chill Rap","description":"vocal performance over a steady beat","channel_title":"Example"}
     def test_profile_isolation_same_video(self):
         store.save_candidates(self.jp,[self.video()],self.db); store.save_candidates(self.kr,[self.video()],self.db)
         store.update_candidate(self.jp,"aBcDeF12345","완료","일본 메모","",self.db)

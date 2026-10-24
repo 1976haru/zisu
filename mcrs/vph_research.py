@@ -238,7 +238,7 @@ def _meaningful_targets(profile, rows, path, *, known_ids=None, limit=MAX_TARGET
         if row.get("country") and row.get("country") != profile["market"]:
             continue
         if video_id in (known_ids or set()) or (old and (old.get("genre_decision") == genres.MANUAL_APPROVAL
-                                                        or old.get("status") != "미확인")):
+                                                        or not store.is_unreviewed_candidate_status(old.get("status")))):
             # Existing records are not re-targeted; human review/exclusion is immutable here.
             continue
         verdict = genres.assess(profile["genre"], row.get("video_title", ""),
@@ -330,8 +330,9 @@ def run_first_phase(job_id, profile_id, key, *, access_token=None, quota_context
         observed_ids = {row[0] for row in db.execute(
             "SELECT DISTINCT video_id FROM vph_observations WHERE profile_id=?", (profile_id,))}
     blocked_target_ids=observed_ids | _unresolved_target_ids(profile_id,path)
-    existing_rows = [row for row in store.list_candidates(profile_id, path=path)
-                     if row.get("status") == "미확인"
+    existing_candidates = store.list_candidates(profile_id, path=path)
+    existing_rows = [row for row in existing_candidates
+                     if store.is_unreviewed_candidate_status(row.get("status"))
                      and row.get("genre_decision") in {genres.FIT, genres.REVIEW}
                      and int(row.get("genre_score") or 0) > 0
                      and row["video_id"] not in blocked_target_ids]
@@ -375,11 +376,38 @@ def run_first_phase(job_id, profile_id, key, *, access_token=None, quota_context
         targets = sorted(target_by_id.values(),
                          key=lambda item: (item["group"] != "CORE_FIT", -item["score"]))[:slot_limit]
         if not targets:
+            saved_diagnostics = {}
+            custom_genres = store.profile_genre_config(profile)["custom_genres"]
+            for row in existing_candidates:
+                if row.get("video_id") in blocked_target_ids:
+                    reason = "과거 관측 또는 미해결 VPH 기록"
+                elif not store.is_unreviewed_candidate_status(row.get("status")):
+                    reason = "사용자 검토 상태 보호"
+                elif row.get("country") and row.get("country") != profile["market"]:
+                    reason = "시장 불일치"
+                else:
+                    verdict = genres.assess(profile["genre"], row.get("video_title", ""),
+                                            row.get("description", ""), custom_genres)
+                    if int(row.get("genre_score") or 0) <= 0 or not verdict.positive_signals:
+                        reason = "긍정 장르 신호 없음"
+                    elif verdict.decision == genres.EXCLUDE:
+                        reason = "장르 제외 규칙"
+                    else:
+                        reason = "필수 메타데이터 근거 부족"
+                saved_diagnostics[reason] = saved_diagnostics.get(reason, 0) + 1
+            reason_counts = dict(diagnosis_totals)
+            for reason, count in saved_diagnostics.items():
+                reason_counts[reason] = reason_counts.get(reason, 0) + count
+            reason_text = " / ".join(f"{reason} {count}건" for reason, count in reason_counts.items())
             _update(job_id, profile_id, path, state="REVIEW", targets_json="[]", next_run_utc="",
                     message=("검색 예산 내 Core FIT 또는 핵심 장르 긍정 신호 REVIEW가 없습니다. "
                              "적합도 0점 REVIEW 및 EXCLUDE는 관측하지 않았습니다. 부족 근거: "
                              +( " / ".join(f"{reason} {count}건" for reason,count in diagnosis_totals.items())
                                 or "새 검색 결과 없음 또는 검색어 예산 소진")))
+            _update(job_id, profile_id, path, message=(
+                f"검색/평가 완료 · 저장 후보 {len(existing_candidates)}개 · 관측 대상 0개 · "
+                "첫 표본 미측정 · 추가 검색 없이 종료(예산 보존) · 과거 이력 보존. "
+                "대상 미선정 사유: " + (reason_text or "관측 가능 근거 없음")))
             return get(job_id, profile_id, path)
         ids = [item["video_id"] for item in targets]
         if should_stop():

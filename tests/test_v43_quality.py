@@ -41,10 +41,23 @@ class GenreBoundaryMatrixTests(unittest.TestCase):
                 for expected, title in cases:
                     for suffix in SUFFIXES:
                         with self.subTest(genre=genre_id, market=market, expected=expected, suffix=suffix):
-                            actual = assess(genre_id, title + suffix).decision
+                            description = ("vocal performance and steady beat"
+                                if expected == FIT and genre_id in {"MORNING_CHILL_RAP", "CHILL_RAP"} else "")
+                            actual = assess(genre_id, title + suffix, description).decision
                             self.assertEqual(expected, actual)
                             counts[actual] += 1
         self.assertEqual({FIT: 72, REVIEW: 72, EXCLUDE: 72}, counts)
+
+    def test_rap_fit_requires_both_vocal_and_rhythm_metadata(self):
+        for genre_id, title in (("MORNING_CHILL_RAP", "morning chill rap playlist"),
+                                ("CHILL_RAP", "chill rap playlist")):
+            for description in ("", "vocal performance", "steady beat"):
+                with self.subTest(genre=genre_id, description=description):
+                    verdict = assess(genre_id, title, description)
+                    self.assertEqual(REVIEW, verdict.decision)
+                    self.assertLess(verdict.score, 70)
+            self.assertEqual(FIT, assess(genre_id, title,
+                "vocal performance and steady beat").decision)
 
     def test_unicode_emoji_special_and_long_metadata_stays_conservative(self):
         title = "朝 아침 Café 🎧 <>&\"' " + ("경계 " * 500)

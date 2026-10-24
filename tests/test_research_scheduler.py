@@ -424,7 +424,7 @@ class ResearchSchedulerTests(unittest.TestCase):
             clock[0] += timedelta(minutes=30)
             video = f"sched{index:06d}"
             return {"items": [{"video_id": video, "video_title": f"Morning Chill Rap mellow groove {index}",
-                               "description": "", "channel_title": "mock"}], "nextPageToken": ""}
+                               "description": "vocal performance over a steady beat", "channel_title": "mock"}], "nextPageToken": ""}
         for hour in range(5):
             clock[0] = self.now + timedelta(hours=hour)
             config = autopilot.AutopilotConfig(self.jp, target=5, max_search_calls=8,

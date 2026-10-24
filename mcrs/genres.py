@@ -299,6 +299,9 @@ def assess(genre_id: str, title: str, description: str = "", custom_genres=None)
         conflicts = tuple(dict.fromkeys(conflicting))
         return Verdict(REVIEW, min(score, 69), "인접 장르 신호가 함께 있음: " + ", ".join(conflicts[:3]),
                        positives, conflicts, "교차 장르 가능성")
+    if genre_id in _RAP_SUPPORT_GENRES and {item.split(":", 1)[0] for item in support_evidence} != {"vocal", "rhythm"}:
+        return Verdict(REVIEW, min(score, 69), "랩 장르 FIT에 필요한 보컬 및 리듬 메타데이터 근거가 부족함",
+                       positives, uncertainty="메타데이터 근거 부족; 실제 음원 청취 확인 필요")
     if title_hits and score >= 70:
         return Verdict(FIT, score,
                        "메타데이터 장르 신호와 보강 근거: " + ", ".join((title_hits + list(support_evidence))[:4])
