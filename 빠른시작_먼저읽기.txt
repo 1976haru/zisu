@@ -1,7 +1,9 @@
-ZISU Research Studio V4.4.2 — Windows first-run guide
+ZISU SIGNAL LAB · 지수 시그널 랩
+채널 성장의 신호를 발견하다.
+V4.6.0 development package first-run guide
 ====================================================
 1. Keep your existing V2.1 installation and data. Do not delete the old database.
-2. Extract the entire V4.4.2 ZIP to a new folder. Keep ZisuResearchStudio.exe beside the complete _internal folder; do not separate or move only the EXE.
+2. Extract the entire ZISU SIGNAL LAB V4.6.0 ZIP to a new folder. Keep ZisuResearchStudio.exe beside the complete _internal folder; do not separate or move only the EXE.
 3. The packaged EXE does not require Python or a separate Google OAuth module installation.
 4. Optional offline verification: run 검증하기.cmd from the validation tools. If Windows Sandbox is available, it launches an offline isolated check; otherwise it checks on this PC with Python removed from the child process PATH. That is not proof of a Python-uninstalled PC.
 5. Compare the ZIP hash to RELEASE_SHA256SUMS.txt from the same GitHub Actions artifact. After extraction, compare the EXE hash to SHA256SUMS.txt in the package. Do not run files when hashes differ.
@@ -12,6 +14,16 @@ ZISU Research Studio V4.4.2 — Windows first-run guide
 
 Never send OAuth JSON, account passwords, tokens, databases or personal logs in chat or GitHub. Keep the EXE and _internal folder together. Repeated playback, automated comments, likes and subscriptions are not provided.
 
-Historical Windows 10 baseline (V4.4.1, Actions run 39015700620): ZIP SHA-256 e4eed1d31f84b4c7971759c1fdb9f250f65e0166e80ade9d9ad1b159a211b062; EXE SHA-256 53a13d722945ca53ca6abc8500fa58e7a38ce909453f0505deaf3057e4739724. For V4.4.2 always use the sidecar manifest from its own Actions artifact because hashes are build-specific.
+Historical Windows 10 baseline (V4.4.1, Actions run 39015700620): ZIP SHA-256 e4eed1d31f84b4c7971759c1fdb9f250f65e0166e80ade9d9ad1b159a211b062; EXE SHA-256 53a13d722945ca53ca6abc8500fa58e7a38ce909453f0505deaf3057e4739724. Always use the sidecar manifest from the same Actions artifact because hashes are build-specific.
 
-GitHub: https://github.com/1976haru/zisu/pull/2
+GitHub: https://github.com/1976haru/zisu/pull/4
+
+V4.5 AI Research helper:
+Open tab ⑦ AI 연구 도우미, click “1. 조사 계획 미리보기”, then “2. 오프라인 Demo 시작”.
+The seeded entries are fictional test fixtures. Demo uses a Mock AI, makes no network/OAuth/provider calls, and does not write to the active profile database. AI opinions are never human approval.
+
+OpenAI/Gemini keys are optional and are encrypted with Windows DPAPI for the current Windows user. The key entry is masked and cleared after saving. Paid calls are OFF by default; a live run requires current user-confirmed cost estimates, a daily USD cap, per-run confirmation, and is limited to 10 provider requests per job / 30 per profile per day. ZISU does not assume current provider prices or free quotas. Use rules-only or local Ollama if cost cannot be estimated. No real AI API call was made during code verification.
+
+For a one-call Gemini connection check without YouTube or OAuth, enter the current price-based estimate and daily cap, save the Gemini API key in the masked DPAPI input, then click “Gemini 실제 연결 테스트 (1회)” and approve the final confirmation. Only the fixed fictional Japanese metadata is sent. The check uses a temporary database, has no automatic retry, and shows only a safe result summary. Check actual usage/charges in the Google AI Studio or Cloud project dashboard; do not send the key or raw response in chat.
+
+Pause checkpoints are stored in the active profile's SQLite DB. Resume only while that same profile, market, genre, and plan remain selected. If the app stopped during a YouTube read request, resuming may repeat that one query and consume quota again; video IDs are deduplicated. An AI request interrupted before its response/cache is committed may also be sent again, but the pre-request counter and cost estimate are already reserved and still count toward limits.

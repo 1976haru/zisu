@@ -5,7 +5,11 @@ if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed' }
 if (Test-Path -LiteralPath 'dist\ZisuResearchStudio') {
     throw 'dist\ZisuResearchStudio already exists. Preserve it; choose a fresh workspace or move it yourself before building.'
 }
-py -3 -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --name ZisuResearchStudio main.py
+py -3 scripts\generate_brand_icon.py
+if ($LASTEXITCODE -ne 0) { throw 'Brand icon generation failed' }
+$icon = (Resolve-Path -LiteralPath 'assets\zisu_signal_lab.ico').Path
+$versionFile = (Resolve-Path -LiteralPath 'scripts\windows_version_info.txt').Path
+py -3 -m PyInstaller --noconfirm --clean --onedir --windowed --icon $icon --version-file $versionFile --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --collect-all tzdata --name ZisuResearchStudio main.py
 if ($LASTEXITCODE -ne 0) { throw 'EXE build failed' }
 $release = 'dist\ZisuResearchStudio'
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $release 'ZisuResearchStudio.exe')).Hash.ToLowerInvariant()

@@ -4,7 +4,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
-from mcrs.genres import EXCLUDE, FIT, GENRES, REVIEW, assess
+from mcrs.genres import EXCLUDE, FIT, GENRES, LEGACY_GENRE_IDS, REVIEW, assess
 from mcrs import store, youtube_api
 from support import WorkspaceTemp
 
@@ -31,7 +31,7 @@ SUFFIXES = ("", " 2026", " | mix", " 🎧", " 【HQ】", " vol.01 – édition")
 class GenreBoundaryMatrixTests(unittest.TestCase):
     def test_216_balanced_multilingual_boundary_cases(self):
         counts = {FIT: 0, REVIEW: 0, EXCLUDE: 0}
-        for genre_id in GENRES:
+        for genre_id in LEGACY_GENRE_IDS:
             for market in ("KR", "JP"):
                 cases = (
                     (FIT, FIT_TITLES[genre_id][market]),
@@ -41,10 +41,23 @@ class GenreBoundaryMatrixTests(unittest.TestCase):
                 for expected, title in cases:
                     for suffix in SUFFIXES:
                         with self.subTest(genre=genre_id, market=market, expected=expected, suffix=suffix):
-                            actual = assess(genre_id, title + suffix).decision
+                            description = ("vocal performance and steady beat"
+                                if expected == FIT and genre_id in {"MORNING_CHILL_RAP", "CHILL_RAP"} else "")
+                            actual = assess(genre_id, title + suffix, description).decision
                             self.assertEqual(expected, actual)
                             counts[actual] += 1
         self.assertEqual({FIT: 72, REVIEW: 72, EXCLUDE: 72}, counts)
+
+    def test_rap_fit_requires_both_vocal_and_rhythm_metadata(self):
+        for genre_id, title in (("MORNING_CHILL_RAP", "morning chill rap playlist"),
+                                ("CHILL_RAP", "chill rap playlist")):
+            for description in ("", "vocal performance", "steady beat"):
+                with self.subTest(genre=genre_id, description=description):
+                    verdict = assess(genre_id, title, description)
+                    self.assertEqual(REVIEW, verdict.decision)
+                    self.assertLess(verdict.score, 70)
+            self.assertEqual(FIT, assess(genre_id, title,
+                "vocal performance and steady beat").decision)
 
     def test_unicode_emoji_special_and_long_metadata_stays_conservative(self):
         title = "朝 아침 Café 🎧 <>&\"' " + ("경계 " * 500)
@@ -76,15 +89,13 @@ class APIResilienceTests(unittest.TestCase):
         response.__exit__ = lambda *args: None
         return response
 
-    def test_network_error_is_retried_then_recovers(self):
-        success = unittest.mock.MagicMock()
-        success.__enter__.return_value = io.BytesIO(b'{"items": []}')
-        success.__exit__.return_value = None
-        with patch.object(youtube_api, "urlopen", side_effect=[URLError("offline"), success]) as request:
-            with patch.object(youtube_api.time, "sleep"):
-                result = youtube_api._get("search", "key", retries=2, retry_delay=0, part="snippet")
-        self.assertEqual({"items": []}, result)
-        self.assertEqual(2, request.call_count)
+    def test_uncertain_network_error_is_not_retried(self):
+        with patch.object(youtube_api, "urlopen", side_effect=URLError("offline")) as request:
+            with self.assertRaises(youtube_api.APIError) as caught:
+                youtube_api._get("search", "key", retries=2, retry_delay=0, part="snippet")
+        self.assertEqual("connection_failed", caught.exception.code)
+        self.assertTrue(caught.exception.request_uncertain)
+        self.assertEqual(1, request.call_count)
 
     def test_quota_error_is_not_retried(self):
         body = io.BytesIO(json.dumps({

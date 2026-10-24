@@ -40,6 +40,7 @@ $launchToGuiMs = $null
 $lastReport = $null
 $stageTimeline = @()
 $process = $null
+$startupFailure = $null
 
 try {
     $start = New-Object System.Diagnostics.ProcessStartInfo
@@ -73,11 +74,71 @@ try {
                     $guiEvent = $current.events | Where-Object { $_.stage -eq 'gui_ready' } | Select-Object -Last 1
                     if ($null -eq $launchToGuiMs -and $guiEvent) { $launchToGuiMs = [double]$guiEvent.launch_elapsed_ms }
                 }
+                if ($current.stage -eq 'startup_failed') {
+                    $startupFailure = $current
+                    break
+                }
             } catch {
                 # Atomic report replacement can briefly leave a partial read.
             }
         }
         [void]$process.WaitForExit(100)
+    }
+
+    # The process may exit between the last poll and loop condition evaluation.
+    # Read the atomic report once more so startup exceptions are never mislabeled
+    # as a generic nonzero exit or GUI-close timeout.
+    if (-not $startupFailure -and (Test-Path -LiteralPath $report)) {
+        try {
+            $finalReport = Get-Content -LiteralPath $report -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($finalReport.stage -eq 'startup_failed') { $startupFailure = $finalReport }
+        } catch {
+            # Preserve the original process/timeout classification if report is unreadable.
+        }
+    }
+
+    if ($startupFailure) {
+        $process.Refresh()
+        $sameImage = @()
+        Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } |
+            ForEach-Object {
+                try {
+                    if ($_.StartTime -ge $startedAt) {
+                        $sameImage += [ordered]@{
+                            process_id = $_.Id
+                            started_at = $_.StartTime.ToString('o')
+                            main_window_handle = [string]$_.MainWindowHandle
+                            main_window_title = $_.MainWindowTitle
+                        }
+                    }
+                } catch { }
+            }
+        $failure = [ordered]@{
+            result = 'STARTUP_FAILED'
+            elapsed_ms = [math]::Round($timer.Elapsed.TotalMilliseconds, 1)
+            process_id = $process.Id
+            exit_code = if ($process.HasExited) { $process.ExitCode } else { $null }
+            last_python_stage = 'startup_failed'
+            startup_error_type = $startupFailure.error_type
+            startup_error_location = $startupFailure.error_location
+            stage_timeline = $stageTimeline
+            python_path_removed = $true
+            native_window_handle_present = ($process.MainWindowHandle -ne [IntPtr]::Zero)
+            native_window_handle_title = $process.MainWindowTitle
+            tracked_image_processes = $sameImage
+            report_file_exists = $true
+            isolated_data_file_count = @(Get-ChildItem -LiteralPath $data -File -Force -ErrorAction SilentlyContinue).Count
+            os = $os
+        }
+        $failure | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 -LiteralPath $diagnosticPath
+        # Terminate only processes whose executable path is this exact staged image.
+        foreach ($entry in $sameImage) {
+            Stop-Process -Id $entry.process_id -Force -ErrorAction SilentlyContinue
+        }
+        if ($sameImage.Count -eq 0 -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        throw "EXE reported startup_failed at $($startupFailure.error_location.module).$($startupFailure.error_location.function):$($startupFailure.error_location.line) ($($startupFailure.error_type)). Diagnostic: $diagnosticPath"
     }
 
     if (-not $process.HasExited) {
@@ -109,7 +170,7 @@ try {
                 [ordered]@{ directory_name = $_.Name; file_count = $files.Count; bytes = ($files | Measure-Object Length -Sum).Sum }
             })
         $failure = [ordered]@{
-            result = 'TIMEOUT'
+            result = 'GUI_CLOSE_TIMEOUT'
             timeout_seconds = $TimeoutSeconds
             elapsed_ms = [math]::Round($timer.Elapsed.TotalMilliseconds, 1)
             process_id = $process.Id

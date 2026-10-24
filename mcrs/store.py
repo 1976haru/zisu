@@ -1,15 +1,106 @@
 """Backward-compatible, profile-isolated SQLite storage (credentials excluded)."""
 from __future__ import annotations
 import csv
+import math
 import os
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager, closing
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess
+from .genres import GENRES, EXCLUDE, MANUAL_APPROVAL, REVIEW, assess, validate_custom_genres
 
 MARKETS = ("JP", "KR")
+
+
+class ActiveResearchSessionError(RuntimeError):
+    """A profile already has an in-flight fit-target research job."""
+
+def _normalize_genre_config(value=None):
+    if value is None:
+        value = {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("장르 설정을 읽을 수 없습니다.") from None
+    if not isinstance(value, dict) or set(value) - {"custom_genres", "subgenres", "facets", "search_languages"}:
+        raise ValueError("장르 설정 형식이 올바르지 않습니다.")
+    custom = validate_custom_genres(value.get("custom_genres", []))
+    facets = value.get("facets", {})
+    if not isinstance(facets, dict) or set(facets) - {"moods", "eras", "audiences", "languages"}:
+        raise ValueError("분위기·시대·청취 대상·언어 설정이 올바르지 않습니다.")
+    clean_facets = {}
+    for key in ("moods", "eras", "audiences", "languages"):
+        raw = facets.get(key, [])
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        if not isinstance(raw, (list, tuple)) or len(raw) > 12:
+            raise ValueError(f"{key} 설정은 최대 12개까지 가능합니다.")
+        values = []
+        for item in raw:
+            text = " ".join(str(item).split())
+            if len(text) > 60:
+                raise ValueError(f"{key} 항목은 60자 이하여야 합니다.")
+            if text and text not in values:
+                values.append(text)
+        clean_facets[key] = values
+    raw_subgenres = value.get("subgenres", [])
+    if isinstance(raw_subgenres, str):
+        raw_subgenres = raw_subgenres.split(",")
+    if not isinstance(raw_subgenres, (list, tuple)) or len(raw_subgenres) > 12:
+        raise ValueError("세부 장르는 최대 12개까지 설정할 수 있습니다.")
+    subgenres = []
+    for item in raw_subgenres:
+        text = " ".join(str(item).split())
+        if len(text) > 60:
+            raise ValueError("세부 장르 항목은 60자 이하여야 합니다.")
+        if text and text not in subgenres:
+            subgenres.append(text)
+    languages = value.get("search_languages", [])
+    if not isinstance(languages, (list, tuple)) or len(languages) > 8:
+        raise ValueError("검색 언어는 최대 8개까지 선택할 수 있습니다.")
+    clean_languages = []
+    for language in languages:
+        code = str(language).strip().upper()
+        if not code.isascii() or not code.isalnum() or not 2 <= len(code) <= 12:
+            raise ValueError("검색 언어 코드는 영문/숫자 2~12자로 입력하세요.")
+        if code not in clean_languages:
+            clean_languages.append(code)
+    return {"custom_genres": custom, "subgenres": subgenres, "facets": clean_facets,
+            "search_languages": clean_languages}
+
+
+def profile_genre_config(profile):
+    """Return validated profile-local custom genre rules and independent facets."""
+    return _normalize_genre_config(profile.get("genre_config_json", "{}"))
+
+
+def normalize_related_genres(primary, related=(), custom_genres=None):
+    """Validate and canonicalize related genre IDs; legacy subgenre stays untouched."""
+    custom = {item["id"] for item in validate_custom_genres(custom_genres or [])}
+    valid = set(GENRES) | custom
+    if primary not in valid:
+        raise ValueError("Choose a registered core genre.")
+    if related is None:
+        related = ()
+    if isinstance(related, str):
+        try:
+            related = json.loads(related)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("Related genre settings are invalid.") from None
+    if not isinstance(related, (list, tuple)):
+        raise ValueError("Related genres must be a list.")
+    result = []
+    for genre in related:
+        if genre not in valid:
+            raise ValueError("Only registered genres can be selected.")
+        if genre != primary and genre not in result:
+            result.append(genre)
+    if len(result) > 5:
+        raise ValueError("Choose at most five related genres.")
+    return result
 
 def data_dir() -> Path:
     override = os.environ.get("ZISU_DATA_DIR")
@@ -19,6 +110,40 @@ def data_dir() -> Path:
 
 def db_path() -> Path:
     return data_dir()/"zisu_v2.db"
+
+def save_ui_state(state, path=None):
+    """Persist allow-listed, non-secret presentation state independently of research rows."""
+    allowed = {"profile_id", "tab_index", "selected_video_id", "search_term", "filter",
+               "decision_filter", "sort", "ai_target", "ai_max_calls", "ai_provider",
+               "ai_cost_estimate", "ai_cost_limit", "last_report_session"}
+    if not isinstance(state, dict) or set(state) - allowed:
+        raise ValueError("Invalid UI state fields.")
+    clean = {}
+    for key, value in state.items():
+        if value is None:
+            clean[key] = None
+        elif isinstance(value, (str, int, float, bool)):
+            clean[key] = str(value)[:500] if isinstance(value, str) else value
+        else:
+            raise ValueError("UI state must contain simple values only.")
+    payload = json.dumps(clean, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    with connect(path) as db:
+        db.execute("INSERT INTO ui_state(state_key,state_json) VALUES('main',?) "
+                   "ON CONFLICT(state_key) DO UPDATE SET state_json=excluded.state_json,updated_at=CURRENT_TIMESTAMP",
+                   (payload,))
+
+def load_ui_state(path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT state_json,updated_at FROM ui_state WHERE state_key='main'").fetchone()
+    if not row:
+        return None
+    try:
+        value = json.loads(row["state_json"])
+        if not isinstance(value, dict):
+            return None
+        return {"state": value, "updated_at": row["updated_at"]}
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 @contextmanager
 def connect(path=None):
@@ -48,6 +173,8 @@ def _add_column(db, table, definition):
 def initialize(path=None):
     """Create or migrate in place. Existing rows are never dropped or replaced."""
     with connect(path) as db:
+        profile_columns_before = {row[1] for row in db.execute("PRAGMA table_info(profiles)")}
+        migrate_legacy_subgenre = bool(profile_columns_before and "genre_config_json" not in profile_columns_before)
         # WAL permits readers during writes and is safe to request repeatedly.
         # SQLite keeps existing user rows intact when changing journal mode.
         db.execute("PRAGMA journal_mode=WAL")
@@ -57,14 +184,27 @@ def initialize(path=None):
           market TEXT NOT NULL CHECK(market IN ('JP','KR')), genre TEXT NOT NULL,
           schedule TEXT NOT NULL DEFAULT '07:00,20:00',
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS google_accounts (
+          id TEXT PRIMARY KEY, email TEXT NOT NULL DEFAULT '', normalized_email TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_google_accounts_email
+          ON google_accounts(normalized_email) WHERE normalized_email<>'';
+        CREATE TABLE IF NOT EXISTS google_account_channels (
+          account_id TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '', channel_title TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(account_id,channel_id),
+          FOREIGN KEY(account_id) REFERENCES google_accounts(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS candidates (
           profile_id TEXT NOT NULL, video_id TEXT NOT NULL, video_title TEXT NOT NULL,
           channel_title TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL DEFAULT '',
           video_url TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
           published_at TEXT NOT NULL DEFAULT '', views INTEGER NOT NULL DEFAULT 0,
+          views_known INTEGER NOT NULL DEFAULT 1,
           country TEXT NOT NULL DEFAULT '', keyword TEXT NOT NULL DEFAULT '',
           genre_decision TEXT NOT NULL, genre_score INTEGER NOT NULL,
           genre_reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT '미확인',
+          classified_genre TEXT NOT NULL DEFAULT '', related_genres_json TEXT NOT NULL DEFAULT '[]',
+          genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}',
           notes TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id),
@@ -75,6 +215,40 @@ def initialize(path=None):
           avg_minutes REAL NOT NULL, subscribers INTEGER NOT NULL,
           PRIMARY KEY(profile_id,day),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS vph_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+          video_id TEXT NOT NULL, observed_at_utc TEXT NOT NULL, view_count INTEGER,
+          sample_status TEXT NOT NULL, uncertainty_reason TEXT NOT NULL DEFAULT '',
+          video_format TEXT NOT NULL DEFAULT 'unknown', published_at TEXT NOT NULL DEFAULT '',
+          duration_seconds INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(profile_id,video_id,observed_at_utc),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_vph_observations_pair_time
+          ON vph_observations(profile_id,video_id,observed_at_utc);
+        CREATE TABLE IF NOT EXISTS vph_evaluations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+          video_id TEXT NOT NULL, earlier_observation_id INTEGER,
+          later_observation_id INTEGER NOT NULL, elapsed_seconds REAL,
+          view_delta INTEGER, vph REAL, state TEXT NOT NULL, reason TEXT NOT NULL,
+          tier TEXT NOT NULL DEFAULT 'UNKNOWN', tier_a_threshold REAL NOT NULL,
+          tier_b_threshold REAL NOT NULL, confidence TEXT NOT NULL,
+          evaluated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(profile_id,video_id,later_observation_id),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+          FOREIGN KEY(earlier_observation_id) REFERENCES vph_observations(id),
+          FOREIGN KEY(later_observation_id) REFERENCES vph_observations(id));
+        CREATE TABLE IF NOT EXISTS vph_research_jobs (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, state TEXT NOT NULL,
+          search_limit INTEGER NOT NULL DEFAULT 3, search_calls_used INTEGER NOT NULL DEFAULT 0,
+          used_queries_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
+          next_run_utc TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '',
+          request_id TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_vph_research_jobs_profile_state
+          ON vph_research_jobs(profile_id,state,updated_at);
         CREATE TABLE IF NOT EXISTS genre_audit (
           profile_id TEXT NOT NULL, video_id TEXT NOT NULL, video_title TEXT NOT NULL,
           description TEXT NOT NULL DEFAULT '', market TEXT NOT NULL, target_genre TEXT NOT NULL,
@@ -82,6 +256,11 @@ def initialize(path=None):
           reason TEXT NOT NULL, positive_signals TEXT NOT NULL DEFAULT '',
           conflict_signals TEXT NOT NULL DEFAULT '', uncertainty TEXT NOT NULL DEFAULT '',
           human_label TEXT NOT NULL DEFAULT '', label_notes TEXT NOT NULL DEFAULT '',
+          rule_verdict TEXT NOT NULL DEFAULT '', ai_verdict TEXT NOT NULL DEFAULT '',
+          proposed_verdict TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '',
+          model_version TEXT NOT NULL DEFAULT '', decision_at TEXT NOT NULL DEFAULT '',
+          genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}',
+          review_status TEXT NOT NULL DEFAULT 'needs_review',
           reviewed_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,video_id),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
@@ -90,6 +269,93 @@ def initialize(path=None):
           enabled INTEGER NOT NULL DEFAULT 1,
           PRIMARY KEY(profile_id,market,term),
           FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS ai_reviews (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, metadata_hash TEXT NOT NULL,
+          genre TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+          prompt_version TEXT NOT NULL, ai_verdict TEXT NOT NULL,
+          positive_signals TEXT NOT NULL, conflict_signals TEXT NOT NULL,
+          evidence TEXT NOT NULL, uncertainty TEXT NOT NULL, human_check TEXT NOT NULL,
+          latency_ms INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS ai_usage (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+          provider TEXT NOT NULL, model TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL, cost_estimate REAL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_day ON ai_usage(profile_id,provider,created_at);
+        CREATE TABLE IF NOT EXISTS research_sessions (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, market TEXT NOT NULL, genre TEXT NOT NULL,
+          state TEXT NOT NULL, target INTEGER NOT NULL, max_search_calls INTEGER NOT NULL,
+          query_index INTEGER NOT NULL DEFAULT 0, processed_json TEXT NOT NULL DEFAULT '[]',
+          candidates_json TEXT NOT NULL DEFAULT '[]', reviews_json TEXT NOT NULL DEFAULT '[]', in_flight INTEGER NOT NULL DEFAULT 0,
+          target_mode TEXT NOT NULL DEFAULT 'candidate_count', page_token TEXT NOT NULL DEFAULT '',
+          calls_used INTEGER NOT NULL DEFAULT 0, duplicate_count INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS research_discoveries (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '',
+          channel_title TEXT NOT NULL DEFAULT '', first_session_id TEXT NOT NULL DEFAULT '',
+          source_keyword TEXT NOT NULL DEFAULT '', search_category TEXT NOT NULL DEFAULT 'core',
+          search_order TEXT NOT NULL DEFAULT 'relevance',
+          rule_verdict TEXT NOT NULL DEFAULT '검토', ai_source TEXT NOT NULL DEFAULT 'rules_only',
+          first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id),
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_research_discoveries_channel
+          ON research_discoveries(profile_id,channel_id,first_seen_at);
+        CREATE TABLE IF NOT EXISTS research_schedules (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
+          market TEXT NOT NULL CHECK(market IN ('JP','KR')),
+          core_genre TEXT NOT NULL, related_genres_json TEXT NOT NULL DEFAULT '[]',
+          genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}',
+          channel_id TEXT NOT NULL DEFAULT '', start_at_utc TEXT NOT NULL,
+          total_minutes INTEGER NOT NULL, research_minutes INTEGER NOT NULL,
+          break_minutes INTEGER NOT NULL, approved_search_calls INTEGER NOT NULL,
+          search_calls_used INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('scheduled','running','paused','completed','cancelled')),
+          phase TEXT NOT NULL DEFAULT 'waiting', elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+          running_since_utc TEXT NOT NULL DEFAULT '', search_in_flight INTEGER NOT NULL DEFAULT 0,
+          pause_reason TEXT NOT NULL DEFAULT '',
+          checkpoint_json TEXT NOT NULL DEFAULT '{}',
+          autopilot_session_id TEXT NOT NULL DEFAULT '',
+          auto_start_request_id TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS research_schedule_presets (
+          profile_id TEXT NOT NULL, name TEXT NOT NULL, settings_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,name), FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_research_schedules_one_active
+          ON research_schedules(profile_id) WHERE state IN ('scheduled','running','paused');
+        CREATE INDEX IF NOT EXISTS idx_research_schedules_recovery
+          ON research_schedules(profile_id,state,updated_at);
+        CREATE TABLE IF NOT EXISTS vph_auto_start_intents (
+          request_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT '',
+          settings_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN
+            ('pending','claimed','started','blocked','completed','cancelled')),
+          schedule_id TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX IF NOT EXISTS idx_vph_auto_start_profile_status
+          ON vph_auto_start_intents(profile_id,status,updated_at);
+        CREATE TABLE IF NOT EXISTS autopilot_run_settings (
+          session_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, settings_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS autopilot_reports (
+          session_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, report_json TEXT NOT NULL,
+          exceptions_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS autopilot_comment_drafts (
+          profile_id TEXT NOT NULL, video_id TEXT NOT NULL, session_id TEXT NOT NULL,
+          drafts_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(profile_id,video_id,session_id),
+          FOREIGN KEY(profile_id,video_id) REFERENCES candidates(profile_id,video_id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS ui_state (
+          state_key TEXT PRIMARY KEY, state_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS idx_candidates_status
           ON candidates(profile_id,genre_decision,status);
         """)
@@ -98,21 +364,102 @@ def initialize(path=None):
             "youtube_channel_title TEXT NOT NULL DEFAULT ''",
             "connected_at TEXT NOT NULL DEFAULT ''",
             "connected_email TEXT NOT NULL DEFAULT ''",
+            "google_account_id TEXT NOT NULL DEFAULT ''",
             "subgenre TEXT NOT NULL DEFAULT ''",
+            "related_genres_json TEXT NOT NULL DEFAULT '[]'",
+            "genre_config_json TEXT NOT NULL DEFAULT '{}'",
+            "comment_persona_name TEXT NOT NULL DEFAULT ''",
+            "comment_language TEXT NOT NULL DEFAULT ''",
+            "comment_tone TEXT NOT NULL DEFAULT ''",
+            "comment_emoji_level TEXT NOT NULL DEFAULT 'light'",
+            "comment_length TEXT NOT NULL DEFAULT 'short'",
+            "vph_tier_a REAL NOT NULL DEFAULT 100",
+            "vph_tier_b REAL NOT NULL DEFAULT 50",
+            "vph_observation_slots INTEGER NOT NULL DEFAULT 10",
+            "research_preferences_json TEXT NOT NULL DEFAULT '{}'",
+            "network_mode TEXT NOT NULL DEFAULT 'default' CHECK(network_mode IN ('default','user_vpn'))",
         ):
             _add_column(db, "profiles", definition)
+        _add_column(db, "vph_research_jobs", "observation_slots INTEGER NOT NULL DEFAULT 10")
+        _add_column(db, "vph_research_jobs", "schedule_id TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "vph_research_jobs", "request_id TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_vph_research_jobs_request_id "
+                   "ON vph_research_jobs(request_id) WHERE request_id<>''")
+        if migrate_legacy_subgenre:
+            # Preserve the historical free-text subgenre while making it
+            # visible to the new structured search/UI configuration. This
+            # one-time additive migration only runs when the config column is
+            # first introduced; later intentional edits are not overwritten.
+            for row in db.execute("SELECT id,subgenre FROM profiles WHERE trim(subgenre)<>''"):
+                config = _normalize_genre_config({"subgenres": [row["subgenre"]]})
+                db.execute("UPDATE profiles SET genre_config_json=? WHERE id=?",
+                           (json.dumps(config, ensure_ascii=False, sort_keys=True), row["id"]))
+        _add_column(db, "research_sessions", "reviews_json TEXT NOT NULL DEFAULT '[]'")
+        _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "research_sessions", "diversity_version TEXT NOT NULL DEFAULT 'legacy'")
+        _add_column(db, "research_schedules", "pause_reason TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "research_schedules", "auto_start_request_id TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_research_schedules_auto_start_request "
+                   "ON research_schedules(auto_start_request_id) WHERE auto_start_request_id<>''")
+        _add_column(db, "research_schedules", "research_extension_cycle INTEGER NOT NULL DEFAULT -1")
+        _add_column(db, "research_schedules", "research_extension_seconds INTEGER NOT NULL DEFAULT 0")
+        _add_column(db, "research_schedules", "research_extension_used INTEGER NOT NULL DEFAULT 0")
+        _add_column(db, "research_schedules", "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+        db.execute("UPDATE research_schedules SET genre_config_snapshot_json=(SELECT genre_config_json FROM profiles "
+                   "WHERE profiles.id=research_schedules.profile_id) WHERE genre_config_snapshot_json='{}' "
+                   "AND EXISTS(SELECT 1 FROM profiles WHERE profiles.id=research_schedules.profile_id)")
+        _add_column(db, "candidates", "classified_genre TEXT NOT NULL DEFAULT ''")
+        _add_column(db, "candidates", "views_known INTEGER NOT NULL DEFAULT 1")
+        _add_column(db, "candidates", "related_genres_json TEXT NOT NULL DEFAULT '[]'")
+        _add_column(db, "candidates", "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+        for definition in (
+            "rule_verdict TEXT NOT NULL DEFAULT ''", "ai_verdict TEXT NOT NULL DEFAULT ''",
+            "proposed_verdict TEXT NOT NULL DEFAULT ''", "evidence TEXT NOT NULL DEFAULT ''",
+            "model_version TEXT NOT NULL DEFAULT ''", "decision_at TEXT NOT NULL DEFAULT ''",
+            "genre_config_snapshot_json TEXT NOT NULL DEFAULT '{}'",
+            "review_status TEXT NOT NULL DEFAULT 'needs_review'",
+        ):
+            _add_column(db, "genre_audit", definition)
+        for definition in (
+            "target_mode TEXT NOT NULL DEFAULT 'candidate_count'", "page_token TEXT NOT NULL DEFAULT ''",
+            "calls_used INTEGER NOT NULL DEFAULT 0", "duplicate_count INTEGER NOT NULL DEFAULT 0",
+        ):
+            _add_column(db, "research_sessions", definition)
+        db.execute("UPDATE genre_audit SET rule_verdict=predicted_decision WHERE rule_verdict=''")
+        db.execute("UPDATE genre_audit SET review_status='human_reviewed' WHERE human_label<>'' AND review_status='needs_review'")
+        # Additive migration: link existing profile identities to an account and
+        # channel registry without moving, copying, or rewriting OAuth tokens.
+        rows = db.execute("SELECT id,connected_email,youtube_channel_id,youtube_channel_title,google_account_id "
+                          "FROM profiles WHERE connected_email<>''").fetchall()
+        for row in rows:
+            normalized = (row["connected_email"] or "").strip().casefold()
+            account = db.execute("SELECT id FROM google_accounts WHERE normalized_email=?", (normalized,)).fetchone()
+            account_id = account["id"] if account else uuid.uuid4().hex
+            if not account:
+                db.execute("INSERT INTO google_accounts(id,email,normalized_email) VALUES(?,?,?)",
+                           (account_id,row["connected_email"],normalized))
+            db.execute("UPDATE profiles SET google_account_id=? WHERE id=? AND google_account_id=''",
+                       (account_id,row["id"]))
+            db.execute("INSERT INTO google_account_channels(account_id,channel_id,channel_title) VALUES(?,?,?) "
+                       "ON CONFLICT(account_id,channel_id) DO UPDATE SET "
+                       "channel_title=CASE WHEN excluded.channel_title='' THEN channel_title ELSE excluded.channel_title END",
+                       (account_id,row["youtube_channel_id"] or "",row["youtube_channel_title"] or ""))
 
-def create_profile(name, market, genre, path=None, subgenre=""):
+def create_profile(name, market, genre, path=None, subgenre="", related_genres=None, genre_config=None):
     initialize(path)
     name = (name or "").strip()
     if not 2 <= len(name) <= 70:
         raise ValueError("프로필 이름은 2~70자로 입력하세요.")
-    if market not in MARKETS or genre not in GENRES:
+    config = _normalize_genre_config(genre_config)
+    custom_ids = {item["id"] for item in config["custom_genres"]}
+    if market not in MARKETS or genre not in set(GENRES) | custom_ids:
         raise ValueError("국가와 장르를 확인하세요.")
+    related = normalize_related_genres(genre, related_genres, config["custom_genres"])
     profile_id = uuid.uuid4().hex
     with connect(path) as db:
-        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre) VALUES(?,?,?,?,?)",
-                   (profile_id,name,market,genre,(subgenre or "").strip()[:100]))
+        db.execute("INSERT INTO profiles(id,name,market,genre,subgenre,related_genres_json,genre_config_json) VALUES(?,?,?,?,?,?,?)",
+                   (profile_id,name,market,genre,(subgenre or "").strip()[:100],json.dumps(related,ensure_ascii=False),
+                    json.dumps(config,ensure_ascii=False,sort_keys=True)))
     return profile_id
 
 def list_profiles(path=None):
@@ -120,29 +467,309 @@ def list_profiles(path=None):
     with connect(path) as db:
         return [dict(row) for row in db.execute("SELECT * FROM profiles ORDER BY created_at,id")]
 
+def set_comment_persona(profile_id, *, name, language, tone, emoji_level="light", length="short", path=None):
+    if language not in {"ja", "ko", "en"} or emoji_level not in {"none", "light", "moderate"} or length not in {"short", "medium", "long"}:
+        raise ValueError("Invalid comment persona settings.")
+    if len(name) > 80 or len(tone) > 80:
+        raise ValueError("Comment persona settings are too long.")
+    with connect(path) as db:
+        result = db.execute("""UPDATE profiles SET comment_persona_name=?,comment_language=?,
+          comment_tone=?,comment_emoji_level=?,comment_length=? WHERE id=?""",
+          (name.strip(), language, tone.strip(), emoji_level, length, profile_id))
+        if result.rowcount != 1:
+            raise ValueError("Profile not found.")
+
 def get_profile(profile_id, path=None):
     with connect(path) as db:
         row = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
         return dict(row) if row else None
 
-def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None):
+def set_profile_vph_observation_slots(profile_id, slots, path=None):
+    if isinstance(slots, bool) or not isinstance(slots, int) or not 1 <= slots <= 20:
+        raise ValueError("VPH observation slots must be a whole number from 1 to 20.")
+    with connect(path) as db:
+        changed=db.execute("UPDATE profiles SET vph_observation_slots=? WHERE id=?",(slots,profile_id)).rowcount
+        if changed != 1:
+            raise ValueError("Profile not found.")
+    return slots
+
+def _validate_research_preferences(settings):
+    allowed={"total_hours","research_minutes","break_minutes","schedule_mode",
+             "research_min_minutes","research_max_minutes","break_min_minutes","break_max_minutes"}
+    if not isinstance(settings,dict) or set(settings)-allowed:
+        raise ValueError("Research preferences contain unsupported fields.")
+    result={}
+    for key,value in settings.items():
+        if key=="schedule_mode":
+            if value not in {"fixed","random"}:raise ValueError("Invalid schedule mode.")
+            result[key]=value
+        else:
+            if isinstance(value,bool) or not isinstance(value,int):raise ValueError("Schedule values must be whole numbers.")
+            lower,upper=(1,24) if key=="total_hours" else (1,180)
+            if not lower<=value<=upper:raise ValueError("Schedule value is outside the supported range.")
+            result[key]=value
+    return result
+
+def save_profile_research_preferences(profile_id,settings,path=None):
+    payload=json.dumps(_validate_research_preferences(settings),ensure_ascii=False,sort_keys=True)
+    with connect(path) as db:
+        changed=db.execute("UPDATE profiles SET research_preferences_json=? WHERE id=?",(payload,profile_id)).rowcount
+        if changed!=1:raise ValueError("Profile not found.")
+    return json.loads(payload)
+
+def profile_research_preferences(profile_id,path=None):
+    profile=get_profile(profile_id,path)
+    if not profile:return {}
+    try:return _validate_research_preferences(json.loads(profile.get("research_preferences_json") or "{}"))
+    except (TypeError,json.JSONDecodeError,ValueError):return {}
+
+def set_profile_network_mode(profile_id, mode, path=None):
+    """Save a profile-local connection preference; this never controls a VPN."""
+    from .network_mode import validate_mode
+    mode=validate_mode(mode)
+    with connect(path) as db:
+        profile=db.execute("SELECT id,market FROM profiles WHERE id=?",(profile_id,)).fetchone()
+        if not profile:
+            raise ValueError("Profile not found.")
+        if mode == "user_vpn" and profile["market"] != "JP":
+            raise ValueError("User-managed VPN preference is available for JP profiles only.")
+        active=db.execute(
+            "SELECT 1 FROM research_schedules WHERE profile_id=? AND state IN ('scheduled','running','paused') "
+            "UNION ALL SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') "
+            "UNION ALL SELECT 1 FROM vph_research_jobs WHERE profile_id=? AND state IN "
+            "('READY','COLLECTING_FIRST','WAITING_SECOND','COLLECTING_SECOND','PAUSED') LIMIT 1",
+            (profile_id,profile_id,profile_id)).fetchone()
+        if active:
+            raise ValueError("Network mode cannot change while this profile has an active research checkpoint.")
+        db.execute("UPDATE profiles SET network_mode=? WHERE id=?",(mode,profile_id))
+    return mode
+
+def save_research_schedule_preset(profile_id,name,settings,path=None):
+    name=str(name).strip()
+    if not name or len(name)>40 or any(ord(ch)<32 for ch in name):raise ValueError("Preset name must be 1–40 printable characters.")
+    payload=json.dumps(_validate_research_preferences(settings),ensure_ascii=False,sort_keys=True)
+    with connect(path) as db:
+        db.execute("INSERT INTO research_schedule_presets(profile_id,name,settings_json) VALUES(?,?,?) "
+                   "ON CONFLICT(profile_id,name) DO UPDATE SET settings_json=excluded.settings_json,updated_at=CURRENT_TIMESTAMP",
+                   (profile_id,name,payload))
+    return name
+
+def list_research_schedule_presets(profile_id,path=None):
+    with connect(path) as db:
+        return [row[0] for row in db.execute("SELECT name FROM research_schedule_presets WHERE profile_id=? ORDER BY name",(profile_id,))]
+
+def get_research_schedule_preset(profile_id,name,path=None):
+    with connect(path) as db:
+        row=db.execute("SELECT settings_json FROM research_schedule_presets WHERE profile_id=? AND name=?",
+                       (profile_id,name)).fetchone()
+    return _validate_research_preferences(json.loads(row[0])) if row else None
+
+def list_google_accounts(path=None):
+    """List account/channel relationships without exposing credentials."""
+    initialize(path)
+    with connect(path) as db:
+        accounts = [dict(row) for row in db.execute(
+            "SELECT * FROM google_accounts ORDER BY lower(email),id")]
+        for account in accounts:
+            account["channels"] = [dict(row) for row in db.execute(
+                "SELECT channel_id,channel_title FROM google_account_channels WHERE account_id=? "
+                "ORDER BY channel_title,channel_id", (account["id"],))]
+            account["profiles"] = [dict(row) for row in db.execute(
+                "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title,connected_email "
+                "FROM profiles WHERE google_account_id=? ORDER BY name,id", (account["id"],))]
+    return accounts
+
+def list_account_profiles(account_id, path=None):
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(
+            "SELECT id,name,market,genre,youtube_channel_id,youtube_channel_title,connected_email "
+            "FROM profiles WHERE google_account_id=? ORDER BY name,id", (account_id,))]
+
+def dashboard_summary(profile_id, path=None):
+    """Return small, profile-scoped dashboard counts without loading candidate rows."""
+    with connect(path) as db:
+        profile = db.execute(
+            "SELECT id,name,market,genre,connected_email,youtube_channel_id,"
+            "youtube_channel_title,schedule,google_account_id FROM profiles WHERE id=?",
+            (profile_id,)).fetchone()
+        if not profile:
+            return None
+        counts = db.execute("""SELECT
+            (SELECT COUNT(*) FROM candidates WHERE profile_id=?) AS candidates,
+            (SELECT COUNT(*) FROM candidates WHERE profile_id=? AND date(updated_at)=date('now')) AS today_candidates,
+            (SELECT COUNT(*) FROM ai_reviews WHERE profile_id=?) AS ai_reviews,
+            (SELECT COUNT(*) FROM ai_reviews WHERE profile_id=? AND date(created_at)=date('now')) AS today_ai_reviews,
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND human_label<>'') AS human_labels,
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND review_status='needs_review') AS needs_review,
+            (SELECT COUNT(*) FROM genre_audit WHERE profile_id=? AND review_status='needs_review' AND ai_verdict='') AS ai_pending,
+            (SELECT COUNT(DISTINCT channel_id) FROM research_discoveries WHERE profile_id=? AND channel_id<>'' AND date(first_seen_at,'localtime')=date('now','localtime')) AS new_channels_today,
+            (SELECT COALESCE(SUM(duplicate_count),0) FROM research_sessions WHERE profile_id=?) AS duplicate_candidates_total,
+            (SELECT COUNT(*) FROM candidates WHERE profile_id=? AND genre_decision='적합') AS genre_fit_candidates,
+            (SELECT COALESCE(SUM(calls_used),0) FROM research_sessions WHERE profile_id=?) AS search_calls_total""",
+            (profile_id, profile_id, profile_id, profile_id, profile_id, profile_id,
+             profile_id, profile_id, profile_id, profile_id, profile_id)).fetchone()
+        account = None
+        if profile["google_account_id"]:
+            row = db.execute("SELECT email FROM google_accounts WHERE id=?", (profile["google_account_id"],)).fetchone()
+            account = row["email"] if row else None
+        active_schedule = db.execute("SELECT id,state,phase,start_at_utc,total_minutes,research_minutes,"
+            "break_minutes,elapsed_seconds,approved_search_calls,search_calls_used "
+            "FROM research_schedules WHERE profile_id=? AND state IN ('scheduled','running','paused') "
+            "ORDER BY created_at DESC LIMIT 1", (profile_id,)).fetchone()
+    result = dict(profile)
+    result.update(dict(counts))
+    result["account_email"] = account or profile["connected_email"] or ""
+    result["schedule_state"] = dict(active_schedule) if active_schedule else None
+    return result
+
+def known_research_video_ids(profile_id, video_ids, path=None):
+    """Look up only IDs in the current API page; no profile-wide candidate materialization."""
+    ids=list(dict.fromkeys(str(value) for value in video_ids if value))
+    if not profile_id or not ids:return set()
+    found=set()
+    with connect(path) as db:
+        # YouTube pages are capped at 50; chunk to remain below SQLite bind limits.
+        for start in range(0,len(ids),400):
+            chunk=ids[start:start+400];marks=",".join("?" for _ in chunk)
+            rows=db.execute(f"SELECT video_id FROM candidates WHERE profile_id=? AND video_id IN ({marks}) "
+                f"UNION SELECT video_id FROM research_discoveries WHERE profile_id=? AND video_id IN ({marks})",
+                [profile_id,*chunk,profile_id,*chunk])
+            found.update(row[0] for row in rows)
+    return found
+
+def candidate_video_ids_with_observation(profile_id, video_ids, path=None):
+    """Return only this page's candidates with an existing real-listening note."""
+    ids=list(dict.fromkeys(str(value) for value in video_ids if value))
+    if not profile_id or not ids:return set()
+    found=set()
+    with connect(path) as db:
+        for start in range(0,len(ids),400):
+            chunk=ids[start:start+400];marks=",".join("?" for _ in chunk)
+            rows=db.execute(f"SELECT video_id FROM candidates WHERE profile_id=? AND video_id IN ({marks}) "
+                "AND length(trim(notes))>=10",[profile_id,*chunk])
+            found.update(row[0] for row in rows)
+    return found
+
+def channel_exposure_counts(profile_id, path=None):
+    """Unique previously surfaced videos per channel, scoped to one profile."""
+    with connect(path) as db:
+        rows=db.execute("""SELECT channel_id,COUNT(DISTINCT video_id) AS exposures FROM (
+          SELECT channel_id,video_id FROM candidates WHERE profile_id=? AND channel_id<>''
+          UNION ALL
+          SELECT channel_id,video_id FROM research_discoveries WHERE profile_id=? AND channel_id<>''
+        ) GROUP BY channel_id""",(profile_id,profile_id))
+        return {row["channel_id"]:int(row["exposures"]) for row in rows}
+
+def record_research_discovery(profile_id, session_id, row, *, search_category="core",
+                              search_order="relevance", rule_verdict="검토", ai_source="rules_only", path=None):
+    """Record metadata discovery provenance; never writes or infers a human label."""
+    video_id=str(row.get("video_id", ""))
+    if len(video_id)!=11 or not all(char.isalnum() or char in "-_" for char in video_id):
+        return False
+    allowed_categories={"user_core","core","core_recent","related"}
+    allowed_verdicts={"적합","검토","제외","수동 승인"}
+    allowed_ai={"success","failure","cache","budget_blocked","rules_only","resource_blocked"}
+    if search_category not in allowed_categories or search_order not in {"relevance","date"} or rule_verdict not in allowed_verdicts or ai_source not in allowed_ai:
+        raise ValueError("Discovery provenance is outside the supported categories.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?",(session_id,profile_id)).fetchone():
+            raise ValueError("Research discovery does not match the owning profile session.")
+        result=db.execute("""INSERT OR IGNORE INTO research_discoveries(
+          profile_id,video_id,channel_id,channel_title,first_session_id,source_keyword,
+          search_category,search_order,rule_verdict,ai_source) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+          (profile_id,video_id,str(row.get("channel_id", ""))[:200],
+           str(row.get("channel_title", ""))[:500],session_id,
+           str(row.get("keyword", ""))[:200],search_category,search_order,rule_verdict,ai_source))
+        return result.rowcount==1
+
+def bind_google_account_channel(profile_id, channel_id, channel_title, email="", *, allow_account_change=False, path=None):
+    """Bind a profile to an account and one authenticated channel in one DB transaction."""
+    email = (email or "").strip()
+    normalized = email.casefold()
+    if not normalized:
+        raise ValueError("Google 계정 이메일을 확인하지 못했습니다. 계정 확인 전에는 연결을 저장하지 않았습니다.")
+    if channel_id and not (channel_id.startswith("UC") and len(channel_id) > 4):
+        raise ValueError("올바르지 않은 YouTube 채널 ID입니다.")
+    if not (channel_title or "").strip():
+        raise ValueError("표시할 Google 계정 또는 채널 이름이 필요합니다.")
+    with connect(path) as db:
+        profile = db.execute("SELECT google_account_id,connected_email,youtube_channel_id FROM profiles WHERE id=?",
+                             (profile_id,)).fetchone()
+        if not profile:
+            raise ValueError("연결할 프로필을 찾을 수 없습니다.")
+        account = db.execute("SELECT id FROM google_accounts WHERE normalized_email=?", (normalized,)).fetchone()
+        account_id = account["id"] if account else uuid.uuid4().hex
+        if not account:
+            db.execute("INSERT INTO google_accounts(id,email,normalized_email) VALUES(?,?,?)",
+                       (account_id,email,normalized))
+        old_account = profile["google_account_id"] or ""
+        old_email = (profile["connected_email"] or "").strip().casefold()
+        old_channel = profile["youtube_channel_id"] or ""
+        changed = ((old_account and old_account != account_id) or
+                   (old_email and old_email != normalized) or
+                   (old_channel and old_channel != (channel_id or "")))
+        if changed and not allow_account_change:
+            raise ValueError("이미 연결된 Google 계정 또는 채널과 다릅니다. 기존 연결 변경을 명시적으로 확인하세요.")
+        if changed:
+            has_history = any(db.execute(sql,(profile_id,)).fetchone() for sql in (
+                "SELECT 1 FROM candidates WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM genre_audit WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM ai_reviews WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM metrics WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM research_sessions WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM research_schedules WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM autopilot_reports WHERE profile_id=? LIMIT 1",
+                "SELECT 1 FROM autopilot_comment_drafts WHERE profile_id=? LIMIT 1",
+            ))
+            if has_history:
+                raise ValueError("이 프로필에는 기존 조사 자료가 있어 다른 계정/채널로 바꾸지 않았습니다. 자료 격리를 위해 새 프로필을 사용하세요.")
+            active_session = db.execute(
+                "SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('running','paused','interrupted') LIMIT 1",
+                (profile_id,)).fetchone()
+            active_schedule = db.execute(
+                "SELECT 1 FROM research_schedules WHERE profile_id=? AND state IN ('scheduled','running','paused') LIMIT 1",
+                (profile_id,)).fetchone()
+            if active_session or active_schedule:
+                raise ValueError("진행 중이거나 이어하기 대기 중인 조사가 있어 계정 연결을 바꾸지 않았습니다. 먼저 해당 작업을 안전하게 중단하거나 완료하세요.")
+        db.execute("INSERT INTO google_account_channels(account_id,channel_id,channel_title) VALUES(?,?,?) "
+                   "ON CONFLICT(account_id,channel_id) DO UPDATE SET channel_title=excluded.channel_title, "
+                   "updated_at=CURRENT_TIMESTAMP", (account_id,channel_id or "",channel_title.strip()))
+        db.execute("UPDATE google_accounts SET email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (email,account_id))
+        db.execute("UPDATE profiles SET google_account_id=?,youtube_channel_id=?,youtube_channel_title=?, "
+                   "connected_email=?,connected_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (account_id,channel_id or "",channel_title.strip(),email,profile_id))
+    return account_id
+
+def update_profile(profile_id, *, name, market, genre, path=None, subgenre=None, related_genres=None, genre_config=None):
     name = (name or "").strip()
-    if market not in MARKETS or genre not in GENRES:
-        raise ValueError("국가와 장르를 확인하세요.")
     if not 2 <= len(name) <= 70:
         raise ValueError("프로필 이름은 2~70자여야 합니다.")
     with connect(path) as db:
-        old = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        old = db.execute("SELECT market,genre,related_genres_json,genre_config_json FROM profiles WHERE id=?", (profile_id,)).fetchone()
         if not old:
             raise ValueError("프로필을 찾을 수 없습니다.")
+        config = _normalize_genre_config(old["genre_config_json"] if genre_config is None else genre_config)
+        custom_ids = {item["id"] for item in config["custom_genres"]}
+        if market not in MARKETS or genre not in set(GENRES) | custom_ids:
+            raise ValueError("국가와 장르를 확인하세요.")
+        related = normalize_related_genres(genre, old["related_genres_json"] if related_genres is None else related_genres,
+                                           config["custom_genres"])
         count = db.execute("SELECT COUNT(*) FROM candidates WHERE profile_id=?", (profile_id,)).fetchone()[0]
         if count and (old["market"] != market or old["genre"] != genre):
             raise ValueError("후보가 저장된 프로필의 국가·장르는 변경할 수 없습니다. 새 프로필을 추가하세요.")
-        if subgenre is None:
-            db.execute("UPDATE profiles SET name=?,market=?,genre=? WHERE id=?", (name,market,genre,profile_id))
-        else:
-            db.execute("UPDATE profiles SET name=?,market=?,genre=?,subgenre=? WHERE id=?",
-                       (name,market,genre,(subgenre or "").strip()[:100],profile_id))
+        old_related = json.loads(old["related_genres_json"] or "[]")
+        old_config = _normalize_genre_config(old["genre_config_json"])
+        if (old["genre"] != genre or old_related != related or old_config != config) and db.execute(
+                "SELECT 1 FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') "
+                "UNION ALL SELECT 1 FROM research_schedules WHERE profile_id=? AND state IN ('paused','scheduled','running') LIMIT 1",
+                (profile_id, profile_id)).fetchone():
+            raise ValueError("An active research session uses the current genre settings. Finish or cancel it before changing genres.")
+        assignments = "name=?,market=?,genre=?,related_genres_json=?,genre_config_json=?"
+        values = [name, market, genre, json.dumps(related, ensure_ascii=False),
+                  json.dumps(config, ensure_ascii=False, sort_keys=True)]
+        if subgenre is not None:
+            assignments += ",subgenre=?"; values.append((subgenre or "").strip()[:100])
+        db.execute("UPDATE profiles SET " + assignments + " WHERE id=?", (*values, profile_id))
 
 def update_schedule(profile_id, schedule, path=None):
     import re
@@ -157,37 +784,45 @@ def save_candidates(profile_id, rows, path=None):
     if not profile:
         raise ValueError("선택한 프로필을 찾을 수 없습니다.")
     values, audit_values, stats = [], [], {"적합":0, "검토":0, "제외":0}
+    config = profile_genre_config(profile)
+    custom = config["custom_genres"]
+    related_snapshot = json.dumps(normalize_related_genres(profile["genre"], profile.get("related_genres_json", "[]"), custom), ensure_ascii=False)
+    config_snapshot = json.dumps(config, ensure_ascii=False, sort_keys=True)
     for row in rows:
         video_id = str(row.get("video_id", ""))
         if len(video_id) != 11 or not all(char.isalnum() or char in "-_" for char in video_id):
             continue
         title = str(row.get("video_title", ""))[:1000]
         description = str(row.get("description", ""))[:10000]
-        verdict = assess(profile["genre"], title, description)
+        verdict = assess(profile["genre"], title, description, custom)
         stats[verdict.decision] += 1
         audit_values.append((profile_id,video_id,title,description,
           profile["market"],profile["genre"],verdict.decision,verdict.score,verdict.reason,
-          " | ".join(verdict.positive_signals)," | ".join(verdict.conflict_signals),verdict.uncertainty))
+          " | ".join(verdict.positive_signals)," | ".join(verdict.conflict_signals),verdict.uncertainty,config_snapshot))
         if verdict.decision == EXCLUDE:
             continue
         values.append((profile_id,video_id,title,str(row.get("channel_title",""))[:500],
           str(row.get("channel_id",""))[:200],f"https://www.youtube.com/watch?v={video_id}",description,
-          str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),str(row.get("country",""))[:20],
-          str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason))
+          str(row.get("published_at",""))[:100],int(row.get("views",0) or 0),
+          int(row.get("views") is not None),str(row.get("country",""))[:20],
+          str(row.get("keyword",""))[:200],verdict.decision,verdict.score,verdict.reason,
+          profile["genre"],related_snapshot,config_snapshot))
     with connect(path) as db:
         db.executemany("""INSERT INTO genre_audit(profile_id,video_id,video_title,description,market,
-          target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          target_genre,predicted_decision,predicted_score,reason,positive_signals,conflict_signals,uncertainty,
+          genre_config_snapshot_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
           video_title=excluded.video_title,description=excluded.description,market=excluded.market,
           target_genre=excluded.target_genre,predicted_decision=excluded.predicted_decision,
           predicted_score=excluded.predicted_score,reason=excluded.reason,
           positive_signals=excluded.positive_signals,conflict_signals=excluded.conflict_signals,
           uncertainty=excluded.uncertainty,updated_at=CURRENT_TIMESTAMP""", audit_values)
         db.executemany("""INSERT INTO candidates(profile_id,video_id,video_title,channel_title,channel_id,
-          video_url,description,published_at,views,country,keyword,genre_decision,genre_score,genre_reason)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
+          video_url,description,published_at,views,views_known,country,keyword,genre_decision,genre_score,genre_reason,
+          classified_genre,related_genres_json,genre_config_snapshot_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,video_id) DO UPDATE SET
           video_title=excluded.video_title,channel_title=excluded.channel_title,channel_id=excluded.channel_id,
-          views=excluded.views,description=excluded.description,country=excluded.country,
+          views=excluded.views,views_known=excluded.views_known,description=excluded.description,country=excluded.country,
           keyword=excluded.keyword,published_at=excluded.published_at,
           genre_reason=CASE WHEN candidates.genre_decision=? THEN candidates.genre_reason ELSE excluded.genre_reason END,
           genre_score=CASE WHEN candidates.genre_decision=? THEN candidates.genre_score ELSE excluded.genre_score END,
@@ -212,8 +847,16 @@ def get_candidate(profile_id, video_id, path=None):
         row = db.execute("SELECT * FROM candidates WHERE profile_id=? AND video_id=?", (profile_id,video_id)).fetchone()
         return dict(row) if row else None
 
+UNREVIEWED_CANDIDATE_STATUSES = frozenset(("\ubbf8\ud655\uc778", "\ubbf8\uac80\ud1a0"))
+
+
+def is_unreviewed_candidate_status(status):
+    """Recognize both current and legacy untouched-candidate labels."""
+    return str(status or "") in UNREVIEWED_CANDIDATE_STATUSES
+
+
 def update_candidate(profile_id, video_id, status, notes, draft, path=None):
-    if status not in ("미확인", "검토 중", "보류", "완료"):
+    if status not in ("미확인", "미검토", "검토 중", "보류", "완료"):
         raise ValueError("올바르지 않은 후보 상태입니다.")
     with connect(path) as db:
         result = db.execute("UPDATE candidates SET status=?,notes=?,draft=?,updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND video_id=?", (status,notes,draft,profile_id,video_id))
@@ -263,19 +906,13 @@ def backup(target, path=None):
     with connect(path) as source, closing(sqlite3.connect(target)) as destination:
         source.backup(destination)
 
-def bind_youtube_channel(profile_id, channel_id, channel_title, email="", path=None):
-    if channel_id and not (channel_id.startswith("UC") and len(channel_id) > 4):
-        raise ValueError("올바르지 않은 YouTube 채널 ID입니다.")
-    if not channel_title.strip():
-        raise ValueError("표시할 Google 계정 또는 채널 이름이 필요합니다.")
-    with connect(path) as db:
-        result = db.execute("UPDATE profiles SET youtube_channel_id=?,youtube_channel_title=?,connected_email=?,connected_at=CURRENT_TIMESTAMP WHERE id=?", (channel_id,channel_title,email,profile_id))
-        if result.rowcount != 1:
-            raise ValueError("연결할 프로필을 찾을 수 없습니다.")
+def bind_youtube_channel(profile_id, channel_id, channel_title, email="", path=None, *, allow_account_change=False):
+    return bind_google_account_channel(profile_id,channel_id,channel_title,email,
+                                       allow_account_change=allow_account_change,path=path)
 
 def unbind_youtube_channel(profile_id, path=None):
     with connect(path) as db:
-        db.execute("UPDATE profiles SET youtube_channel_id='',youtube_channel_title='',connected_email='',connected_at='' WHERE id=?", (profile_id,))
+        db.execute("UPDATE profiles SET google_account_id='',youtube_channel_id='',youtube_channel_title='',connected_email='',connected_at='' WHERE id=?", (profile_id,))
 
 def list_genre_audit(profile_id, decision="전체", labeled=None, path=None):
     sql, args = "SELECT * FROM genre_audit WHERE profile_id=?", [profile_id]
@@ -295,11 +932,27 @@ def label_genre_audit(profile_id, video_id, label, notes="", path=None):
     if label != "불확실" and len((notes or "").strip()) < 5:
         raise ValueError("판정 근거를 5자 이상 기록하세요.")
     with connect(path) as db:
-        result = db.execute("""UPDATE genre_audit SET human_label=?,label_notes=?,
+        result = db.execute("""UPDATE genre_audit SET human_label=?,label_notes=?,review_status='human_reviewed',
           reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
           WHERE profile_id=? AND video_id=?""", (label,(notes or "").strip(),profile_id,video_id))
         if result.rowcount != 1:
             raise ValueError("장르 검토 표본을 찾을 수 없습니다.")
+
+def record_ai_decision(profile_id, video_id, *, rule_verdict, ai_verdict="", proposed_verdict="",
+                       evidence="", uncertainty="", model_version="", path=None):
+    """Persist machine opinion separately; never changes a human label or rule verdict."""
+    allowed = {"auto_fit", "cross_genre_review", "related_reference", "exclude", "insufficient_evidence"}
+    if proposed_verdict not in allowed:
+        raise ValueError("Invalid proposed verdict.")
+    with connect(path) as db:
+        result = db.execute("""UPDATE genre_audit SET rule_verdict=?,ai_verdict=?,proposed_verdict=?,
+          evidence=?,uncertainty=?,model_version=?,decision_at=CURRENT_TIMESTAMP,
+          review_status=CASE WHEN human_label='' THEN 'needs_review' ELSE review_status END,
+          updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND video_id=?""",
+          (rule_verdict, ai_verdict, proposed_verdict, evidence, uncertainty, model_version,
+           profile_id, video_id))
+        if result.rowcount != 1:
+            raise ValueError("Audit row does not exist.")
 
 def genre_quality(profile_id, path=None):
     rows = list_genre_audit(profile_id, labeled=True, path=path)
@@ -328,3 +981,586 @@ def list_profile_search_terms(profile_id, market, path=None):
     with connect(path) as db:
         return [row[0] for row in db.execute("""SELECT term FROM profile_search_terms
           WHERE profile_id=? AND market=? AND enabled=1 ORDER BY rowid""",(profile_id,market))]
+
+def get_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, path=None, cache_scope=""):
+    """Read a cached AI opinion only inside the exact profile and provenance scope."""
+    with connect(path) as db:
+        row = db.execute("""SELECT * FROM ai_reviews WHERE profile_id=? AND video_id=? AND metadata_hash=?
+          AND genre=? AND provider=? AND model=? AND prompt_version=?""",
+          (profile_id,video_id,metadata_hash,genre,provider,model,"genre-review-v1" + cache_scope)).fetchone()
+        return dict(row) if row else None
+
+def save_ai_review(profile_id, video_id, metadata_hash, genre, provider, model, opinion, latency_ms=0, path=None, cache_scope=""):
+    """Add/update an AI cache row; never touches human labels or candidate decisions."""
+    import json
+    if opinion.verdict not in ("적합", "검토", "제외"):
+        raise ValueError("AI 판정 값이 올바르지 않습니다.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM profiles WHERE id=?",(profile_id,)).fetchone():
+            raise ValueError("선택한 프로필을 찾을 수 없습니다.")
+        db.execute("""INSERT INTO ai_reviews(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version,
+          ai_verdict,positive_signals,conflict_signals,evidence,uncertainty,human_check,latency_ms)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(profile_id,video_id,metadata_hash,genre,provider,model,prompt_version) DO UPDATE SET
+          ai_verdict=excluded.ai_verdict,positive_signals=excluded.positive_signals,
+          conflict_signals=excluded.conflict_signals,evidence=excluded.evidence,
+          uncertainty=excluded.uncertainty,human_check=excluded.human_check,latency_ms=excluded.latency_ms""",
+          (profile_id,video_id,metadata_hash,genre,provider,model,"genre-review-v1" + cache_scope,opinion.verdict,
+           json.dumps(opinion.positive_signals,ensure_ascii=False),json.dumps(opinion.conflict_signals,ensure_ascii=False),
+           json.dumps(opinion.evidence_from_metadata,ensure_ascii=False),opinion.uncertainty,
+           opinion.recommended_human_check,max(0,int(latency_ms))))
+
+def reserve_ai_usage(profile_id, provider, model, session_id="", *,
+                     max_job_requests=10, max_daily_requests=30, cost_estimate=None,
+                     cost_limit=None, path=None):
+    """Atomically account an outbound attempt before dispatch; unknown cost stays unknown."""
+    if provider not in ("openai", "gemini", "ollama", "mock"):
+        raise ValueError("AI 공급자를 확인하세요.")
+    if provider in ("openai", "gemini"):
+        try:
+            cost_estimate, cost_limit = float(cost_estimate), float(cost_limit)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (not math.isfinite(cost_estimate) or not math.isfinite(cost_limit) or
+                cost_estimate <= 0 or cost_limit <= 0 or cost_estimate > cost_limit):
+            return False
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+            raise ValueError("조사 프로필을 확인하세요.")
+        # SQLite CURRENT_TIMESTAMP stores UTC. Use the same calendar basis for
+        # daily request/cost limits or UTC/local midnight can bypass the cap.
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        daily = db.execute("SELECT COUNT(*) FROM ai_usage WHERE profile_id=? AND provider=? AND created_at LIKE ?",
+                           (profile_id, provider, day + "%")).fetchone()[0]
+        job = db.execute("SELECT COUNT(*) FROM ai_usage WHERE profile_id=? AND provider=? AND session_id=?",
+                         (profile_id, provider, session_id)).fetchone()[0] if session_id else 0
+        if daily >= max_daily_requests or job >= max_job_requests:
+            return False
+        if provider in ("openai", "gemini"):
+            # Do not invent vendor prices. Require the operator's own conservative
+            # per-call estimate and ceiling; unknown historic spend fails closed.
+            spent = db.execute("SELECT SUM(cost_estimate) FROM ai_usage WHERE profile_id=? AND provider=? AND created_at LIKE ?",
+                               (profile_id, provider, day + "%")).fetchone()[0]
+            if spent is None and daily:
+                return False
+            spent = spent or 0.0
+            job_spent = db.execute("SELECT SUM(cost_estimate) FROM ai_usage WHERE profile_id=? AND provider=? AND session_id=?",
+                                   (profile_id, provider, session_id)).fetchone()[0] if session_id else 0.0
+            if spent + cost_estimate > cost_limit or (job_spent or 0.0) + cost_estimate > cost_limit:
+                return False
+        db.execute("INSERT INTO ai_usage(profile_id,provider,model,session_id,status,cost_estimate) VALUES(?,?,?,?,?,?)",
+                   (profile_id, provider, model, session_id or "", "attempted", cost_estimate))
+        return True
+
+def ai_usage_summary(profile_id, path=None):
+    with connect(path) as db:
+        rows = db.execute("SELECT provider,COUNT(*) AS requests,SUM(CASE WHEN provider IN ('openai','gemini') AND cost_estimate IS NULL THEN 1 ELSE 0 END) AS unknown_cost "
+                          "FROM ai_usage WHERE profile_id=? AND created_at LIKE ? GROUP BY provider",
+                          (profile_id, datetime.now(timezone.utc).strftime("%Y-%m-%d") + "%")).fetchall()
+        return {row["provider"]: {"requests": row["requests"], "unknown_cost": row["unknown_cost"]} for row in rows}
+
+def ai_usage_for_session(profile_id, session_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT COUNT(*) AS requests,SUM(cost_estimate) AS estimated_cost_usd,"
+                         "SUM(CASE WHEN cost_estimate IS NULL THEN 1 ELSE 0 END) AS unknown_cost "
+                         "FROM ai_usage WHERE profile_id=? AND session_id=?", (profile_id, session_id)).fetchone()
+    return {"requests": int(row["requests"] or 0),
+            "estimated_cost_usd": float(row["estimated_cost_usd"] or 0.0),
+            "unknown_cost": int(row["unknown_cost"] or 0)}
+
+def start_research_session(profile_id, market, genre, target, max_search_calls, path=None, settings_hash="", target_mode="candidate_count", diversity_version="legacy"):
+    session_id = uuid.uuid4().hex
+    with connect(path) as db:
+        # Serialize the check + insert across processes. The in-process GUI lock
+        # alone cannot prevent a second app instance from spending the same budget.
+        db.execute("BEGIN IMMEDIATE")
+        if target_mode == "fit_target" and db.execute(
+            "SELECT 1 FROM research_sessions WHERE profile_id=? AND target_mode='fit_target' AND state='running' LIMIT 1",
+            (profile_id,),
+        ).fetchone():
+            raise ActiveResearchSessionError("A fit-target research session is already running for this profile.")
+        row = db.execute("SELECT market,genre FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        if not row or row["market"] != market or row["genre"] != genre:
+            raise ValueError("조사 프로필이 변경되었습니다. 새 계획을 만드세요.")
+        _add_column(db, "research_sessions", "settings_hash TEXT NOT NULL DEFAULT ''")
+        db.execute("INSERT INTO research_sessions(id,profile_id,market,genre,state,target,max_search_calls,settings_hash,target_mode,diversity_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (session_id, profile_id, market, genre, "running", target, max_search_calls, settings_hash,target_mode,diversity_version))
+    return session_id
+
+def get_research_session(session_id, profile_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT * FROM research_sessions WHERE id=? AND profile_id=?", (session_id, profile_id)).fetchone()
+        return dict(row) if row else None
+
+def list_resumable_sessions(profile_id, path=None):
+    with connect(path) as db:
+        return [dict(row) for row in db.execute("SELECT * FROM research_sessions WHERE profile_id=? AND state IN ('paused','interrupted','running') ORDER BY updated_at DESC", (profile_id,))]
+
+def checkpoint_research_session(session_id, profile_id, *, state=None, query_index=None,
+                                processed=None, candidates=None, reviews=None, in_flight=None,
+                                page_token=None, calls_used=None, duplicate_count=None, path=None):
+    import json
+    fields, values = [], []
+    for key, value in (("state", state), ("query_index", query_index),
+                       ("processed_json", json.dumps(processed, ensure_ascii=False) if processed is not None else None),
+                       ("candidates_json", json.dumps(candidates, ensure_ascii=False) if candidates is not None else None),
+                       ("reviews_json", json.dumps(reviews, ensure_ascii=False) if reviews is not None else None),
+                       ("in_flight", int(in_flight) if in_flight is not None else None),
+                       ("page_token", page_token), ("calls_used", calls_used),
+                       ("duplicate_count", duplicate_count)):
+        if value is not None:
+            fields.append(key + "=?"); values.append(value)
+    fields.append("updated_at=CURRENT_TIMESTAMP")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?", (session_id, profile_id)).fetchone():
+            raise ValueError("조사 세션과 프로필이 일치하지 않습니다.")
+        db.execute("UPDATE research_sessions SET " + ",".join(fields) + " WHERE id=? AND profile_id=?",
+                   (*values, session_id, profile_id))
+
+def save_autopilot_settings(profile_id, session_id, settings, path=None):
+    """Persist non-secret resume settings for an Autopilot session."""
+    allowed = {"provider_id", "model", "target", "max_search_calls", "cost_estimate_usd",
+               "cost_limit_usd", "paid_external_approved", "report_version"}
+    if not isinstance(settings, dict) or set(settings) - allowed:
+        raise ValueError("Invalid Autopilot settings.")
+    payload = json.dumps(settings, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?",
+                          (session_id, profile_id)).fetchone():
+            raise ValueError("Autopilot session does not match the profile.")
+        db.execute("INSERT INTO autopilot_run_settings(session_id,profile_id,settings_json) VALUES(?,?,?) "
+                   "ON CONFLICT(session_id) DO UPDATE SET settings_json=excluded.settings_json,updated_at=CURRENT_TIMESTAMP",
+                   (session_id, profile_id, payload))
+
+def get_autopilot_settings(profile_id, session_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT settings_json FROM autopilot_run_settings WHERE profile_id=? AND session_id=?",
+                         (profile_id, session_id)).fetchone()
+    return json.loads(row["settings_json"]) if row else None
+
+
+_AUTO_START_KEYS = {"total_hours", "research_minutes", "break_minutes", "observation_slots",
+                    "search_calls", "provider_id", "paid_ai", "ai_calls", "market", "genre",
+                    "channel_id", "schedule_mode", "research_min_minutes", "research_max_minutes",
+                    "break_min_minutes", "break_max_minutes"}
+
+
+def _validate_auto_start_settings(settings):
+    if not isinstance(settings, dict) or set(settings) - _AUTO_START_KEYS:
+        raise ValueError("Invalid one-shot research settings.")
+    if settings.get("provider_id") != "disabled" or settings.get("paid_ai") is not False or settings.get("ai_calls") != 0:
+        raise ValueError("One-shot VPH research must keep external AI disabled.")
+    if not 1 <= int(settings.get("total_hours", 8)) <= 24:
+        raise ValueError("One-shot duration is outside the supported range.")
+    if not 1 <= int(settings.get("research_minutes", 20)) <= 180 or not 1 <= int(settings.get("break_minutes", 20)) <= 180:
+        raise ValueError("One-shot research/rest interval is outside the supported range.")
+    if not 1 <= int(settings.get("observation_slots", 10)) <= 10:
+        raise ValueError("One-shot observation slots must be between 1 and 10.")
+    if not 1 <= int(settings.get("search_calls", 3)) <= 3:
+        raise ValueError("One-shot search calls must be between 1 and 3.")
+    if settings.get("market") not in {None, "KR", "JP"}:
+        raise ValueError("One-shot market is invalid.")
+    if settings.get("schedule_mode", "fixed") not in {"fixed", "random"}:
+        raise ValueError("One-shot schedule mode is invalid.")
+    for key, default in (("research_min_minutes", settings.get("research_minutes", 20)),
+                         ("research_max_minutes", settings.get("research_minutes", 20)),
+                         ("break_min_minutes", settings.get("break_minutes", 20)),
+                         ("break_max_minutes", settings.get("break_minutes", 20))):
+        value=settings.get(key,default)
+        if isinstance(value,bool) or not isinstance(value,int) or not 1<=value<=180:
+            raise ValueError("One-shot schedule range is invalid.")
+    if (settings.get("research_min_minutes",settings.get("research_minutes",20)) >
+            settings.get("research_max_minutes",settings.get("research_minutes",20)) or
+            settings.get("break_min_minutes",settings.get("break_minutes",20)) >
+            settings.get("break_max_minutes",settings.get("break_minutes",20))):
+        raise ValueError("One-shot schedule range minimum exceeds maximum.")
+
+
+def create_vph_auto_start_intent(request_id, settings, path=None):
+    """Durably record one explicit one-shot request before any external call."""
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 80 or not all(
+            char.isalnum() or char in "-_" for char in request_id):
+        raise ValueError("Automatic start request ID is invalid.")
+    _validate_auto_start_settings(settings)
+    payload = json.dumps(settings, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT OR IGNORE INTO vph_auto_start_intents(request_id,settings_json,status) "
+                   "VALUES(?,?,'pending')", (request_id, payload))
+        row = db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=?", (request_id,)).fetchone()
+    item = dict(row)
+    item["settings"] = json.loads(item.pop("settings_json"))
+    return item
+
+
+def get_vph_auto_start_intent(request_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=?", (request_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["settings"] = json.loads(item.pop("settings_json"))
+    return item
+
+
+def list_open_vph_auto_start_intents(path=None):
+    with connect(path) as db:
+        rows = db.execute("SELECT * FROM vph_auto_start_intents WHERE status IN ('pending','claimed','started') "
+                          "ORDER BY created_at").fetchall()
+    items=[]
+    for row in rows:
+        item=dict(row)
+        item["settings"] = json.loads(item.pop("settings_json"))
+        items.append(item)
+    return items
+
+
+def research_dashboard_snapshot(profile_id, path=None):
+    """Read persisted one-click research state without advancing any engine."""
+    with connect(path) as db:
+        profile_row=db.execute("SELECT * FROM profiles WHERE id=?",(profile_id,)).fetchone()
+        latest_intent=db.execute("SELECT * FROM vph_auto_start_intents WHERE profile_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        latest_schedule=db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        latest_job=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        relationship_error=""
+        intent_row=schedule_row=job_row=None
+        # Select one latest *related* run. A newer intent takes precedence over
+        # an older schedule; otherwise the newest schedule determines its exact
+        # intent/job. Never zip three independent profile-wide "latest" rows.
+        if latest_intent and (not latest_schedule or latest_intent["created_at"] >= latest_schedule["created_at"]):
+            intent_row=latest_intent
+            if intent_row["schedule_id"]:
+                schedule_row=db.execute("SELECT * FROM research_schedules WHERE id=? AND profile_id=?",
+                    (intent_row["schedule_id"],profile_id)).fetchone()
+                if not schedule_row or schedule_row["auto_start_request_id"] != intent_row["request_id"]:
+                    relationship_error="intent_schedule_mismatch"
+                    schedule_row=None
+            elif intent_row["status"] in {"started","completed"}:
+                relationship_error="intent_schedule_missing"
+        elif latest_schedule:
+            schedule_row=latest_schedule
+            if schedule_row["auto_start_request_id"]:
+                intent_row=db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=? AND profile_id=?",
+                    (schedule_row["auto_start_request_id"],profile_id)).fetchone()
+                if not intent_row or intent_row["schedule_id"] != schedule_row["id"]:
+                    relationship_error="schedule_intent_mismatch"
+            else:
+                # A preceding one-shot request is not inherited by a later
+                # manually-created schedule.
+                intent_row=None
+        elif latest_intent:
+            intent_row=latest_intent
+            if intent_row["schedule_id"]:
+                relationship_error="intent_schedule_missing"
+        elif latest_job:
+            # Standalone legacy/manual VPH jobs remain inspectable, but only
+            # when no newer one-shot or schedule exists to which they could be
+            # accidentally attributed.
+            job_row=latest_job
+
+        if schedule_row:
+            job_row=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? AND schedule_id=? "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,schedule_row["id"])).fetchone()
+        elif intent_row and intent_row["schedule_id"] and not relationship_error:
+            job_row=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? AND schedule_id=? "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,intent_row["schedule_id"])).fetchone()
+        if job_row and intent_row and job_row["request_id"] and job_row["request_id"] != intent_row["request_id"]:
+            relationship_error="job_request_mismatch"
+        if job_row and schedule_row and job_row["schedule_id"] != schedule_row["id"]:
+            relationship_error="job_schedule_mismatch"
+
+        cumulative_candidate_rows=db.execute("SELECT predicted_decision AS genre_decision,COUNT(*) AS count FROM genre_audit "
+            "WHERE profile_id=? GROUP BY predicted_decision",(profile_id,)).fetchall()
+        if not cumulative_candidate_rows:
+            cumulative_candidate_rows=db.execute("SELECT genre_decision,COUNT(*) AS count FROM candidates "
+                "WHERE profile_id=? GROUP BY genre_decision",(profile_id,)).fetchall()
+        cumulative_observation_rows=db.execute("SELECT video_id,COUNT(*) AS count FROM vph_observations "
+            "WHERE profile_id=? GROUP BY video_id",(profile_id,)).fetchall()
+        cumulative_evaluation_rows=db.execute("""WITH latest AS (
+            SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.video_id ORDER BY e.id DESC) AS rank
+            FROM vph_evaluations e WHERE e.profile_id=?)
+            SELECT state,tier,COUNT(*) AS count FROM latest WHERE rank=1 GROUP BY state,tier""",(profile_id,)).fetchall()
+        session_targets=[]
+        if job_row:
+            try:
+                session_targets=json.loads(job_row["targets_json"] or "[]")
+                if not isinstance(session_targets,list):
+                    raise ValueError("targets_not_list")
+            except (TypeError,ValueError,json.JSONDecodeError):
+                relationship_error=relationship_error or "job_checkpoint_invalid"
+                session_targets=[]
+        checkpoint={}
+        if schedule_row:
+            try:
+                checkpoint=json.loads(schedule_row["checkpoint_json"] or "{}")
+                if not isinstance(checkpoint,dict):
+                    raise ValueError("checkpoint_not_object")
+            except (TypeError,ValueError,json.JSONDecodeError):
+                relationship_error=relationship_error or "schedule_checkpoint_invalid"
+                checkpoint={}
+        expected_job_id=checkpoint.get("vph_job_id")
+        if schedule_row and expected_job_id and (not job_row or job_row["id"]!=expected_job_id):
+            relationship_error=relationship_error or "schedule_job_mismatch"
+        raw_session_ids=checkpoint.get("processed_video_ids",[])
+        if not isinstance(raw_session_ids,list) or any(not isinstance(value,str) for value in raw_session_ids):
+            relationship_error=relationship_error or "schedule_candidate_checkpoint_invalid"
+            raw_session_ids=[]
+        session_ids=list(dict.fromkeys(value for value in raw_session_ids if value))
+        session_candidate_rows=[]
+        for offset in range(0,len(session_ids),500):
+            batch=session_ids[offset:offset+500]
+            placeholders=",".join("?" for _ in batch)
+            session_candidate_rows.extend(db.execute(f"SELECT video_id,genre_decision FROM candidates WHERE profile_id=? "
+                f"AND video_id IN ({placeholders})",(profile_id,*batch)).fetchall())
+        # Validate observation/evaluation identifiers against this exact job,
+        # profile and video. Legacy observations without persisted job links
+        # remain in cumulative history only.
+        first=second=valid=unknown=review=tier_a=tier_b=0
+        observing=set()
+        if job_row and not relationship_error:
+            for target in session_targets:
+                if not isinstance(target,dict):
+                    continue
+                video_id=str(target.get("video_id") or "")
+                if not video_id:
+                    continue
+                first_id=target.get("first_observation_id")
+                second_id=target.get("second_observation_id")
+                first_belongs=target.get("first_job_id")==job_row["id"]
+                second_belongs=target.get("second_job_id")==job_row["id"]
+                first_row=db.execute("SELECT id,profile_id,video_id,observed_at_utc,view_count,sample_status "
+                    "FROM vph_observations WHERE id=? AND profile_id=? AND video_id=?",
+                    (first_id,profile_id,video_id)).fetchone() if first_id and first_belongs else None
+                first_eval=db.execute("SELECT id,state,reason FROM vph_evaluations WHERE profile_id=? AND video_id=? "
+                    "AND later_observation_id=?",(profile_id,video_id,first_id)).fetchone() if first_row else None
+                first_valid=bool(first_row and first_eval and target.get("first_evaluation_id")==first_eval["id"]
+                    and first_row["sample_status"]=="valid" and first_row["view_count"] is not None
+                    and first_eval["reason"]=="first_sample")
+                if first_valid:
+                    first+=1
+                    observing.add(video_id)
+                second_row=db.execute("SELECT id,profile_id,video_id,observed_at_utc,view_count,sample_status "
+                    "FROM vph_observations WHERE id=? AND profile_id=? AND video_id=?",
+                    (second_id,profile_id,video_id)).fetchone() if second_id and second_belongs else None
+                eval_row=None
+                if first_valid and second_row:
+                    eval_row=db.execute("SELECT * FROM vph_evaluations WHERE profile_id=? AND video_id=? "
+                        "AND later_observation_id=?",(profile_id,video_id,second_row["id"])).fetchone()
+                elapsed=None
+                if first_valid and second_row:
+                    try:
+                        first_time=datetime.fromisoformat(first_row["observed_at_utc"].replace("Z","+00:00"))
+                        second_time=datetime.fromisoformat(second_row["observed_at_utc"].replace("Z","+00:00"))
+                        elapsed=(second_time-first_time).total_seconds() if first_time.tzinfo and second_time.tzinfo else None
+                    except (TypeError,ValueError,AttributeError):
+                        elapsed=None
+                try:
+                    evaluation_elapsed=(float(eval_row["elapsed_seconds"])
+                                        if eval_row and eval_row["elapsed_seconds"] is not None else None)
+                except (TypeError,ValueError):
+                    evaluation_elapsed=None
+                linked_second=bool(second_row and first_valid and elapsed is not None and elapsed>=3901
+                    and second_row["sample_status"]=="valid" and second_row["view_count"] is not None
+                    and eval_row and eval_row["earlier_observation_id"]==first_row["id"]
+                    and evaluation_elapsed is not None and abs(evaluation_elapsed-elapsed)<0.001
+                    and target.get("second_evaluation_id")==eval_row["id"])
+                if linked_second:
+                    second+=1
+                    observing.add(video_id)
+                    if eval_row["state"]=="VALID" and eval_row["vph"] is not None:
+                        valid+=1
+                        if eval_row["tier"]=="A": tier_a+=1
+                        elif eval_row["tier"]=="B": tier_b+=1
+                    elif eval_row["state"]=="REVIEW":
+                        review+=1
+                    else:
+                        unknown+=1
+                elif target.get("second_observation_id") or target.get("second_status") in {"missing","uncertain","invalid"}:
+                    review+=1
+                elif first_valid and job_row["state"] in {"COMPLETED","REVIEW"}:
+                    unknown+=1
+        if job_row and job_row["state"]=="COMPLETED" and valid==0:
+            relationship_error=relationship_error or "completed_job_without_valid_vph"
+        if intent_row and intent_row["status"]=="completed" and (
+                not schedule_row or schedule_row["state"]!="completed" or not job_row or job_row["state"]!="COMPLETED"):
+            relationship_error=relationship_error or "completed_intent_incomplete_run"
+        # A completed run with a REVIEW job and no VPH targets/samples, or an
+        # explicitly cancelled run with the same empty evidence, is historical
+        # rather than in-flight. Preserve that history but permit an explicit
+        # *new* request only after proving the cancelled chain is terminal.
+        # Never resume/reuse its request ID or bypass uncertain/recoverable work.
+        terminal_incomplete_intent=bool(intent_row and (
+            (intent_row["status"]=="completed" and relationship_error=="completed_intent_incomplete_run") or
+            (intent_row["status"]=="blocked" and intent_row["reason"]=="insufficient_vph_measurement")))
+        completed_history_safe=bool(
+            terminal_incomplete_intent and
+            schedule_row and schedule_row["state"]=="completed" and
+            not schedule_row["search_in_flight"] and
+            job_row and job_row["state"]=="REVIEW" and
+            job_row["schedule_id"]==schedule_row["id"] and
+            not session_targets and first==0 and second==0 and
+            not checkpoint.get("uncertain_request",False) and
+            not checkpoint.get("uncertain_external_request",False))
+        cancelled_history=bool(
+            not relationship_error and
+            intent_row and intent_row["status"]=="cancelled" and
+            schedule_row and schedule_row["state"]=="cancelled" and
+            schedule_row["auto_start_request_id"]==intent_row["request_id"] and
+            intent_row["schedule_id"]==schedule_row["id"] and
+            job_row and job_row["profile_id"]==profile_id and
+            job_row["schedule_id"]==schedule_row["id"] and
+            job_row["request_id"]==intent_row["request_id"] and
+            job_row["state"] in {"REVIEW","CANCELLED"} and
+            not schedule_row["search_in_flight"] and
+            not session_targets and first==0 and second==0 and
+            not checkpoint.get("uncertain_request",False) and
+            not checkpoint.get("uncertain_external_request",False) and
+            checkpoint.get("phase") not in {"uncertain_request","network_review","auth_required",
+                                             "resource_pause","process_interrupted"} and
+            str(schedule_row["pause_reason"] or "") not in {"uncertain_request","network_changed",
+                                                              "auth_required","process_interrupted"})
+        same_profile_open_intents=db.execute(
+            "SELECT COUNT(*) FROM vph_auto_start_intents WHERE profile_id IN ('',?) "
+            "AND status IN ('pending','claimed','started')",(profile_id,)).fetchone()[0]
+        same_profile_active_schedules=db.execute(
+            "SELECT COUNT(*) FROM research_schedules WHERE profile_id=? "
+            "AND state IN ('scheduled','running','paused')",(profile_id,)).fetchone()[0]
+        same_profile_active_jobs=db.execute(
+            "SELECT COUNT(*) FROM vph_research_jobs WHERE profile_id=? "
+            "AND state IN ('READY','COLLECTING_FIRST','WAITING_SECOND','COLLECTING_SECOND','PAUSED')",
+            (profile_id,)).fetchone()[0]
+        safe_new_request_allowed=bool(
+            (completed_history_safe or cancelled_history) and
+            same_profile_open_intents==0 and same_profile_active_schedules==0 and same_profile_active_jobs==0)
+    profile=dict(profile_row) if profile_row else None
+    intent=dict(intent_row) if intent_row else None
+    if intent:
+        try:
+            intent["settings"]=json.loads(intent.pop("settings_json"))
+            if not isinstance(intent["settings"],dict):
+                raise ValueError("intent_settings_not_object")
+        except (TypeError,ValueError,json.JSONDecodeError):
+            relationship_error=relationship_error or "intent_checkpoint_invalid"
+            intent["settings"]={}
+    schedule=dict(schedule_row) if schedule_row else None
+    if schedule:
+        schedule["checkpoint"]=checkpoint
+    job=dict(job_row) if job_row else None
+    if job:
+        job["targets"]=session_targets
+    cumulative_candidate_counts={row["genre_decision"]:row["count"] for row in cumulative_candidate_rows}
+    cumulative_candidate_counts["total"]=sum(cumulative_candidate_counts.values())
+    session_candidate_counts={}
+    for row in session_candidate_rows:
+        session_candidate_counts[row["genre_decision"]]=session_candidate_counts.get(row["genre_decision"],0)+1
+    session_candidate_counts["total"]=sum(session_candidate_counts.values())
+    cumulative_observations=sum(1 for row in cumulative_observation_rows if row["count"]>=1)
+    cumulative_second=sum(1 for row in cumulative_observation_rows if row["count"]>=2)
+    return {"profile":profile,"intent":intent,"schedule":schedule,"job":job,
+        "session_consistent":not relationship_error,"session_error":relationship_error,
+        "safe_new_request_allowed":safe_new_request_allowed,
+        "candidate_counts":session_candidate_counts,"session_candidate_counts":session_candidate_counts,
+        "cumulative_candidate_counts":cumulative_candidate_counts,
+        "first_sample_count":first,"second_sample_count":second,"vph_valid_count":valid,
+        "observing_count":len(observing),"vph_a_count":tier_a,"vph_b_count":tier_b,
+        "vph_unknown_count":unknown,"vph_review_count":review,
+        "cumulative_observing_count":cumulative_observations,
+        "cumulative_second_sample_count":cumulative_second,
+        "cumulative_vph_a_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="VALID" and row["tier"]=="A"),
+        "cumulative_vph_b_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="VALID" and row["tier"]=="B"),
+        "cumulative_vph_unknown_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="UNKNOWN"),
+        "cumulative_vph_review_count":sum(row["count"] for row in cumulative_evaluation_rows if row["state"]=="REVIEW"),
+        "search_calls_current":max(int((schedule or {}).get("search_calls_used",0) or 0),
+                                    int((job or {}).get("search_calls_used",0) or 0))}
+
+
+def claim_vph_auto_start_intent(request_id, profile_id, settings, path=None):
+    """Bind the one-shot intent once, after profile/market/genre are verified."""
+    _validate_auto_start_settings(settings)
+    payload=json.dumps(settings,ensure_ascii=False,sort_keys=True,allow_nan=False)
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row=db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=?",(request_id,)).fetchone()
+        profile=db.execute("SELECT market,genre,youtube_channel_id FROM profiles WHERE id=?",(profile_id,)).fetchone()
+        if not row or not profile:
+            raise ValueError("Automatic start request or profile is missing.")
+        existing=json.loads(row["settings_json"])
+        if row["status"] == "pending":
+            if settings.get("market")!=profile["market"] or settings.get("genre")!=profile["genre"] or \
+                    settings.get("channel_id","")!=profile["youtube_channel_id"]:
+                raise ValueError("Profile settings changed before the one-shot request was claimed.")
+            db.execute("UPDATE vph_auto_start_intents SET profile_id=?,settings_json=?,status='claimed',reason='',"
+                       "updated_at=CURRENT_TIMESTAMP WHERE request_id=? AND status='pending'",
+                       (profile_id,payload,request_id))
+        elif row["profile_id"] != profile_id or existing != settings or row["status"] not in {"claimed","started"}:
+            raise ValueError("One-shot request is already used or its profile/settings changed.")
+    return get_vph_auto_start_intent(request_id,path)
+
+
+def update_vph_auto_start_intent(request_id, status, path=None, *, schedule_id=None, reason=None):
+    if status not in {"claimed","started","blocked","completed","cancelled"}:
+        raise ValueError("Invalid one-shot intent state.")
+    fields=["status=?","updated_at=CURRENT_TIMESTAMP"]
+    values=[status]
+    if schedule_id is not None:
+        fields.append("schedule_id=?"); values.append(str(schedule_id))
+    if reason is not None:
+        fields.append("reason=?"); values.append(str(reason)[:160])
+    values.append(request_id)
+    with connect(path) as db:
+        changed=db.execute("UPDATE vph_auto_start_intents SET "+",".join(fields)+" WHERE request_id=?",
+                           values).rowcount
+        if changed != 1:
+            raise ValueError("One-shot request does not exist.")
+    return get_vph_auto_start_intent(request_id,path)
+
+def save_autopilot_report(profile_id, session_id, report, exceptions=(), path=None):
+    report_json = json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    exceptions_json = json.dumps(list(exceptions), ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM research_sessions WHERE id=? AND profile_id=?",
+                          (session_id, profile_id)).fetchone():
+            raise ValueError("Autopilot report does not match the profile session.")
+        db.execute("INSERT INTO autopilot_reports(session_id,profile_id,report_json,exceptions_json) VALUES(?,?,?,?) "
+                   "ON CONFLICT(session_id) DO UPDATE SET report_json=excluded.report_json,"
+                   "exceptions_json=excluded.exceptions_json,updated_at=CURRENT_TIMESTAMP",
+                   (session_id, profile_id, report_json, exceptions_json))
+
+def get_autopilot_report(profile_id, session_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT report_json,exceptions_json FROM autopilot_reports WHERE profile_id=? AND session_id=?",
+                         (profile_id, session_id)).fetchone()
+    if not row:
+        return None
+    return {"report": json.loads(row["report_json"]), "exceptions": json.loads(row["exceptions_json"])}
+
+def get_latest_autopilot_report(profile_id, path=None):
+    with connect(path) as db:
+        row = db.execute("SELECT report_json,exceptions_json FROM autopilot_reports WHERE profile_id=? "
+                         "ORDER BY updated_at DESC,session_id DESC LIMIT 1", (profile_id,)).fetchone()
+    if not row:
+        return None
+    return {"report": json.loads(row["report_json"]), "exceptions": json.loads(row["exceptions_json"])}
+
+def save_autopilot_comment_drafts(profile_id, video_id, session_id, drafts, path=None):
+    if not isinstance(drafts, (list, tuple)) or len(drafts) != 3 or any(not isinstance(x, str) or len(x) > 400 for x in drafts):
+        raise ValueError("Autopilot requires exactly three bounded comment drafts.")
+    with connect(path) as db:
+        if not db.execute("SELECT 1 FROM candidates WHERE profile_id=? AND video_id=?", (profile_id, video_id)).fetchone():
+            raise ValueError("Comment draft candidate does not belong to this profile.")
+        db.execute("INSERT INTO autopilot_comment_drafts(profile_id,video_id,session_id,drafts_json) VALUES(?,?,?,?) "
+                   "ON CONFLICT(profile_id,video_id,session_id) DO UPDATE SET drafts_json=excluded.drafts_json",
+                   (profile_id, video_id, session_id, json.dumps(list(drafts), ensure_ascii=False)))
+
+def list_autopilot_comment_drafts(profile_id, video_id=None, path=None):
+    sql = "SELECT * FROM autopilot_comment_drafts WHERE profile_id=?"
+    args = [profile_id]
+    if video_id is not None:
+        sql += " AND video_id=?"; args.append(video_id)
+    sql += " ORDER BY created_at DESC,video_id"
+    with connect(path) as db:
+        return [{**dict(row), "drafts": json.loads(row["drafts_json"])} for row in db.execute(sql, args)]
