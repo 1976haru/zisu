@@ -1037,6 +1037,8 @@ class Studio(tk.Tk):
         if model["error_code"]:
             checkpoint+=(f"\n오류 단계: {model['error_stage'] or '-'} · 코드: {model['error_code']} · "
                 f"사유: {model['stop_reason'] or '-'} · 다음 조치: {model['next_action']}")
+        if model.get("historical_cancelled"):
+            checkpoint=f"{model['history_label']} · {checkpoint}"
         self.research_dashboard_checkpoint.set(checkpoint)
         counts=model["counts"]
         if model["state"]=="COMPLETE":
@@ -1068,7 +1070,8 @@ class Studio(tk.Tk):
             "vph":"VPH 계산","final_result":"최종 결과"}
         stages=(model or {}).get("stages",{})
         incomplete=[key for key in research_dashboard_presenter.STAGE_KEYS if not stages.get(key)]
-        current=("sample_2" if model and model.get("state")=="WAITING_SAMPLE_2" else
+        current=(None if model and model.get("historical_cancelled") else
+                 "sample_2" if model and model.get("state")=="WAITING_SAMPLE_2" else
                  incomplete[0] if incomplete and model and model.get("state") not in {"READY","COMPLETE"} else None)
         error_key=(model or {}).get("error_stage","")
         if error_key not in research_dashboard_presenter.STAGE_KEYS:

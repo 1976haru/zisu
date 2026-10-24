@@ -1231,7 +1231,7 @@ def research_dashboard_snapshot(profile_id, path=None):
         # Select one latest *related* run. A newer intent takes precedence over
         # an older schedule; otherwise the newest schedule determines its exact
         # intent/job. Never zip three independent profile-wide "latest" rows.
-        if latest_intent and (not latest_schedule or latest_intent["created_at"] > latest_schedule["created_at"]):
+        if latest_intent and (not latest_schedule or latest_intent["created_at"] >= latest_schedule["created_at"]):
             intent_row=latest_intent
             if intent_row["schedule_id"]:
                 schedule_row=db.execute("SELECT * FROM research_schedules WHERE id=? AND profile_id=?",
@@ -1388,15 +1388,15 @@ def research_dashboard_snapshot(profile_id, path=None):
         if intent_row and intent_row["status"]=="completed" and (
                 not schedule_row or schedule_row["state"]!="completed" or not job_row or job_row["state"]!="COMPLETED"):
             relationship_error=relationship_error or "completed_intent_incomplete_run"
-        # A completed schedule with a REVIEW job and no VPH targets/samples is
-        # a terminal historical run, not an in-flight request. Preserve its
-        # BLOCKED diagnosis, but allow an explicitly-created *new* request.
-        # Never apply this escape hatch to uncertain external calls or any
-        # session with observation evidence that needs review/recovery.
+        # A completed run with a REVIEW job and no VPH targets/samples, or an
+        # explicitly cancelled run with the same empty evidence, is historical
+        # rather than in-flight. Preserve that history but permit an explicit
+        # *new* request only after proving the cancelled chain is terminal.
+        # Never resume/reuse its request ID or bypass uncertain/recoverable work.
         terminal_incomplete_intent=bool(intent_row and (
             (intent_row["status"]=="completed" and relationship_error=="completed_intent_incomplete_run") or
             (intent_row["status"]=="blocked" and intent_row["reason"]=="insufficient_vph_measurement")))
-        safe_new_request_allowed=bool(
+        completed_history_safe=bool(
             terminal_incomplete_intent and
             schedule_row and schedule_row["state"]=="completed" and
             not schedule_row["search_in_flight"] and
@@ -1405,6 +1405,37 @@ def research_dashboard_snapshot(profile_id, path=None):
             not session_targets and first==0 and second==0 and
             not checkpoint.get("uncertain_request",False) and
             not checkpoint.get("uncertain_external_request",False))
+        cancelled_history=bool(
+            not relationship_error and
+            intent_row and intent_row["status"]=="cancelled" and
+            schedule_row and schedule_row["state"]=="cancelled" and
+            schedule_row["auto_start_request_id"]==intent_row["request_id"] and
+            intent_row["schedule_id"]==schedule_row["id"] and
+            job_row and job_row["profile_id"]==profile_id and
+            job_row["schedule_id"]==schedule_row["id"] and
+            job_row["request_id"]==intent_row["request_id"] and
+            job_row["state"] in {"REVIEW","CANCELLED"} and
+            not schedule_row["search_in_flight"] and
+            not session_targets and first==0 and second==0 and
+            not checkpoint.get("uncertain_request",False) and
+            not checkpoint.get("uncertain_external_request",False) and
+            checkpoint.get("phase") not in {"uncertain_request","network_review","auth_required",
+                                             "resource_pause","process_interrupted"} and
+            str(schedule_row["pause_reason"] or "") not in {"uncertain_request","network_changed",
+                                                              "auth_required","process_interrupted"})
+        same_profile_open_intents=db.execute(
+            "SELECT COUNT(*) FROM vph_auto_start_intents WHERE profile_id IN ('',?) "
+            "AND status IN ('pending','claimed','started')",(profile_id,)).fetchone()[0]
+        same_profile_active_schedules=db.execute(
+            "SELECT COUNT(*) FROM research_schedules WHERE profile_id=? "
+            "AND state IN ('scheduled','running','paused')",(profile_id,)).fetchone()[0]
+        same_profile_active_jobs=db.execute(
+            "SELECT COUNT(*) FROM vph_research_jobs WHERE profile_id=? "
+            "AND state IN ('READY','COLLECTING_FIRST','WAITING_SECOND','COLLECTING_SECOND','PAUSED')",
+            (profile_id,)).fetchone()[0]
+        safe_new_request_allowed=bool(
+            (completed_history_safe or cancelled_history) and
+            same_profile_open_intents==0 and same_profile_active_schedules==0 and same_profile_active_jobs==0)
     profile=dict(profile_row) if profile_row else None
     intent=dict(intent_row) if intent_row else None
     if intent:

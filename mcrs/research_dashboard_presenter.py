@@ -88,6 +88,8 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
     profile = snapshot.get("profile") or {}
     intent, schedule, job = snapshot.get("intent"), snapshot.get("schedule"), snapshot.get("job")
     state = _state(snapshot)
+    historical_cancelled=bool(intent and intent.get("status")=="cancelled" and
+                              schedule and schedule.get("state")=="cancelled")
     if auth_ready is None:
         auth_ready=bool(profile.get("google_account_id") or profile.get("connected_email"))
     elapsed = int((schedule or {}).get("elapsed_seconds", 0) or 0)
@@ -138,6 +140,10 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
     if snapshot.get("safe_new_request_allowed"):
         next_action=("이전 일정은 끝났지만 VPH 표본이 없어 완료가 아닙니다. "
                      "이전 기록은 보존됩니다. 새 연구 시작은 새 요청 ID를 만듭니다.")
+    if historical_cancelled:
+        reason="과거 연구는 안전 중단되어 이력으로 보존되었습니다. 이전 표본은 새 연구에 이어 붙이지 않습니다."
+        if snapshot.get("safe_new_request_allowed"):
+            next_action="새 연구 시작은 이전 요청을 재사용하지 않고 별도의 새 요청 ID를 발급합니다."
     return {
         "state": state,
         "profile_id": profile_id,
@@ -148,6 +154,8 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
         "schedule_id": (schedule or {}).get("id", ""),
         "job_id": (job or {}).get("id", ""),
         "session_consistent": bool(snapshot.get("session_consistent", True)),
+        "historical_cancelled": historical_cancelled,
+        "history_label": "과거 연구 중단됨" if historical_cancelled else "",
         "schedule_progress_percent": schedule_progress,
         "stage_progress_completed": completed,
         "stage_progress_total": len(STAGE_KEYS),

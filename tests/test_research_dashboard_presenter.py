@@ -39,6 +39,133 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         store.save_candidates(self.profile,[{"video_id":"video000001","video_title":"Morning chill rap",
             "genre_decision":genres.FIT,"genre_score":95}],path=self.db)
 
+    def _persist_cancelled_flow(self):
+        self._persist_flow(intent="cancelled",schedule="cancelled",phase="cancelled",job="REVIEW")
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET request_id='dashboard_request',targets_json='[]' WHERE id='job_1'")
+            db.execute("UPDATE research_schedules SET checkpoint_json=? WHERE id='schedule_1'",
+                (json.dumps({"auto_start_request_id":"dashboard_request","vph_job_id":"job_1",
+                             "uncertain_request":False,"phase":"cancelled",
+                             "processed_video_ids":["video000001"]}),))
+            db.execute("UPDATE research_schedules SET search_calls_used=3,elapsed_seconds=1440 WHERE id='schedule_1'")
+            db.execute("UPDATE vph_research_jobs SET search_calls_used=3 WHERE id='job_1'")
+
+    def test_cancelled_review_without_inflight_evidence_allows_distinct_new_request(self):
+        self._persist_cancelled_flow()
+        snapshot=store.research_dashboard_snapshot(self.profile,self.db)
+        model=presenter.present(self.profile,self.db,auth_ready=True)
+        self.assertTrue(snapshot["safe_new_request_allowed"])
+        self.assertTrue(model["can_start"])
+        self.assertEqual("BLOCKED",model["state"],"the historical REVIEW job must not be rewritten")
+        self.assertTrue(model["historical_cancelled"])
+        self.assertEqual("과거 연구 중단됨",model["history_label"])
+        self.assertEqual((0,0),(model["counts"]["sample_1"],model["counts"]["sample_2"]))
+        self.assertFalse(model["stages"]["sample_1"])
+        self.assertFalse(model["stages"]["sample_2"])
+        self.assertEqual(4,model["stage_progress_completed"])
+        self.assertEqual(5,model["schedule_progress_percent"])
+
+    def test_cancelled_review_blocks_when_search_is_inflight(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db: db.execute("UPDATE research_schedules SET search_in_flight=1 WHERE id='schedule_1'")
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_uncertain_checkpoint(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE research_schedules SET checkpoint_json=? WHERE id='schedule_1'",
+                (json.dumps({"vph_job_id":"job_1","uncertain_request":True}),))
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_checkpoint_requiring_recovery(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE research_schedules SET checkpoint_json=? WHERE id='schedule_1'",
+                (json.dumps({"vph_job_id":"job_1","phase":"network_review"}),))
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_mismatched_request_job_link(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET request_id='different_request' WHERE id='job_1'")
+        snapshot=store.research_dashboard_snapshot(self.profile,self.db)
+        self.assertFalse(snapshot["safe_new_request_allowed"])
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_existing_first_sample(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id='job_1'",
+                (json.dumps([{"video_id":"video000001","first_observation_id":1,"first_job_id":"job_1"}]),))
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_existing_second_sample(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id='job_1'",
+                (json.dumps([{"video_id":"video000001","second_observation_id":2,"second_job_id":"job_1"}]),))
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_unresolved_targets(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE vph_research_jobs SET targets_json=? WHERE id='job_1'",
+                (json.dumps([{"video_id":"video000001","group":"CORE_FIT"}]),))
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_review_blocks_another_open_request(self):
+        self._persist_cancelled_flow()
+        store.create_vph_auto_start_intent("another_open_request",self.settings,self.db)
+        store.claim_vph_auto_start_intent("another_open_request",self.profile,self.settings,self.db)
+        self.assertFalse(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_other_profile_open_request_does_not_block_profile_isolation(self):
+        self._persist_cancelled_flow()
+        other=store.create_profile("Other JP Profile","JP","CHILL_RAP",path=self.db)
+        other_settings=dict(self.settings,market="JP",genre="CHILL_RAP")
+        store.create_vph_auto_start_intent("other_profile_request",other_settings,self.db)
+        store.claim_vph_auto_start_intent("other_profile_request",other,other_settings,self.db)
+        self.assertTrue(presenter.present(self.profile,self.db)["can_start"])
+
+    def test_cancelled_history_does_not_render_a_stage_as_running(self):
+        self._persist_cancelled_flow()
+        model=presenter.present(self.profile,self.db)
+        app=Studio.__new__(Studio)
+        app.research_stage_cards={key:MagicMock() for key in presenter.STAGE_KEYS}
+        app.research_stage_card_labels={key:MagicMock() for key in presenter.STAGE_KEYS}
+        app.dashboard_start_button=MagicMock();app.dashboard_pause_button=MagicMock()
+        app.dashboard_resume_button=MagicMock();app.dashboard_stop_button=MagicMock()
+        app.dashboard_results_button=MagicMock()
+        app._set_research_stage_cards(model)
+        self.assertTrue(model["historical_cancelled"])
+        self.assertNotIn("#e5efff",[call.kwargs.get("background") for label in app.research_stage_card_labels.values()
+                                    for call in label.configure.call_args_list])
+        start_kwargs=app.dashboard_start_button.configure.call_args.kwargs
+        self.assertEqual("normal" if model["can_start"] else "disabled",start_kwargs["state"])
+
+    def test_cancelled_request_id_is_not_reused(self):
+        self._persist_cancelled_flow()
+        app=Studio.__new__(Studio);app.active_id=self.profile;app._starting_from_easy_dashboard=True
+        app._vph_research_error_profile=None;app._vph_research_error_text=""
+        app.current_profile=MagicMock(return_value=store.get_profile(self.profile,self.db))
+        app._auto_start_settings=MagicMock(return_value=self.settings);app._autopilot_start=MagicMock()
+        with patch("mcrs.gui.store.db_path",return_value=str(self.db)):
+            app.start_vph_scheduled_research()
+        app._autopilot_start.assert_called_once()
+        new_request=app._autopilot_start.call_args.kwargs["auto_request_id"]
+        self.assertNotEqual("dashboard_request",new_request)
+
+    def test_cancelled_history_keeps_candidate_and_human_label_data(self):
+        self._persist_cancelled_flow()
+        with store.connect(self.db) as db:
+            db.execute("UPDATE candidates SET status='검토 보류',notes='human note' WHERE profile_id=? AND video_id=?",
+                       (self.profile,"video000001"))
+        before=store.get_candidate(self.profile,"video000001",path=self.db)
+        model=presenter.present(self.profile,self.db)
+        after=store.get_candidate(self.profile,"video000001",path=self.db)
+        self.assertTrue(model["can_start"])
+        self.assertEqual(before,after)
+
     def _bind_first(self,video_id="video000001",when=None,views=100):
         result=vph.record_observation(self.profile,video_id,views,when or datetime.now(timezone.utc),path=self.db)
         with store.connect(self.db) as db:
@@ -185,8 +312,8 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         store.update_vph_auto_start_intent("dashboard_request","blocked",self.db,
             schedule_id="schedule_1",reason="insufficient_vph_measurement")
         recovered=presenter.present(self.profile,self.db)
-        self.assertEqual("BLOCKED",recovered["state"])
-        self.assertTrue(recovered["can_start"],"restart recovery may terminally block history but still permit a new request")
+        self.assertEqual("RUNNING",recovered["state"],"the newly claimed request is the current intent")
+        self.assertFalse(recovered["can_start"],"the newly claimed request must block a duplicate start")
 
     def test_historical_two_samples_do_not_complete_new_ready_job(self):
         when=datetime(2026,1,1,tzinfo=timezone.utc)
