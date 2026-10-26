@@ -127,6 +127,37 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         store.claim_vph_auto_start_intent("other_profile_request",other,other_settings,self.db)
         self.assertTrue(presenter.present(self.profile,self.db)["can_start"])
 
+    def test_active_schedule_is_not_hidden_by_newer_rejected_intent(self):
+        self._persist_flow(intent="blocked",schedule="paused",phase="auth_required",job="REVIEW")
+        store.update_vph_auto_start_intent("dashboard_request","blocked",self.db,
+            schedule_id="schedule_1",reason="google_setup")
+        rejected="gui_rejected_after_auth_pause"
+        store.create_vph_auto_start_intent(rejected,self.settings,self.db)
+        store.claim_vph_auto_start_intent(rejected,self.profile,self.settings,self.db)
+        store.update_vph_auto_start_intent(rejected,"blocked",self.db,reason="일정 생성 차단: ScheduleBusy")
+        model=presenter.present(self.profile,self.db,auth_ready=True)
+        self.assertEqual("schedule_1",model["schedule_id"])
+        self.assertEqual("dashboard_request",model["request_id"])
+        self.assertEqual("BLOCKED",model["state"])
+        self.assertFalse(model["can_start"])
+        self.assertTrue(model["can_resume"])
+        self.assertTrue(model["can_stop"])
+
+    def test_start_handler_rechecks_dashboard_before_creating_intent(self):
+        app=Studio.__new__(Studio)
+        app.active_id=self.profile
+        app._vph_research_error_profile=None
+        app._vph_research_error_text=""
+        app.current_profile=MagicMock(return_value=store.get_profile(self.profile,self.db))
+        app._refresh_research_dashboard=MagicMock()
+        app._autopilot_start=MagicMock()
+        before=len(store.list_open_vph_auto_start_intents(self.db))
+        with patch("mcrs.gui.research_dashboard_presenter.present",return_value={"can_start":False}), \
+                patch("mcrs.gui.store.db_path",return_value=str(self.db)):
+            app.start_vph_scheduled_research()
+        self.assertEqual(before,len(store.list_open_vph_auto_start_intents(self.db)))
+        app._autopilot_start.assert_not_called()
+
     def test_cancelled_history_does_not_render_a_stage_as_running(self):
         self._persist_cancelled_flow()
         model=presenter.present(self.profile,self.db)

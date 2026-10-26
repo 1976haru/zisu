@@ -863,6 +863,20 @@ class Studio(tk.Tk):
             self.research_dashboard_checkpoint.set("조치: 채널·장르 설정에서 프로필을 선택한 뒤 다시 확인하세요.")
             self.dashboard_start_button.configure(state="disabled")
             return
+        try:
+            model=research_dashboard_presenter.present(
+                self.active_id,auth_ready=self._dashboard_auth_ready(self.active_id))
+        except (ValueError,sqlite3.Error,OSError):
+            model=None
+        if not model or not model.get("can_start"):
+            self.dashboard_start_button.configure(state="disabled")
+            self.research_dashboard_checkpoint.set(
+                "연구 시작 차단 · 현재 프로필의 저장된 일정 또는 요청 상태를 다시 확인하세요.")
+            self._refresh_research_dashboard(self.active_id)
+            return
+        # Close the interval between the last dashboard refresh and durable
+        # schedule creation.  scheduler.create remains the atomic final gate.
+        self.dashboard_start_button.configure(state="disabled")
         self._vph_research_error_profile=None;self._vph_research_error_text=""
         self._starting_from_easy_dashboard=True
         try:self.start_vph_scheduled_research()
@@ -904,6 +918,16 @@ class Studio(tk.Tk):
         if not self.__dict__.get("_starting_from_easy_dashboard",False):
             self._select_detail_tab(7)
         profile=self.current_profile()
+        try:
+            model=research_dashboard_presenter.present(profile["id"])
+        except (ValueError,sqlite3.Error,OSError):
+            model=None
+        if not model or not model.get("can_start"):
+            self._vph_research_error_profile=self.active_id
+            self._vph_research_error_text="자동 연구 시작 차단: 현재 프로필에 미완료 일정 또는 요청이 있습니다."
+            if "research_dashboard_summary" in self.__dict__ or "_refresh_research_dashboard" in self.__dict__:
+                self._refresh_research_dashboard(self.active_id)
+            return
         settings=self._auto_start_settings(profile)
         request_id="gui_"+uuid.uuid4().hex
         try:

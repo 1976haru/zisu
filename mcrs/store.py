@@ -1224,6 +1224,9 @@ def research_dashboard_snapshot(profile_id, path=None):
             "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
         latest_schedule=db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
             "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
+        active_schedule=db.execute("SELECT * FROM research_schedules WHERE profile_id=? "
+            "AND state IN ('scheduled','running','paused') ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (profile_id,)).fetchone()
         latest_job=db.execute("SELECT * FROM vph_research_jobs WHERE profile_id=? "
             "ORDER BY created_at DESC,rowid DESC LIMIT 1",(profile_id,)).fetchone()
         relationship_error=""
@@ -1231,7 +1234,20 @@ def research_dashboard_snapshot(profile_id, path=None):
         # Select one latest *related* run. A newer intent takes precedence over
         # an older schedule; otherwise the newest schedule determines its exact
         # intent/job. Never zip three independent profile-wide "latest" rows.
-        if latest_intent and (not latest_schedule or latest_intent["created_at"] >= latest_schedule["created_at"]):
+        if active_schedule:
+            # An unfinished schedule is authoritative even if a later rejected
+            # click recorded a terminal intent without a schedule.  Otherwise
+            # the terminal intent hides the resumable/stoppable schedule while
+            # scheduler.create correctly continues to raise ScheduleBusy.
+            schedule_row=active_schedule
+            if schedule_row["auto_start_request_id"]:
+                intent_row=db.execute("SELECT * FROM vph_auto_start_intents WHERE request_id=? AND profile_id=?",
+                    (schedule_row["auto_start_request_id"],profile_id)).fetchone()
+                if not intent_row or intent_row["schedule_id"] != schedule_row["id"]:
+                    relationship_error="schedule_intent_mismatch"
+            else:
+                intent_row=None
+        elif latest_intent and (not latest_schedule or latest_intent["created_at"] >= latest_schedule["created_at"]):
             intent_row=latest_intent
             if intent_row["schedule_id"]:
                 schedule_row=db.execute("SELECT * FROM research_schedules WHERE id=? AND profile_id=?",
