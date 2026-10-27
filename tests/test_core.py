@@ -66,7 +66,11 @@ class GenreTests(unittest.TestCase):
         with self.assertRaises(ValueError): search_terms("CHILL_RAP","US")
     def test_url_restrictions(self):
         self.assertEqual("aBcDeF12345",extract_video_id("https://youtu.be/aBcDeF12345"))
+        self.assertEqual("aBcDeF12345",extract_video_id("youtube.com/shorts/aBcDeF12345?feature=share"))
+        self.assertEqual("aBcDeF12345",extract_video_id("https://youtube.com/live/aBcDeF12345?utm_source=test"))
         self.assertEqual("",extract_video_id("https://evil.test/watch?v=aBcDeF12345"))
+        self.assertEqual("",extract_video_id("javascript://youtube.com/watch?v=aBcDeF12345"))
+        self.assertEqual("",extract_video_id("https://youtube.com.evil.test/watch?v=aBcDeF12345"))
 
 class StoreTests(unittest.TestCase):
     def setUp(self):

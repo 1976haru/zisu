@@ -15,7 +15,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from datetime import datetime, date, timezone
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode
 from . import store
 from .genres import GENRES, search_terms, assess, related_classification
 from . import genres as genre_engine
@@ -30,6 +30,8 @@ from . import autopilot
 from . import vph, vph_research
 from . import research_scheduler
 from . import research_dashboard_presenter
+from . import manual_research
+from .manual_research_ui import ManualResearchWindow
 from .resource_guard import ResourceGuard, ResourceLimits, sample_resources
 from .research_browser import (ResearchBrowserManager, BrowserError, BrowserResourceDeferred,
                                BrowserOwnershipUncertain, open_manual_research_url)
@@ -53,20 +55,14 @@ def _genre_title_for_profile(profile, genre_id=None):
 
 
 def extract_video_id(value: str):
+    """Compatibility wrapper around the strict manual-research URL parser."""
     try:
-        value = value.strip()
-        url = urlparse(value if "://" in value else "https://"+value)
-        host = (url.hostname or "").lower()
-        if host in ("youtu.be", "www.youtu.be"):
-            candidate = url.path.strip("/").split("/")[0]
-        elif host in ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"):
-            candidate = parse_qs(url.query).get("v",[""])[0]
-            if not candidate and url.path.startswith(("/shorts/", "/live/")):
-                candidate = url.path.split("/")[2]
-        else:
-            return ""
-        return candidate if re.fullmatch(r"[\w-]{11}",candidate) else ""
-    except (ValueError,IndexError):
+        value = str(value or "").strip()
+        candidate, _normalized = manual_research.normalize_youtube_url(
+            value if "://" in value else "https://" + value
+        )
+        return candidate
+    except ValueError:
         return ""
 
 
@@ -274,6 +270,7 @@ class Studio(tk.Tk):
         _write_smoke_stage("tk_root_created")
         _write_smoke_stage("database_initializing")
         store.initialize()
+        manual_research.recover_interrupted()
         self.analytics_credentials=AnalyticsCredentialManager()
         self.analytics_repository=AnalyticsRepository()
         self.analytics_busy=False
@@ -476,7 +473,7 @@ class Studio(tk.Tk):
         ttk.Label(bar,textvariable=self.profile_description).pack(side="left",padx=12)
 
     def _easy_ui(self, tab):
-        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(2, weight=1)
         operations=ttk.LabelFrame(tab,text="원클릭 연구 운영",padding=(10,7))
         operations.grid(row=0,column=0,columnspan=2,sticky="ew",padx=8,pady=(5,3))
         operations.columnconfigure(0,weight=1);operations.columnconfigure(1,weight=1)
@@ -530,11 +527,18 @@ class Studio(tk.Tk):
                 self.dashboard_resume_button,self.dashboard_stop_button,self.dashboard_results_button)):
             button.grid(row=0,column=column,sticky="ew",padx=2)
         self.research_dashboard_frame=operations
+        manual_modes=ttk.LabelFrame(tab,text="연구 모드 선택",padding=(10,7))
+        manual_modes.grid(row=1,column=0,columnspan=2,sticky="ew",padx=8,pady=3)
+        manual_modes.columnconfigure(0,weight=1);manual_modes.columnconfigure(1,weight=1);manual_modes.columnconfigure(2,weight=1)
+        self.manual_research_button=ttk.Button(manual_modes,text="A. 수동 링크 연구\n기본 추천 · 최대 50개",command=self._open_manual_research,style="Accent.TButton")
+        self.manual_research_button.grid(row=0,column=0,sticky="ew",padx=2)
+        ttk.Button(manual_modes,text="B. 자동 후보 탐색\n기존 기능",command=lambda:self._select_detail_tab(7)).grid(row=0,column=1,sticky="ew",padx=2)
+        ttk.Button(manual_modes,text="C. VPH 연구\n기존 기능",command=lambda:self._select_detail_tab(8)).grid(row=0,column=2,sticky="ew",padx=2)
         canvas=tk.Canvas(tab,highlightthickness=0,
                          background=ttk.Style(self).lookup("TFrame","background") or BG)
         scrollbar=ttk.Scrollbar(tab,orient="vertical",command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=1,column=0,sticky="nsew"); scrollbar.grid(row=1,column=1,sticky="ns")
+        canvas.grid(row=2,column=0,sticky="nsew"); scrollbar.grid(row=2,column=1,sticky="ns")
         content=ttk.Frame(canvas,padding=(12,10)); self.easy_dashboard=content
         self._easy_canvas=canvas
         self._easy_canvas_window=canvas.create_window((0,0),window=content,anchor="nw")
@@ -617,6 +621,14 @@ class Studio(tk.Tk):
         self._easy_enter_button=None
         self.bind_all("<Return>",self._easy_enter,add="+")
         self.bind_all("<Escape>",self._easy_escape,add="+")
+
+    def _open_manual_research(self):
+        profile=self.current_profile()
+        if not profile:
+            messagebox.showinfo("채널 프로필 선택","먼저 채널 프로필을 만들거나 선택해 주세요.",parent=self);return
+        def open_selected(url):
+            return open_manual_research_url(url)
+        ManualResearchWindow(self,profile,opener=open_selected)
 
     def _build_operator_pages(self):
         settings=self.primary_pages["settings"]

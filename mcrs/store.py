@@ -327,6 +327,39 @@ def initialize(path=None):
           profile_id TEXT NOT NULL, name TEXT NOT NULL, settings_json TEXT NOT NULL,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(profile_id,name), FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS manual_research_batches (
+          id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
+          market TEXT NOT NULL CHECK(market IN ('JP','KR')), core_genre TEXT NOT NULL,
+          planned_minutes INTEGER NOT NULL CHECK(planned_minutes BETWEEN 60 AND 1440),
+          analysis_minutes INTEGER NOT NULL CHECK(analysis_minutes > 0),
+          break_minutes INTEGER NOT NULL CHECK(break_minutes >= 0),
+          state TEXT NOT NULL CHECK(state IN ('ready','running','paused','completed','cancelled','interrupted')),
+          active_seconds INTEGER NOT NULL DEFAULT 0, break_seconds INTEGER NOT NULL DEFAULT 0,
+          running_since_utc TEXT NOT NULL DEFAULT '', break_started_utc TEXT NOT NULL DEFAULT '', current_video_id TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_batches_one_active
+          ON manual_research_batches(profile_id) WHERE state IN ('ready','running','paused','interrupted');
+        CREATE TABLE IF NOT EXISTS manual_research_items (
+          batch_id TEXT NOT NULL, profile_id TEXT NOT NULL, video_id TEXT NOT NULL,
+          original_url TEXT NOT NULL, normalized_url TEXT NOT NULL, position INTEGER NOT NULL,
+          title TEXT NOT NULL DEFAULT '', channel_title TEXT NOT NULL DEFAULT '',
+          metadata_state TEXT NOT NULL DEFAULT 'unconfirmed', research_state TEXT NOT NULL DEFAULT 'queued',
+          auto_genre_decision TEXT NOT NULL DEFAULT '검토', auto_genre_reason TEXT NOT NULL DEFAULT '',
+          human_fit TEXT NOT NULL DEFAULT '', human_genre_label TEXT NOT NULL DEFAULT '',
+          mood TEXT NOT NULL DEFAULT '', intro_notes TEXT NOT NULL DEFAULT '', vocal_notes TEXT NOT NULL DEFAULT '',
+          rap_melody_notes TEXT NOT NULL DEFAULT '', beat_tempo_notes TEXT NOT NULL DEFAULT '',
+          hook_structure_notes TEXT NOT NULL DEFAULT '', title_thumbnail_notes TEXT NOT NULL DEFAULT '',
+          reuse_ideas TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+          listened_segments TEXT NOT NULL DEFAULT '', started_at_utc TEXT NOT NULL DEFAULT '',
+          ended_at_utc TEXT NOT NULL DEFAULT '', active_seconds INTEGER NOT NULL DEFAULT 0,
+          timer_started_utc TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(batch_id,video_id), UNIQUE(batch_id,position),
+          FOREIGN KEY(batch_id) REFERENCES manual_research_batches(id) ON DELETE CASCADE,
+          FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS idx_manual_items_profile_video
+          ON manual_research_items(profile_id,video_id,updated_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_research_schedules_one_active
           ON research_schedules(profile_id) WHERE state IN ('scheduled','running','paused');
         CREATE INDEX IF NOT EXISTS idx_research_schedules_recovery

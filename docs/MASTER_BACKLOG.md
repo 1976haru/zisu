@@ -1,5 +1,22 @@
 # ZISU Master Backlog
 
+### V46-MANUAL-RESEARCH-50-01 Windows visual acceptance (2026-10-27)
+
+- **Verified results:** actual Windows 1920x1080 / 96 DPI (100%) passed at narrow 720x560, normal 1100x760 and maximized 1920x1057. The isolated fake-data run passed 20/20 interaction/state checks, rendered 50 rows in 0.0097 seconds, preserved JP/KR separation and saved notes/labels, and reported SQLite `integrity_check=ok` with no OAuth files or real browser/API access.
+- **DPI classification:** 100% is actual-OS evidence. Tk scaling at 100/125/150/200% passed as `SIMULATED_DPI`; OS-level 125/150/200% are `REAL_DPI_PENDING` and are not claimed as actual DPI coverage.
+- **Minimal fixes:** pause/resume refresh preserves the selected `video_id`, Treeview focus/visibility, and click-only open-button state; completing the final item atomically completes the batch and permits a later profile-scoped batch. Focused tests 16/16, full unittest 395/394 PASS/1 opt-in SKIP, acceptance 29/29, GUI smoke, compileall and diff check passed. Automatic research and VPH core behavior were not changed.
+- **Remaining:** P0 uncommitted-diff review and approval; P1 real OS 125/150/200% DPI plus same-source CI; P2 optional separately approved read-only metadata enrichment. Estimated item progress 96%; overall V4.6 estimate 93%. No commit, push, merge, install, live OAuth/API, or real video opening occurred.
+- **Next action:** review the uncommitted diff and accepted screenshot evidence, then decide whether to authorize a commit.
+
+### V46-MANUAL-RESEARCH-50-01 (2026-10-27, isolated implementation)
+
+- **Current state:** implemented locally from clean `8e814fb2e1a8140ca064a58cf8a797a1baa336a7` in `feature/v46-manual-research-50-01`; no commit, push, merge, install, live OAuth/API, or automatic browser access.
+- **Completed:** manual 1–50 URL preview/import with exact-host/scheme validation, supported watch/short/live forms, tracking removal, stable video-ID deduplication, line errors and atomic persistence; profile-local batches/items; metadata-unknown REVIEW retention; human evaluation fields; click-only single-video opening; distinct planned/active/break/listened/Analytics concepts; pause/resume and restart-to-interrupted recovery without offline elapsed time. Existing candidate and genre rows are not updated by import.
+- **Initial audit:** remote main `6e7d643`, PR #4 remains Draft at `8e814fb`, PR #2 remains open at `959dd11`; latest 8e Push/PR Actions passed. The preserved 8e product soak passed 21,600 seconds (PID 36976, 73/73). The later supervised run (supervisor PID 29796, product PID 27204) stopped after 10,201.844 active seconds / 35 of 73 samples and both PIDs are absent: classify **INTERRUPTED**, not PASS; its evidence remains unchanged and the run was not restarted. `native_runner.py` / `soak_supervisor.py` and tests remain untracked only in their separate detached audit worktree.
+- **Verified results:** focused manual-research 16/16 PASS; full unittest 395 run / 394 PASS / 1 opt-in live-browser SKIP / 0 FAIL; offline acceptance 29/29; GUI smoke PASS; compileall and diff check PASS. Existing stress evidence is 10,000 candidates / 12 workers / 0 failures and was not rerun after GUI/manual-only changes. All DB tests used isolated fixtures; actual Windows 100% visual review passed while OS-level 125/150/200% remain pending.
+- **Remaining:** P0 review/approval before commit only; P1 actual Windows 100/125/150/200% visual review and same-source CI; P2 optional approved read-only metadata enrichment. Estimated item progress 90%; overall V4.6 estimate 91%. Estimates are separate from verified results.
+- **Next action:** perform the explicit Windows DPI visual review of the isolated manual-research screen.
+
 ### Terminal incomplete one-shot recovery diagnosis (2026-10-23)
 
 - **P0 local fix:** an actual read-only production snapshot showed a completed 8-hour schedule paired with an empty `REVIEW` VPH job (0 targets, 0 observations/evaluations), while its old one-shot intent said `completed`. The historical code completed intents on schedule completion alone; current restart recovery also had an unconditional terminal-schedule completion path.

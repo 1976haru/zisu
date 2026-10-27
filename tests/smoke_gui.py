@@ -188,6 +188,8 @@ with WorkspaceTemp() as temp:
     app._refresh_research_dashboard(saved_profile)
     assert hasattr(app,"research_dashboard_frame")
     assert app.research_dashboard_frame.master is app.home_page
+    assert app.manual_research_button.cget("state") != "disabled"
+    assert "최대 50개" in app.manual_research_button.cget("text")
     assert int(app.research_dashboard_frame.grid_info()["row"])==0
     assert len(app.research_stage_cards)==9
     assert "최종 연구 완료" not in app.research_dashboard_results.get()
