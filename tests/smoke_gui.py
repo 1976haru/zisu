@@ -354,18 +354,40 @@ with WorkspaceTemp() as temp:
         assert app.vph_buttons.winfo_rooty()<app.vph_tree.winfo_rooty()
         for widget in (app.vph_start_button,app.vph_pause_button,app.vph_resume_button,app.vph_stop_button):
             assert widget.winfo_ismapped() and widget.winfo_height()>=widget.winfo_reqheight()
-    # Verify actual Tk key bindings and focus navigation on the beginner screen.
+    # Verify bindings, selected-profile behavior, and global key routing without
+    # depending on whether the CI desktop grants this process OS keyboard focus.
     app.main_tabs.select(app.home_page);app.update()
+    assert app.dashboard_channels.bind("<Return>")
+    assert app.bind_all("<Return>")
+    assert app.bind_all("<Escape>")
+
+    # The Treeview action changes the selected profile and returns Tk's stop token.
     app.dashboard_channels.selection_set("profile:"+third)
-    app.dashboard_channels.focus_set();app.event_generate("<Return>");app.update()
+    assert app._dashboard_open_profile()=="break"
     assert app.active_id==third
-    app.event_generate("<Escape>");app.update_idletasks()
-    assert app.focus_get() is app.profile_combo
+
+    # The global Return router acts only when focus_get reports the channel tree.
+    app.dashboard_channels.selection_set("profile:"+first)
+    with patch.object(app,"focus_get",return_value=app.dashboard_channels):
+        assert app._easy_enter()=="break"
+    assert app.active_id==first
+    app.dashboard_channels.selection_set("profile:"+third)
+    with patch.object(app,"focus_get",return_value=app.profile_combo):
+        assert app._easy_enter() is None
+    assert app.active_id==first
+
+    # Escape requests profile-combo focus only on the operations home.
+    with patch.object(app.profile_combo,"focus_set") as focus_set:
+        assert app._easy_escape()=="break"
+        focus_set.assert_called_once_with()
+    app._select_detail_tab(1)
+    with patch.object(app.profile_combo,"focus_set") as focus_set:
+        assert app._easy_escape() is None
+        focus_set.assert_not_called()
+    app.main_tabs.select(app.home_page);app.update_idletasks()
     assert app.easy_next.tk_focusNext() is not None
     app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
     app.select_profile();app.update_idletasks()
-    assert app.bind_all("<Escape>")
-    assert app.bind_all("<Return>")
     app._ai_preview_plan()
     assert app.ai_confirmed_plan["profile_id"] == first
     with store.connect() as database:
