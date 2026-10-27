@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 dist/
 build/
+ZISU_APP/
 *.spec
 *.db
 *.db-journal

@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $stage = 'input'
 $summary = [ordered]@{
     schema = 1
-    product = 'ZISU Research Studio V4.4.2 offline package validation'
+    product = 'ZISU SIGNAL LAB V4.6.0 offline package validation'
     result = 'FAIL'
     zip_hash_verified = $false
     exe_hash_verified = $false
@@ -25,14 +25,16 @@ $testRoot = $null
 $timer = [Diagnostics.Stopwatch]::StartNew()
 
 try {
-    if (-not $PackageZip) { $PackageZip = Read-Host 'Enter the full path to the V4.4.2 release ZIP' }
+    if (-not $PackageZip) { $PackageZip = Read-Host 'Enter the full path to the ZISU SIGNAL LAB release ZIP' }
     if (-not (Test-Path -LiteralPath $PackageZip -PathType Leaf)) { throw 'Release ZIP not found.' }
     $PackageZip = (Resolve-Path -LiteralPath $PackageZip).Path
     $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ZISU Validation 한글_日本語 ' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     if (-not $ZipManifestPath) { $ZipManifestPath = Join-Path (Split-Path -Parent $PackageZip) 'RELEASE_SHA256SUMS.txt' }
     if (-not $ExpectedZipSha256 -and (Test-Path -LiteralPath $ZipManifestPath -PathType Leaf)) {
-        $manifestLine = Get-Content -LiteralPath $ZipManifestPath -Encoding ascii | Where-Object { $_ -match 'ZISU-Research-Studio-V4\.4\.2-Windows\.zip$' } | Select-Object -First 1
+        $packageName = [IO.Path]::GetFileName($PackageZip)
+        $manifestPattern = [regex]::Escape($packageName) + '$'
+        $manifestLine = Get-Content -LiteralPath $ZipManifestPath -Encoding ascii | Where-Object { $_ -match $manifestPattern } | Select-Object -First 1
         if ($manifestLine -match '^([0-9a-fA-F]{64})\s+') { $ExpectedZipSha256 = $Matches[1].ToLowerInvariant() }
     }
     if (-not $ExpectedZipSha256) { $ExpectedZipSha256 = (Read-Host 'Paste expected ZIP SHA-256 from RELEASE_SHA256SUMS.txt').Trim() }
@@ -51,15 +53,17 @@ try {
     if ('ZisuResearchStudio.exe' -notin $entries -or 'SHA256SUMS.txt' -notin $entries -or -not ($entries | Where-Object { $_ -like '_internal/*' })) {
         throw 'ZIP is missing the EXE, checksum manifest, or _internal runtime folder.'
     }
-    foreach ($requiredEntry in @('User-Guide-KO.html', 'Quick-Start-KO.txt')) {
+    foreach ($requiredEntry in @('User-Guide-KO.html', 'Quick-Start-KO.txt', 'ZISU-SIGNAL-LAB-Run.cmd')) {
         if ($requiredEntry -notin $entries) { throw "ZIP is missing required beginner documentation: $requiredEntry" }
     }
     foreach ($entry in $entries) {
         $topLevel = $entry.Split('/')[0]
-        if ($topLevel -notin @('ZisuResearchStudio.exe', 'SHA256SUMS.txt', 'User-Guide-KO.html', 'Quick-Start-KO.txt', '_internal')) {
+        if ($topLevel -notin @('ZisuResearchStudio.exe', 'SHA256SUMS.txt', 'User-Guide-KO.html', 'Quick-Start-KO.txt', 'ZISU-SIGNAL-LAB-Run.cmd', '_internal')) {
             throw 'ZIP contains an unexpected top-level item.'
         }
-        if ($entry -match '(?i)(^|/)\.\.?(/|$)|client_secret[^/]*\.json|oauth_tokens|token\.json|credentials\.json|authorized[_-]?user\.json|\.db$|\.sqlite|\.log$|backup|\.py$') {
+        $sensitivePayload = $entry -match '(?i)client_secret[^/]*\.json|oauth_tokens|token\.json|credentials\.json|authorized[_-]?user\.json|\.db$|\.sqlite|\.log$|backup'
+        $sourceOutsideRuntime = $entry -match '(?i)\.py$' -and $topLevel -ne '_internal'
+        if ($entry -match '(?i)(^|/)\.\.?(/|$)' -or $sensitivePayload -or $sourceOutsideRuntime) {
             throw 'ZIP contains a forbidden source, credential, database, log, or backup entry.'
         }
     }
@@ -73,6 +77,10 @@ try {
     $expectedExeHash = $Matches[1].ToLowerInvariant()
     $actualExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceExe).Hash.ToLowerInvariant()
     if ($actualExeHash -ne $expectedExeHash) { throw 'EXE SHA-256 does not match the package checksum manifest.' }
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($sourceExe)
+    if ($versionInfo.ProductName -ne 'ZISU SIGNAL LAB' -or $versionInfo.ProductVersion -notlike '4.6.0.*') {
+        throw 'EXE Windows product name/version metadata is not the expected ZISU SIGNAL LAB V4.6.0 identity.'
+    }
     $runtime = Join-Path $original '_internal'
     if (-not (Test-Path -LiteralPath $runtime -PathType Container) -or -not (Get-ChildItem -LiteralPath $runtime -File -Recurse | Select-Object -First 1)) {
         throw '_internal runtime folder is empty or missing.'

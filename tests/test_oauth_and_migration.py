@@ -49,7 +49,7 @@ class OAuthAndMigrationTests(unittest.TestCase):
     def test_token_path_rejects_traversal(self):
         with self.assertRaises(oauth.OAuthError): oauth.token_path("../secret")
     def test_connection_state_never_returns_token(self):
-        oauth.save_connection(self.profile,{"channel_id":"","channel_title":"조사용 계정"},
+        oauth.save_connection(self.profile,{"channel_id":"","channel_title":"조사용 계정","email":"research@example.test"},
           json.dumps({"token":"must-not-leak","refresh_token":"refresh","client_id":"test","scopes":oauth.SCOPES}))
         state=oauth.connection_state(self.profile)
         self.assertEqual("connected",state["status"])
@@ -69,6 +69,7 @@ class OAuthAndMigrationTests(unittest.TestCase):
         captured={}
         class Credentials:
             token="access"
+            scopes=oauth.SCOPES
             def to_json(self): return "{}"
         class Flow:
             @classmethod
