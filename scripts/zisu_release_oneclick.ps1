@@ -1,5 +1,6 @@
 <#
 ZISU one-command release workflow. Dry run is the default and is always offline.
+Managed DB backups use the bounded in-memory DPAPI path; the legacy EFS staging route remains a distinct explicit CLI mode.
 Real GitHub writes and installation require both -ExecuteRelease and -Install.
 No Google, YouTube or Gemini API is called by this script.
 #>
@@ -15,6 +16,8 @@ param(
     [string]$DatabasePath = (Join-Path $env:LOCALAPPDATA 'ZisuResearchStudio\zisu_v2.db'),
     [string]$ResumeRunId,
     [ValidateRange(1,240)][int]$TimeoutMinutes = 90,
+    [switch]$FixtureOnly,
+    [string]$FixtureRoot,
     [switch]$ExecuteRelease,
     [switch]$Install
 )
@@ -120,35 +123,171 @@ function Get-PackageFacts([string]$Zip,[string]$Manifest) {
     } finally {$a.Dispose()}
 }
 function Test-NoZisuProcess {
-    if(@(Get-Process -Name ZisuResearchStudio -ErrorAction SilentlyContinue).Count){throw 'ZISU is running; close it normally before replacement.'}
+    try {
+        $processes=@(Get-Process -Name ZisuResearchStudio -ErrorAction Stop)
+        if($processes.Count){throw 'ZISU is running; close it normally before replacement.'}
+    } catch {
+        if($_.FullyQualifiedErrorId -notlike 'NoProcessFoundForGivenName,*') { throw 'Unable to verify that ZISU is stopped.' }
+    }
 }
-function Backup-Database([string]$Db,[string]$Snapshot,[string]$Python) {
+function Test-PrivateDirectoryAcl([string]$Path) {
+    if(!(Test-Path -LiteralPath $Path -PathType Container)){return $false}
+    $item=Get-Item -LiteralPath $Path -Force
+    if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){return $false}
+    $acl=Get-Acl -LiteralPath $Path
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $rules=@($acl.Access)
+    $sids=@($rules | ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value})
+    $ownerSid=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if(!$acl.AreAccessRulesProtected -or $ownerSid -ne $sid -or $sids.Count -ne 1 -or $sids[0] -ne $sid -or $rules.Count -ne 1){return $false}
+    $full=[Security.AccessControl.FileSystemRights]::FullControl
+    return ($rules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        (($rules[0].FileSystemRights -band $full) -eq $full))
+}
+function New-PrivateDirectory([string]$Path) {
+    if(Test-Path -LiteralPath $Path){
+        if(!(Test-PrivateDirectoryAcl $Path)){throw 'Existing backup directory ACL is not private; refusing to change it.'}
+        return
+    }
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetAccessRuleProtection($true,$false)
+    $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+    [void]$acl.AddAccessRule($rule);[void][IO.Directory]::CreateDirectory($Path,$acl)
+    if(!(Test-PrivateDirectoryAcl $Path)){throw 'New backup directory ACL verification failed.'}
+    $probe=Join-Path $Path ('.write_probe_'+[Guid]::NewGuid().ToString('N'))
+    $stream=$null
+    try{$stream=[IO.File]::Open($probe,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);$stream.WriteByte(0);$stream.Flush($true)}finally{if($stream){$stream.Dispose()};if(Test-Path -LiteralPath $probe){Remove-Item -LiteralPath $probe -Force}}
+}
+function Test-PrivateBackupFile([string]$Path,[string]$Vault,[switch]$Partial) {
+    if(!(Test-Path -LiteralPath $Path -PathType Leaf)){return $false}
+    $item=Get-Item -LiteralPath $Path -Force
+    if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){return $false}
+    $full=[IO.Path]::GetFullPath($Path);$parent=[IO.Path]::GetFullPath((Split-Path -Parent $full))
+    $expectedSuffix=if($Partial){'.dpapi.partial'}else{'.dpapi'}
+    if($parent -ne [IO.Path]::GetFullPath($Vault) -or !$full.EndsWith($expectedSuffix,[StringComparison]::OrdinalIgnoreCase)){return $false}
+    $acl=Get-Acl -LiteralPath $full;$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sids=@($acl.Access|ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value})
+    $ownerSid=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    $rules=@($acl.Access);$full=[Security.AccessControl.FileSystemRights]::FullControl
+    if($ownerSid -ne $sid -or $sids.Count -ne 1 -or $sids[0] -ne $sid -or $rules.Count -ne 1){return $false}
+    return ($rules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        (($rules[0].FileSystemRights -band $full) -eq $full))
+}
+function Test-PathInside([string]$Child,[string]$Parent) {
+    $childPath=[IO.Path]::GetFullPath($Child).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $parentPath=[IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    return ($childPath.Equals($parentPath,[StringComparison]::OrdinalIgnoreCase) -or
+        $childPath.StartsWith($parentPath+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase))
+}
+function Get-ReleaseBackupVault {
+    if(!$env:LOCALAPPDATA){throw 'LOCALAPPDATA is unavailable; refusing to select a backup destination.'}
+    $local=[IO.Path]::GetFullPath($env:LOCALAPPDATA);$repo=[IO.Path]::GetFullPath($script:RepoRoot)
+    $vault=Join-Path $local 'ZisuReleaseBackupVault'
+    if((Test-PathInside $vault $repo) -or (Test-PathInside $vault (Join-Path $local 'ZisuResearchStudio'))){throw 'Backup vault overlaps repository or application data.'}
+    foreach($name in @('OneDrive','OneDriveConsumer','OneDriveCommercial')){
+        $sync=[Environment]::GetEnvironmentVariable($name)
+        if($sync -and (Test-PathInside $vault $sync)){throw 'Backup vault is inside a cloud-sync directory.'}
+    }
+    $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($vault))
+    if($drive.DriveFormat -ne 'NTFS'){throw 'DPAPI backup vault requires a local NTFS volume.'}
+    New-PrivateDirectory $vault
+    $batch=Join-Path $vault ('release_'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')+'_'+[Guid]::NewGuid().ToString('N'))
+    New-PrivateDirectory $batch
+    return $batch
+}
+function Backup-Database([string]$Db,[string]$Python,[string]$Vault,[switch]$SyntheticFixture) {
     if(!(Test-Path -LiteralPath $Db -PathType Leaf)){throw 'User database is missing; installation is blocked.'}
-    $helper=Join-Path $script:RunRoot 'sqlite_backup_api.py'
-    $code=@'
-import sqlite3,sys,json,hashlib,base64,pathlib
-src=pathlib.Path(sys.argv[1]).resolve();dst=pathlib.Path(sys.argv[2]).resolve()
-def openro(p):
- u='file:'+p.as_posix()+'?mode=ro'
- try:return sqlite3.connect(u,uri=True)
- except sqlite3.Error:
-  if pathlib.Path(str(p)+'-wal').exists() or pathlib.Path(str(p)+'-shm').exists():raise
-  return sqlite3.connect(u+'&immutable=1',uri=True)
-def check(c):
- if c.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise RuntimeError('SQLite integrity check failed')
- tabs=[x[0] for x in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")];counts={};h=hashlib.sha256()
- for t in tabs:
-  q='"'+t.replace('"','""')+'"';rows=c.execute('SELECT * FROM '+q).fetchall();counts[t]=len(rows)
-  for row in rows:
-   vals=[{'blob':base64.b64encode(v).decode('ascii')} if isinstance(v,bytes) else v for v in row];h.update(json.dumps(vals,ensure_ascii=False,separators=(',',':'),sort_keys=True).encode()+b'\n')
- return counts,h.hexdigest()
-s=openro(src);before=check(s);out=sqlite3.connect(str(dst));s.backup(out);out.commit();out.close();s.close();r=openro(dst);after=check(r);r.close()
-if before!=after:raise SystemExit('Backup differs logically from source')
-print(json.dumps({'integrity':'ok','table_counts':before[0],'logical_digest':before[1],'logical_match':True},sort_keys=True))
-'@
-    [IO.File]::WriteAllText($helper,$code,[Text.UTF8Encoding]::new($false))
-    $v=& $Python $helper $Db $Snapshot;if($LASTEXITCODE -ne 0){throw 'SQLite Backup API/restore-compare verification failed.'}
-    return (($v|Out-String).Trim()|ConvertFrom-Json)
+    if(!$SyntheticFixture){Test-NoZisuProcess}
+    if(!$Vault){$Vault=Get-ReleaseBackupVault}else{New-PrivateDirectory $Vault}
+    if(!(Test-PrivateDirectoryAcl $Vault)){throw 'Backup vault is not restricted to the current Windows user.'}
+    $backupId='release_'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')+'_'+[Guid]::NewGuid().ToString('N')
+    $helper=Join-Path $script:RepoRoot 'scripts\zisu_release_backup_cli.py'
+    if(!(Test-Path -LiteralPath $helper -PathType Leaf)){throw 'Encrypted release backup helper is missing.'}
+    $cliArgs=@($helper,'--database',$Db,'--vault',$Vault,'--backup-id',$backupId,'--memory-dpapi')
+    if($SyntheticFixture){$cliArgs+=@('--fixture-root',$FixtureRoot)}
+    if($SyntheticFixture){$script:FixturePhase='memory_dpapi_cli'}
+    $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$Python;$start.Arguments='"'+$helper+'" '+(($cliArgs | Select-Object -Skip 1 | ForEach-Object {'"'+([string]$_).Replace('"','\"')+'"'}) -join ' ')
+    $start.WorkingDirectory=$script:RepoRoot;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $child=[Diagnostics.Process]::new();$child.StartInfo=$start
+    try{
+        if(!$child.Start()){throw 'Encrypted backup helper did not start.'}
+        $stdoutTask=$child.StandardOutput.ReadToEndAsync();$stderrTask=$child.StandardError.ReadToEndAsync()
+        if(!$child.WaitForExit($TimeoutMinutes*60000)){$child.Kill();$child.WaitForExit();throw 'Encrypted backup helper exceeded its timeout.'}
+        $exit=$child.ExitCode;$output=$stdoutTask.Result;$safeStderr=$stderrTask.Result
+    }finally{$child.Dispose()}
+    if($exit -ne 0){
+        if($safeStderr -match '"result"\s*:\s*"FAIL".*?"error_type"\s*:\s*"([A-Za-z0-9_]+)".*?"phase"\s*:\s*"([A-Za-z0-9_]+)"'){throw "SQLite backup helper failed (exit $exit; type $($Matches[1]); phase $($Matches[2]))."}
+        throw "SQLite backup helper failed (exit $exit)."
+    }
+    if($SyntheticFixture){$script:FixturePhase='memory_dpapi_fixture_verify'}
+    try{$facts=$output.Trim()|ConvertFrom-Json}catch{throw 'Encrypted backup helper returned invalid status.'}
+    if($facts.result -ne 'PASS' -or $facts.backup_mode -ne 'MEMORY_DPAPI' -or !$facts.restore_verified -or
+       $facts.dpapi_scope -ne 'CurrentUser' -or $facts.plaintext_backup_files -ne 0 -or
+       $facts.plaintext_snapshot_staging -ne 'none_memory_only' -or !$facts.source_file_set_unchanged){
+        throw 'Memory DPAPI backup did not satisfy all verification gates.'
+    }
+    if(!(Test-PrivateBackupFile $facts.backup_path $Vault)){
+        if($SyntheticFixture){$script:FixturePhase='memory_dpapi_final_acl'}
+        throw 'Encrypted backup file path or ACL is not private.'
+    }
+    if($SyntheticFixture){
+        $script:FixturePhase='memory_dpapi_crash_child'
+        $crashId='fixture_crash_'+[Guid]::NewGuid().ToString('N')
+        $crashPartial=Join-Path $Vault ($crashId+'.dpapi.partial')
+        $crashStart=[Diagnostics.ProcessStartInfo]::new();$crashStart.FileName=$Python
+        $crashStart.Arguments='"'+$helper+'" --database "'+$Db+'" --vault "'+$Vault+'" --backup-id "'+$crashId+'" --fixture-root "'+$FixtureRoot+'" --memory-dpapi --fixture-crash-after-partial'
+        $crashStart.WorkingDirectory=$script:RepoRoot;$crashStart.UseShellExecute=$false;$crashStart.CreateNoWindow=$true
+        $crashStart.RedirectStandardOutput=$true;$crashStart.RedirectStandardError=$true
+        $crashChild=[Diagnostics.Process]::new();$crashChild.StartInfo=$crashStart
+        try{
+            if(!$crashChild.Start()){throw 'Memory backup crash fixture child did not start.'}
+            $outTask=$crashChild.StandardOutput.ReadToEndAsync();$errTask=$crashChild.StandardError.ReadToEndAsync()
+            if(!$crashChild.WaitForExit($TimeoutMinutes*60000)){$crashChild.Kill();$crashChild.WaitForExit();throw 'Memory backup crash fixture exceeded its timeout.'}
+            $crashExit=$crashChild.ExitCode;$crashOut=$outTask.Result;$crashErr=$errTask.Result
+        }finally{$crashChild.Dispose()}
+        $script:FixturePhase='memory_dpapi_crash_acl'
+        if($crashExit -ne 23 -or !(Test-Path -LiteralPath $crashPartial -PathType Leaf)){
+            throw 'Memory backup crash fixture did not stop after ciphertext staging.'
+        }
+        if(Test-Path -LiteralPath (Join-Path $Vault ($crashId+'.dpapi'))){throw 'Crash fixture published an incomplete final backup.'}
+        if(!(Test-PrivateBackupFile $crashPartial $Vault -Partial)){throw 'Ciphertext partial ACL is not private.'}
+        $facts | Add-Member -NotePropertyName crash_partial_path -NotePropertyValue $crashPartial -Force
+        $facts | Add-Member -NotePropertyName crash_partial_acl -NotePropertyValue 'PASS' -Force
+        $facts | Add-Member -NotePropertyName crash_final_published -NotePropertyValue $false -Force
+    }
+    return $facts
+}
+
+if($FixtureOnly){
+    if($Install -or $ExecuteRelease){throw '-FixtureOnly cannot be combined with release or installation switches.'}
+    if(!$FixtureRoot){throw '-FixtureOnly requires an explicit synthetic fixture root.'}
+    $script:RepoRoot=[IO.Path]::GetFullPath($RepoPath)
+    $fixture=[IO.Path]::GetFullPath($FixtureRoot)
+    $marker=Join-Path $fixture '.zisu-synthetic-backup-fixture'
+    $fixtureDb=Join-Path $fixture 'fixture_db.sqlite'
+    if(!(Test-Path -LiteralPath $marker -PathType Leaf) -or !(Test-Path -LiteralPath $fixtureDb -PathType Leaf)){throw 'Fixture marker or synthetic database is missing.'}
+    if((Get-Content -LiteralPath $marker -Raw -Encoding ascii).Trim() -ne 'ZISU_RELEASE_BACKUP_FIXTURE_ONLY_V1'){throw 'Fixture marker is invalid.'}
+    $fixtureVault=Join-Path $fixture 'vault'
+    $fixturePython=(Get-Command python.exe -ErrorAction Stop).Source
+    $script:FixtureWinError=$null
+    try{
+        $script:FixturePhase='user_only_acl_write_probe'
+        New-PrivateDirectory $fixtureVault
+        $script:FixturePhase='release_backup_path'
+        $facts=Backup-Database $fixtureDb $fixturePython $fixtureVault -SyntheticFixture
+        if($facts.result -ne 'PASS' -or !$facts.restore_verified){throw 'Fixture encrypted backup did not PASS.'}
+        $facts|ConvertTo-Json -Depth 8 -Compress
+        exit 0
+    }catch{
+        $phase=$script:FixturePhase
+        if($_.Exception.Message -match 'backup helper failed \(exit \d+; type [A-Za-z0-9_]+; phase ([A-Za-z0-9_]+)\)'){$phase=$Matches[1]}
+        elseif($_.Exception.Message -match 'Access to the path .* is denied'){$phase='user_only_acl_write_probe'}
+        if($_.Exception.GetType().Name -eq 'UnauthorizedAccessException'){$script:FixtureWinError=($_.Exception.HResult -band 65535)}
+        if($_.Exception.Message -match 'WinError (\d+)'){$script:FixtureWinError=[int]$Matches[1]}
+        @{result='FAIL';safe_error_type=$_.Exception.GetType().Name;phase=$phase;winerror=$script:FixtureWinError}|ConvertTo-Json -Compress
+        exit 1
+    }
 }
 
 if($Install -and -not $ExecuteRelease){throw 'Real install requires explicit -ExecuteRelease and -Install.'}
@@ -239,9 +378,11 @@ try {
 
     if($Install){
         Test-NoZisuProcess
-        $snapshot=Join-Path $script:RunRoot ('user_database_snapshot_'+(Get-Date -Format 'HHmmss')+'.sqlite');$python=(Get-Command python.exe -ErrorAction Stop).Source
-        $dbBefore=Backup-Database $DatabasePath $snapshot $python;$report.database_before=$dbBefore
-        Report-Step 'sqlite_backup_api' 'PASS' 'Backup integrity, table counts and logical digest matched.'
+        $python=(Get-Command python.exe -ErrorAction Stop).Source
+        $dbBefore=Backup-Database $DatabasePath $python $null
+        if($dbBefore.result -ne 'PASS' -or !$dbBefore.restore_verified){throw 'Encrypted DB backup did not verify; installation is blocked.'}
+        $report.database_before=$dbBefore
+        Report-Step 'encrypted_database_backup_restore' 'PASS' 'DPAPI ciphertext, ACL, memory restore, schema and logical data comparisons verified.'
         $old=Join-Path $script:RunRoot 'previous_install'
         $launcherName='ZISU_'+([char]0xBC14)+([char]0xB85C)+([char]0xC2E4)+([char]0xD589)+'.cmd'
         $launcher=Join-Path (Split-Path -Parent $InstallDirectory) $launcherName;$launcherBackup=Join-Path $script:RunRoot 'previous_launcher.cmd'
@@ -262,9 +403,9 @@ try {
             Test-NoZisuProcess
             $smoke=Join-Path $script:RepoRoot 'scripts\windows_exe_smoke.ps1';$smokeRoot=Join-Path $script:RunRoot ('installed_gui_smoke_'+(Get-Date -Format 'HHmmss'))
             Invoke-Checked powershell.exe @('-NoProfile','-ExecutionPolicy','Bypass','-File',$smoke,'-ExePath',(Join-Path $InstallDirectory 'ZisuResearchStudio.exe'),'-WorkRoot',$smokeRoot,'-TimeoutSeconds','45') $script:RepoRoot
-            $after=Backup-Database $DatabasePath (Join-Path $script:RunRoot ('database_after_'+(Get-Date -Format 'HHmmss')+'.sqlite')) $python
-            if($after.logical_digest -ne $dbBefore.logical_digest){throw 'User database changed after isolated install smoke.'};$report.database_after=$after
-            Report-Step 'install_gui_smoke_data_compare' 'PASS' 'Installed hash, GUI smoke, and user DB logical equality verified.'
+            $after=Backup-Database $DatabasePath $python $null
+            if($after.logical_sha256 -ne $dbBefore.logical_sha256 -or $after.schema_sha256 -ne $dbBefore.schema_sha256){throw 'User database changed after isolated install smoke.'};$report.database_after=$after
+            Report-Step 'install_gui_smoke_data_compare' 'PASS' 'Installed hash, GUI smoke, and encrypted user DB logical/schema equality verified.'
         }catch{
             $failed=Join-Path $script:RunRoot ('failed_install_'+[DateTime]::UtcNow.ToString('yyyyMMdd_HHmmss'))
             if(Test-Path -LiteralPath $InstallDirectory){Move-Item -LiteralPath $InstallDirectory -Destination $failed}

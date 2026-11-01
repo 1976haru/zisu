@@ -151,6 +151,15 @@ def list_items(batch_id, profile_id, path=None):
             (batch_id, profile_id))]
 
 
+def get_item(batch_id, profile_id, video_id, path=None):
+    with store.connect(path) as db:
+        row = db.execute(
+            "SELECT * FROM manual_research_items WHERE batch_id=? AND profile_id=? AND video_id=?",
+            (batch_id, profile_id, video_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def recover_interrupted(path=None, *, now=None):
     """Mark stale running sessions interrupted without adding offline elapsed time."""
     now = now or utc_now()
@@ -169,6 +178,25 @@ def _elapsed(started, now):
     if not started:
         return 0
     return max(0, int((datetime.fromisoformat(now) - datetime.fromisoformat(started)).total_seconds()))
+
+
+def timer_totals(batch, item=None, *, now=None):
+    """Return separate session-active, current-video-active, and break seconds."""
+    now = now or utc_now()
+    running = batch.get("state") == "running"
+    segment = _elapsed(batch.get("running_since_utc", ""), now) if running else 0
+    session_active = int(batch.get("active_seconds", 0) or 0) + segment
+    video_active = int((item or {}).get("active_seconds", 0) or 0)
+    if (running and item and item.get("video_id") == batch.get("current_video_id")):
+        video_active += _elapsed(item.get("timer_started_utc", ""), now)
+    break_active = int(batch.get("break_seconds", 0) or 0)
+    if batch.get("break_started_utc"):
+        break_active += _elapsed(batch["break_started_utc"], now)
+    return {
+        "session_active_seconds": session_active,
+        "video_active_seconds": video_active,
+        "break_seconds": break_active,
+    }
 
 
 def start_or_resume(batch_id, profile_id, video_id, path=None, *, now=None):

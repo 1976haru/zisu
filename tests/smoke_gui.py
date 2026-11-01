@@ -9,6 +9,7 @@ from support import WorkspaceTemp
 from mcrs import store, vph, research_dashboard_presenter
 from mcrs.genres import REVIEW
 from mcrs.gui import Studio, ProfileDialog
+from mcrs.manual_research_ui import ManualResearchWindow
 with WorkspaceTemp() as temp:
     os.environ['ZISU_DATA_DIR']=str(temp)
     first = store.create_profile("GUI 스모크 조사", "JP", "MORNING_CHILL_RAP")
@@ -266,7 +267,36 @@ with WorkspaceTemp() as temp:
         dialog._core_genre_changed()
         assert not dialog.related_vars["CHILL_RAP"].get()
         assert "Chill Rap" not in dialog.related_summary.get()
+        assert dialog.save_button.cget("text")=="채널 저장"
+        assert "Google 연결" not in dialog.save_button.cget("text")
+        assert dialog.profile_canvas.winfo_exists()
+        assert dialog.profile_scrollbar.winfo_exists()
+        assert dialog.save_button.winfo_manager()=="pack"
         dialog.destroy()
+    def save_synthetic_channel(dialog):
+        dialog.name.set("GUI manual JP channel")
+        dialog.market.set("JP")
+        dialog.genre.set("MORNING_CHILL_RAP")
+        dialog.genre_display.set("Morning Chill Rap")
+        dialog.save_button.invoke()
+    with patch.object(ProfileDialog,"wait_window",save_synthetic_channel):
+        saved_profile=app.add_profile()
+    assert saved_profile and app.active_id==saved_profile
+    assert app.main_tabs.select()==str(app.home_page)
+    saved_row=store.get_profile(saved_profile)
+    assert saved_row["market"]=="JP" and saved_row["genre"]=="MORNING_CHILL_RAP"
+    assert {"CHILL_RAP","RNB_HIPHOP","CAFE_CHILL"}.issubset(set(store.normalize_related_genres(
+        saved_row["genre"],saved_row["related_genres_json"],store.profile_genre_config(saved_row)["custom_genres"])))
+    manual_windows=[child for child in app.winfo_children() if isinstance(child,ManualResearchWindow)]
+    assert len(manual_windows)==1
+    manual_window=manual_windows[0]
+    assert "Morning Chill Rap" in manual_window.profile_summary.get()
+    assert "Chill Rap" in manual_window.profile_summary.get()
+    assert "별도 판정" in manual_window.profile_summary.get()
+    assert not any("A. 수동 링크 연구" in str(getattr(widget,"cget",lambda *_:"")("text")) for widget in manual_window.body.winfo_children())
+    manual_window._close()
+    assert callable(app.open_google_wizard)
+    assert app.manual_research_button.cget("state")!="disabled"
     assert app.ai_provider_choice.get()=="규칙만"
     app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
     app.select_profile()

@@ -4,7 +4,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from . import manual_research
+from . import manual_research, store
+from .genres import genre_title
 
 
 class ManualResearchWindow(tk.Toplevel):
@@ -14,6 +15,7 @@ class ManualResearchWindow(tk.Toplevel):
         self.batch_id = None
         self.selected_video_id = None
         self._last_alarm_slot = None
+        self._last_alarm_video_id = None
         self.title("수동 링크 연구 · 최대 50개")
         self.geometry("1100x760"); self.minsize(720, 560); self.transient(root)
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -32,11 +34,16 @@ class ManualResearchWindow(tk.Toplevel):
         canvas.pack(side="left", fill="both", expand=True); scroll.pack(side="right", fill="y")
         self.body.columnconfigure(0, weight=1)
         ttk.Label(self.body, text="수동 링크 연구", font=("Malgun Gothic", 18, "bold")).grid(row=0,column=0,sticky="w")
-        ttk.Label(self.body, text=f"현재 채널: {self.profile['name']} · 시장 {self.profile['market']} · 핵심 장르 {self.profile['genre']}").grid(row=1,column=0,sticky="w",pady=(2,8))
+        config=store.profile_genre_config(self.profile)
+        core_title=genre_title(self.profile["genre"],config["custom_genres"])
+        related_ids=store.normalize_related_genres(
+            self.profile["genre"],self.profile.get("related_genres_json","[]"),config["custom_genres"])
+        related_titles=", ".join(genre_title(key,config["custom_genres"]) for key in related_ids) or "없음"
+        self.profile_summary=tk.StringVar(value=f"현재 채널: {self.profile['name']} · 시장 {self.profile['market']} · 핵심 장르: {core_title} · 관련 참고 장르(별도 판정): {related_titles}")
+        ttk.Label(self.body,textvariable=self.profile_summary,wraplength=1000).grid(row=1,column=0,sticky="w",pady=(2,8))
         self.guide = tk.StringVar(value="1. 링크를 붙여넣고 미리보기 하세요. 영상은 자동으로 열리지 않습니다.")
         ttk.Label(self.body,textvariable=self.guide,wraplength=1000).grid(row=2,column=0,sticky="ew",pady=4)
-        mode=ttk.LabelFrame(self.body,text="연구 모드",padding=8);mode.grid(row=3,column=0,sticky="ew",pady=5)
-        ttk.Label(mode,text="A. 수동 링크 연구 (기본 추천)   B. 자동 후보 탐색 (기존 기능)   C. VPH 연구 (기존 기능)").pack(anchor="w")
+        ttk.Label(self.body,text="이 화면에서는 선택한 채널의 수동 링크 연구를 진행합니다. 영상은 직접 선택할 때만 열립니다.",wraplength=1000).grid(row=3,column=0,sticky="ew",pady=4)
         entry=ttk.LabelFrame(self.body,text="YouTube 링크 · 한 줄에 하나 (1~50개)",padding=8);entry.grid(row=4,column=0,sticky="ew",pady=5)
         entry.columnconfigure(0,weight=1)
         self.links=tk.Text(entry,height=7,wrap="none");self.links.grid(row=0,column=0,columnspan=6,sticky="ew")
@@ -149,15 +156,24 @@ class ManualResearchWindow(tk.Toplevel):
         if not self.winfo_exists():return
         batch=manual_research.get_batch(self.batch_id,self.profile["id"],self.path) if self.batch_id else None
         if batch and batch["state"]=="running" and batch["running_since_utc"]:
-            import datetime
-            started=datetime.datetime.fromisoformat(batch["running_since_utc"])
-            elapsed=max(0,int((datetime.datetime.now(datetime.timezone.utc)-started).total_seconds()))
-            interval=max(1,int(batch["analysis_minutes"]))*60;remaining=max(0,interval-(elapsed%interval))
-            self.timer_text.set(f"활성 분석 {elapsed//60:02d}:{elapsed%60:02d} · 다음 분석 알림 {remaining//60:02d}:{remaining%60:02d}")
-            slot=elapsed//interval
-            if elapsed and elapsed%interval==0 and slot!=self._last_alarm_slot:
+            current_id=batch.get("current_video_id","")
+            item=manual_research.get_item(self.batch_id,self.profile["id"],current_id,self.path) if current_id else None
+            totals=manual_research.timer_totals(batch,item)
+            session=totals["session_active_seconds"];video=totals["video_active_seconds"]
+            interval=max(1,int(batch["analysis_minutes"]))*60
+            remaining=interval-(video%interval)
+            slot=video//interval
+            if current_id!=self._last_alarm_video_id:
+                self._last_alarm_video_id=current_id;self._last_alarm_slot=slot
+            elif slot>int(self._last_alarm_slot or 0):
                 self._last_alarm_slot=slot;self.bell();self.guide.set("분석 알림 시간입니다. 메모를 저장하거나 직접 휴식을 선택하세요.")
-        elif batch and batch["break_started_utc"]:self.timer_text.set("휴식 중 · 이어하기 전까지 활성 분석 시간은 늘지 않습니다.")
+            self.timer_text.set(f"전체 누적 활성 {session//3600:02d}:{(session%3600)//60:02d}:{session%60:02d} · 현재 영상 {video//3600:02d}:{(video%3600)//60:02d}:{video%60:02d} · 다음 알림 {remaining//60:02d}:{remaining%60:02d}")
+        elif batch:
+            totals=manual_research.timer_totals(batch)
+            session=totals["session_active_seconds"];break_elapsed=totals["break_seconds"]
+            if batch.get("break_started_utc"):
+                self.timer_text.set(f"휴식 중 {break_elapsed//60:02d}:{break_elapsed%60:02d} · 활성 분석 누적 {session//60}분")
+            else:self.timer_text.set(f"타이머 일시정지 · 활성 분석 누적 {session//3600:02d}:{(session%3600)//60:02d}:{session%60:02d}")
         else:self.timer_text.set("분석 타이머 일시정지")
         self.after(1000,self._tick_timer)
 

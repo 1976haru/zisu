@@ -8,7 +8,10 @@ def _apply_offline_smoke_arguments(arguments):
     """Translate explicit CI smoke arguments before any application imports."""
     # The QA entrypoint validates its fresh data folder before redirecting any
     # process-wide product paths. Do not pre-seed ZISU_DATA_DIR from its CLI.
-    if "--qa-offline-soak" in arguments or "--qa-short" in arguments:
+    if any(flag in arguments for flag in (
+        "--qa-offline-soak", "--qa-short", "--qa-manual-research-e2e",
+        "--qa-manual-research-e2e-resume",
+    )):
         return
     mapping = {
         "--offline-smoke-report": "ZISU_EXE_SMOKE_REPORT",
@@ -113,9 +116,30 @@ def _run_offline_qa(arguments):
     )
 
 
+def _run_manual_research_e2e(arguments):
+    """Run an explicit fixture-only workflow in the frozen Windows EXE."""
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        raise SystemExit("Manual research E2E is available only in a frozen Windows executable.")
+    from mcrs.frozen_manual_research_qa import run_cli
+    return run_cli(arguments)
+
+
 if __name__ == '__main__':
     if _is_offline_qa_requested(sys.argv[1:]):
         raise SystemExit(_run_offline_qa(sys.argv[1:]))
+    if "--qa-manual-research-e2e" in sys.argv[1:] or "--qa-manual-research-e2e-resume" in sys.argv[1:]:
+        _write_smoke_report(
+            "manual_e2e_dispatch",
+            resume="--qa-manual-research-e2e-resume" in sys.argv[1:],
+            frozen=bool(getattr(sys, "frozen", False)),
+        )
+        try:
+            _manual_e2e_exit_code = _run_manual_research_e2e(sys.argv[1:])
+        except Exception as exc:
+            _write_smoke_report("manual_e2e_dispatch_failed", **_safe_exception_details(exc))
+            raise
+        _write_smoke_report("manual_e2e_dispatch_complete", exit_code=_manual_e2e_exit_code)
+        raise SystemExit(_manual_e2e_exit_code)
     smoke = bool(os.environ.get("ZISU_EXE_SMOKE_REPORT", "").strip())
     if smoke:
         _write_smoke_report("python_entrypoint")

@@ -124,6 +124,32 @@ class ManualResearchTests(unittest.TestCase):
         manual_research.start_or_resume(batch,self.jp,"v0000000001",self.db,now=(t0+timedelta(hours=10)).isoformat())
         self.assertEqual(300,manual_research.get_batch(batch,self.jp,self.db)["break_seconds"])
 
+    def test_timer_totals_continue_from_saved_session_and_video_time(self):
+        t0=datetime(2026,1,1,tzinfo=timezone.utc)
+        batch={"state":"running","active_seconds":600,"running_since_utc":(t0+timedelta(minutes=20)).isoformat(),
+               "current_video_id":"v0000000001","break_seconds":300,"break_started_utc":""}
+        item={"video_id":"v0000000001","active_seconds":420,
+              "timer_started_utc":(t0+timedelta(minutes=20)).isoformat()}
+        totals=manual_research.timer_totals(batch,item,now=(t0+timedelta(minutes=25)).isoformat())
+        self.assertEqual({"session_active_seconds":900,"video_active_seconds":720,"break_seconds":300},totals)
+
+    def test_timer_totals_exclude_noncurrent_video_and_keep_break_separate(self):
+        t0=datetime(2026,1,1,tzinfo=timezone.utc)
+        batch={"state":"running","active_seconds":120,"running_since_utc":(t0+timedelta(minutes=8)).isoformat(),
+               "current_video_id":"v0000000001","break_seconds":300,"break_started_utc":(t0+timedelta(minutes=10)).isoformat()}
+        item={"video_id":"v0000000002","active_seconds":240,
+              "timer_started_utc":(t0+timedelta(minutes=3)).isoformat()}
+        totals=manual_research.timer_totals(batch,item,now=(t0+timedelta(minutes=12)).isoformat())
+        self.assertEqual({"session_active_seconds":360,"video_active_seconds":240,"break_seconds":420},totals)
+
+    def test_timer_totals_preserve_paused_values_without_counting_wall_time(self):
+        t0=datetime(2026,1,1,tzinfo=timezone.utc)
+        batch={"state":"interrupted","active_seconds":780,"running_since_utc":"",
+               "current_video_id":"v0000000001","break_seconds":300,"break_started_utc":""}
+        item={"video_id":"v0000000001","active_seconds":780,"timer_started_utc":""}
+        totals=manual_research.timer_totals(batch,item,now=(t0+timedelta(days=2)).isoformat())
+        self.assertEqual({"session_active_seconds":780,"video_active_seconds":780,"break_seconds":300},totals)
+
     def test_existing_schedule_busy_protection_stays_independent(self):
         manual_research.create_batch(self.jp,url(1),path=self.db)
         with store.connect(self.db) as db:

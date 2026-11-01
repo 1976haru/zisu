@@ -150,7 +150,18 @@ class ProfileDialog(tk.Toplevel):
         self.name=tk.StringVar(value=initial.get("name",""))
         self.market=tk.StringVar(value=initial.get("market","JP"))
         self.genre=tk.StringVar(value=initial.get("genre","MORNING_CHILL_RAP"))
-        body=ttk.Frame(self,padding=18); body.pack(fill="both",expand=True)
+        buttons=ttk.Frame(self,padding=(18,8,18,12)); buttons.pack(side="bottom",fill="x")
+        viewport=ttk.Frame(self); viewport.pack(side="top",fill="both",expand=True)
+        self.profile_canvas=tk.Canvas(viewport,highlightthickness=0)
+        self.profile_scrollbar=ttk.Scrollbar(viewport,orient="vertical",command=self.profile_canvas.yview)
+        self.profile_canvas.configure(yscrollcommand=self.profile_scrollbar.set)
+        self.profile_scrollbar.pack(side="right",fill="y")
+        self.profile_canvas.pack(side="left",fill="both",expand=True)
+        body=ttk.Frame(self.profile_canvas,padding=18)
+        self._profile_body_window=self.profile_canvas.create_window((0,0),window=body,anchor="nw")
+        body.bind("<Configure>",lambda _e:self.profile_canvas.configure(scrollregion=self.profile_canvas.bbox("all")))
+        self.profile_canvas.bind("<Configure>",lambda event:self.profile_canvas.itemconfigure(self._profile_body_window,width=event.width))
+        self.profile_canvas.bind("<MouseWheel>",lambda event:self.profile_canvas.yview_scroll(int(-event.delta/120),"units"))
         ttk.Label(body,text="1단계 · 알아보기 쉬운 작업 프로필 이름").pack(anchor="w",pady=(0,5))
         ttk.Entry(body,textvariable=self.name,width=56).pack(anchor="w",fill="x")
         ttk.Label(body,text="2단계 · 조사 국가 / 검색 시장").pack(anchor="w",pady=(12,3))
@@ -179,7 +190,8 @@ class ProfileDialog(tk.Toplevel):
         ttk.Label(body,text="검색어에 사용할 언어 코드 (예: JP, EN, FR)").pack(anchor="w",pady=(8,2))
         self.search_languages_var=tk.StringVar(value=", ".join(self.search_languages or [self.market.get()]))
         ttk.Entry(body,textvariable=self.search_languages_var).pack(fill="x")
-        ttk.Button(body,text="저장하고 Google 연결로 이동",command=self._save).pack(anchor="e",pady=14)
+        self.save_button=ttk.Button(buttons,text="채널 저장",command=self._save,style="Accent.TButton")
+        self.save_button.pack(anchor="e")
         self._refresh_genre_controls(initial)
         self.bind("<Escape>",lambda _e:self.destroy())
         self.wait_window()
@@ -378,7 +390,11 @@ class Studio(tk.Tk):
         self._install_thread_exception_handler()
         self.bind_all("<Control-s>", lambda _e: self._save_ui_state())
         self._restore_ui_state()
-        if first_run and not smoke_report:
+        manual_e2e_mode = (getattr(sys, "frozen", False) and
+                           any(flag in sys.argv for flag in ("--qa-manual-research-e2e",
+                                                             "--qa-manual-research-e2e-resume")) and
+                           os.environ.get("ZISU_FROZEN_MANUAL_E2E") == "1")
+        if first_run and not smoke_report and not manual_e2e_mode:
             self.after(150, self.start_onboarding)
         self._check_research_browser_schedule()
         now=time.monotonic()
@@ -625,11 +641,13 @@ class Studio(tk.Tk):
     def _open_manual_research(self):
         profile=self.current_profile()
         if not profile:
-            messagebox.showinfo("채널 프로필 선택","먼저 채널 프로필을 만들거나 선택해 주세요.",parent=self);return
+            self.main_tabs.select(self.home_page)
+            messagebox.showinfo("채널 추가 안내","먼저 화면 위쪽의 [ + 채널 추가 ]에서 채널과 장르를 저장합니다. 저장하면 수동 링크 연구 화면이 열립니다.",parent=self)
+            self.add_profile()
+            return
         def open_selected(url):
             return open_manual_research_url(url)
         ManualResearchWindow(self,profile,opener=open_selected)
-
     def _build_operator_pages(self):
         settings=self.primary_pages["settings"]
         settings.columnconfigure(0,weight=1)
@@ -1734,24 +1752,23 @@ class Studio(tk.Tk):
                 name,market,genre,related,genre_config=dialog.result
                 ident=store.create_profile(name,market,genre,related_genres=related,genre_config=genre_config)
                 self.reload_profiles(ident)
-                self._select_detail_tab(0)
+                self.main_tabs.select(self.home_page)
+                self.footer.set("채널을 저장했습니다. 수동 링크 연구를 시작합니다. Google 연결은 계정 메뉴에서 별도로 선택할 수 있습니다.")
+                self._open_manual_research()
+                return ident
             except Exception as exc: messagebox.showerror("채널 추가 실패",str(exc))
-
     def start_onboarding(self):
-        """First-screen, beginner-safe path into profile and OAuth setup."""
+        """First-run path into a saved channel and manual link research."""
         messagebox.showinfo(
-            "ZISU V4 시작 마법사",
-            "다섯 단계로 시작합니다.\n\n"
-            "1. 조사 국가 선택\n2. 작업 채널 또는 조사 계정 추가\n"
-            "3. Google 읽기 전용 연결\n4. 핵심 장르 선택\n5. KR/JP 검색 시작\n\n"
-            "비밀번호는 입력받지 않으며 YouTube 채널이 없는 조사 계정도 연결할 수 있습니다.",
+            "ZISU V4 시작 안내",
+            "채널과 핵심 장르를 저장하면 수동 링크 연구를 시작할 수 있습니다.\n\n"
+            "Google 계정 연결은 자동 연구나 계정 기능을 사용할 때 계정 메뉴에서 직접 선택합니다.\n"
+            "채널 저장만으로 Google 연결이나 외부 요청은 하지 않습니다.",
             parent=self,
         )
         self.add_profile()
         if self.active_id:
-            self._select_detail_tab(0)
-            self.footer.set("다음: OAuth JSON을 선택하고 Google 읽기 전용 연결을 완료하세요.")
-
+            self.main_tabs.select(self.home_page)
     def edit_profile(self):
         old=self.current_profile()
         dialog=ProfileDialog(self,old)

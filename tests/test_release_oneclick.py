@@ -17,9 +17,11 @@ class OneClickReleaseSafetyTests(unittest.TestCase):
     def test_release_orchestrator_has_data_and_package_integrity_gates(self):
         script = (ROOT / "scripts" / "zisu_release_oneclick.ps1").read_text(encoding="utf-8")
         for marker in (
-            "SQLite Backup API",
-            "integrity_check",
-            "logical_digest",
+            "zisu_release_backup_cli.py",
+            "restore_verified",
+            "logical_sha256",
+            "DPAPI",
+            "encrypted_database_backup_restore",
             "SHA256SUMS.txt",
             "RELEASE_SHA256SUMS.txt",
             "_internal",
@@ -49,6 +51,16 @@ class OneClickReleaseSafetyTests(unittest.TestCase):
         self.assertIn("if ($LASTEXITCODE -ne 0) { return $null }", script)
         self.assertIn("$contentPaths=@($untracked+$changed", script)
         self.assertIn("permission warning", script)
+
+    def test_fixture_only_backup_cannot_cross_install_boundary(self):
+        script = (ROOT / "scripts" / "zisu_release_oneclick.ps1").read_text(encoding="utf-8")
+        fixture_gate = script.index("if($FixtureOnly){")
+        install_gate = script.index("if($Install -and -not $ExecuteRelease)")
+        self.assertLess(fixture_gate, install_gate)
+        self.assertIn("if($Install -or $ExecuteRelease)", script)
+        self.assertIn("if(!$SyntheticFixture){Test-NoZisuProcess}", script)
+        self.assertIn("if($dbBefore.result -ne 'PASS' -or !$dbBefore.restore_verified)", script)
+        self.assertLess(script.index("Encrypted DB backup did not verify"), script.index("$old=Join-Path"))
 
 
 if __name__ == "__main__":
