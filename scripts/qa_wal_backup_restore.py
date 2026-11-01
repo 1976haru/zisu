@@ -84,6 +84,32 @@ def efs_volume_support(path: os.PathLike) -> dict:
             "drive_type": drive_type, "supports_encryption_flag": bool(flags.value & FILE_SUPPORTS_ENCRYPTION)}
 
 
+def require_local_ntfs_plain_path(path: os.PathLike) -> Path:
+    """Return a stable source path only when every component is local NTFS.
+
+    The memory backup holds a share-deny-write/delete handle as the actual
+    stability boundary.  Rejecting reparse components prevents the pathname
+    used by SQLite from being redirected around that boundary.
+    """
+    if os.name != "nt":
+        raise BackupBlocked("zero-source-write snapshots require Windows NTFS")
+    supplied = Path(path).absolute()
+    resolved = supplied.resolve(strict=True)
+    if os.path.normcase(str(supplied)) != os.path.normcase(str(resolved)):
+        raise BackupBlocked("SQLite source path resolves through a link or reparse point")
+    current = resolved
+    while True:
+        if _windows_file_attributes(current) & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise BackupBlocked("SQLite source path contains a reparse point")
+        if current.parent == current:
+            break
+        current = current.parent
+    support = efs_volume_support(resolved)
+    if support.get("drive_type") != 3 or str(support.get("filesystem", "")).upper() != "NTFS":
+        raise BackupBlocked("SQLite source must be on a local NTFS volume")
+    return resolved
+
+
 def protect_snapshot_directory(path: os.PathLike) -> dict:
     """Enable EFS on an empty staging directory before plaintext is written.
 
@@ -251,11 +277,13 @@ def create_locked_memory_snapshot(database_path: os.PathLike,
     Windows sharing handles are held across the read-only SQLite Backup API
     call. The database handle is acquired first and denies future writes and
     replacement; existing and newly opened WAL/SHM/journal files are similarly
-    pinned. WAL databases without an existing nonempty WAL and SHM are refused
-    so SQLite cannot create or reconstruct source sidecars during this path.
+    pinned. A WAL-header database with neither WAL nor SHM uses immutable=1 so
+    SQLite cannot create source sidecars. Exactly one sidecar remains ambiguous
+    and is refused. Immutable mode proves the bytes that remain in the main DB,
+    but cannot recover or prove transactions from a previously lost WAL.
     A bounded size estimate fails closed before Backup API allocation.
     """
-    source_path = Path(database_path).resolve(strict=True)
+    source_path = require_local_ntfs_plain_path(database_path)
     if not source_path.is_file():
         raise BackupBlocked("explicit SQLite source is not a regular file")
     candidates = [Path(str(source_path) + suffix) for suffix in ("", "-wal", "-shm", "-journal")]
@@ -273,6 +301,8 @@ def create_locked_memory_snapshot(database_path: os.PathLike,
                 held.append((item, kernel, handle))
         before = {item.name: _copy_windows_handle(kernel, handle)[:2]
                   for item, kernel, handle in held}
+        metadata_before = {item.name: (item.stat().st_size, item.stat().st_mtime_ns)
+                           for item, _kernel, _handle in held}
         db_size, _db_hash, header = _copy_windows_handle(
             *next((kernel, handle) for item, kernel, handle in held if item == source_path))
         if db_size < 100 or header[:16] != SQLITE_MAGIC:
@@ -281,11 +311,19 @@ def create_locked_memory_snapshot(database_path: os.PathLike,
         wal = Path(str(source_path) + "-wal")
         shm = Path(str(source_path) + "-shm")
         journal = Path(str(source_path) + "-journal")
+        immutable_without_sidecars = False
         if pair == WAL_HEADER:
-            if wal.name not in before or before[wal.name][0] <= 32:
-                raise BackupBlocked("WAL source has no committed WAL frames")
-            if shm.name not in before:
-                raise BackupBlocked("WAL source has no stable SHM file; refusing source-side creation")
+            wal_present = wal.name in before
+            shm_present = shm.name in before
+            if wal_present != shm_present:
+                raise BackupBlocked("WAL source has an incomplete WAL/SHM sidecar pair")
+            if wal_present:
+                if before[wal.name][0] <= 32:
+                    raise BackupBlocked("WAL source has no committed WAL frames")
+            else:
+                if present_before[journal.name]:
+                    raise BackupBlocked("sidecar-free WAL source has an unexpected rollback journal")
+                immutable_without_sidecars = True
         elif pair == ROLLBACK_HEADER and any(present_before[p.name] for p in (wal, shm, journal)):
             raise BackupBlocked("rollback database has unexpected SQLite sidecars")
         elif pair not in (ROLLBACK_HEADER, WAL_HEADER):
@@ -295,6 +333,8 @@ def create_locked_memory_snapshot(database_path: os.PathLike,
             raise BackupBlocked("source database and sidecars exceed the memory backup limit")
 
         uri = "file:" + quote(source_path.as_posix(), safe="/:") + "?mode=ro"
+        if immutable_without_sidecars:
+            uri += "&immutable=1"
         source = sqlite3.connect(uri, uri=True, timeout=5)
         source.execute("PRAGMA query_only=ON")
         page_count = int(source.execute("PRAGMA page_count").fetchone()[0])
@@ -310,8 +350,12 @@ def create_locked_memory_snapshot(database_path: os.PathLike,
         after = {}
         for item, kernel, handle in held:
             after[item.name] = _copy_windows_handle(kernel, handle)[:2]
+        metadata_after = {item.name: (item.stat().st_size, item.stat().st_mtime_ns)
+                          for item, _kernel, _handle in held}
         present_after = {item.name: item.exists() for item in candidates}
-        if before != after or present_before != present_after:
+        if (before != after or metadata_before != metadata_after
+                or present_before != present_after
+                or source_path != require_local_ntfs_plain_path(database_path)):
             raise BackupBlocked("SQLite source file set changed during memory snapshot")
         return image, source_info, snapshot_info, {
             "source_files": {name: digest for name, (_length, digest) in before.items()},
@@ -319,6 +363,10 @@ def create_locked_memory_snapshot(database_path: os.PathLike,
             "serialized_bytes": len(image),
             "estimated_peak_bytes": len(image) * MEMORY_BACKUP_PEAK_FACTOR,
             "header": pair.hex(),
+            "snapshot_mode": ("immutable_main_db_without_sidecars"
+                              if immutable_without_sidecars else "locked_sqlite_file_set"),
+            "history_completeness": ("not_proven_previous_wal_may_have_been_lost"
+                                     if immutable_without_sidecars else "present_file_set_verified"),
             "shm_copied": False,
             "source_files_unchanged": True,
         }

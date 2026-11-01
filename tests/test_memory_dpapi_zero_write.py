@@ -64,6 +64,52 @@ c.commit(); print(json.dumps({'committed':50,'wal_bytes':Path(str(p)+'-wal').sta
                 result[path.name] = None
         return result
 
+    def _make_closed_wal_without_sidecars(self, name="closed_wal.sqlite"):
+        path = self.root / name
+        connection = sqlite3.connect(path)
+        self.assertEqual("wal", connection.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+        connection.executescript("""
+        CREATE TABLE profiles(id TEXT PRIMARY KEY, market TEXT NOT NULL);
+        CREATE TABLE genres(id TEXT PRIMARY KEY);
+        CREATE TABLE candidates(profile_id TEXT NOT NULL REFERENCES profiles(id),
+          video_id TEXT NOT NULL, human_fit TEXT, note TEXT,
+          PRIMARY KEY(profile_id,video_id));
+        """)
+        connection.executemany("INSERT INTO profiles VALUES(?,?)",
+                               [("fixture-jp", "JP"), ("fixture-kr", "KR")])
+        connection.executemany("INSERT INTO genres VALUES(?)", [(f"g{i}",) for i in range(6)])
+        connection.execute("INSERT INTO candidates VALUES(?,?,?,?)",
+                           ("fixture-jp", "manual-1", "EXCLUDE", "research note"))
+        connection.commit()
+        connection.close()
+        self.assertFalse(Path(str(path) + "-wal").exists())
+        self.assertFalse(Path(str(path) + "-shm").exists())
+        return path
+
+    def test_closed_wal_without_sidecars_uses_immutable_and_roundtrips(self):
+        path = self._make_closed_wal_without_sidecars()
+        before = self._files_for(path)
+        result = backup.create_locked_memory_encrypted_backup(
+            path, self.vault, "immutable_closed_wal_01")
+        facts = result["source_snapshot"]
+        restored = backup.restore_encrypted_backup(result["path"])["database_info"]
+        self.assertEqual("0202", facts["header"])
+        self.assertEqual("immutable_main_db_without_sidecars", facts["snapshot_mode"])
+        self.assertEqual("not_proven_previous_wal_may_have_been_lost",
+                         facts["history_completeness"])
+        self.assertEqual(6, restored["table_counts"]["genres"])
+        self.assertEqual(2, restored["table_counts"]["profiles"])
+        self.assertEqual(1, restored["table_counts"]["candidates"])
+        self.assertEqual("ok", restored["integrity"])
+        self.assertEqual("ok", restored["foreign_keys"])
+        self.assertEqual(before, self._files_for(path))
+
+    def _files_for(self, path):
+        paths = [path, Path(str(path) + "-wal"), Path(str(path) + "-shm")]
+        return {item.name: ((item.stat().st_size, item.stat().st_mtime_ns,
+                             hashlib.sha256(item.read_bytes()).hexdigest())
+                            if item.exists() else None) for item in paths}
+
     def test_wal_snapshot_dpapi_roundtrip_preserves_source_without_plaintext_stage(self):
         before = self._files()
         image, source_info, snapshot_info, facts = backup.create_locked_memory_snapshot(self.db)
@@ -120,6 +166,46 @@ except sqlite3.Error: sys.exit(9)'''
         with self.assertRaises(backup.BackupBlocked):
             backup.create_locked_memory_snapshot(self.db)
         self.assertFalse(shm.exists())
+
+    def test_shm_without_existing_wal_is_refused(self):
+        wal = Path(str(self.db) + "-wal")
+        shm = Path(str(self.db) + "-shm")
+        self.assertTrue(wal.exists() and shm.exists())
+        wal.unlink()
+        before = self._files()
+        with self.assertRaisesRegex(backup.BackupBlocked, "incomplete WAL/SHM"):
+            backup.create_locked_memory_snapshot(self.db)
+        self.assertEqual(before, self._files())
+
+    def test_immutable_path_blocks_writer_and_replacement_while_handle_is_held(self):
+        path = self._make_closed_wal_without_sidecars("locked_closed_wal.sqlite")
+        kernel, handle = backup._open_share_deny_write_read(path)
+        try:
+            script = r'''import os,sqlite3,sys
+p=sys.argv[1]
+try:
+ c=sqlite3.connect(p,timeout=.2); c.execute("INSERT INTO profiles VALUES('writer','JP')"); c.commit(); c.close(); sys.exit(1)
+except Exception: pass
+try:
+ os.replace(p,p+'.replaced'); sys.exit(2)
+except Exception: sys.exit(0)'''
+            child = subprocess.run([sys.executable, "-c", script, str(path)],
+                                   capture_output=True, text=True, timeout=10)
+            self.assertEqual(0, child.returncode, child.stdout + child.stderr)
+        finally:
+            kernel.CloseHandle(handle)
+        self.assertTrue(path.exists())
+        self.assertFalse(Path(str(path) + ".replaced").exists())
+
+    def test_corrupt_sidecar_free_wal_header_is_blocked(self):
+        path = self._make_closed_wal_without_sidecars("corrupt_closed_wal.sqlite")
+        data = bytearray(path.read_bytes())
+        data[-64:] = b"\xff" * 64
+        path.write_bytes(data)
+        before = self._files_for(path)
+        with self.assertRaises((sqlite3.DatabaseError, ValueError, backup.BackupBlocked)):
+            backup.create_locked_memory_snapshot(path)
+        self.assertEqual(before, self._files_for(path))
 
     def test_size_limit_fails_before_publish_and_leaves_sources_unchanged(self):
         before = self._files()
