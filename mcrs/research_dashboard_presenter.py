@@ -18,6 +18,39 @@ STAGE_KEYS = (
     "sample_1", "sample_2", "vph", "final_result",
 )
 
+STATE_LABELS = {
+    "READY": "연구를 시작할 준비를 확인하세요",
+    "RUNNING": "연구가 진행 중입니다",
+    "BREAK": "지금은 휴식 시간입니다",
+    "WAITING_SAMPLE_2": "두 번째 측정 시각을 기다리고 있습니다",
+    "BLOCKED": "현재 연구를 시작할 수 없습니다",
+    "ERROR": "연구 상태를 확인해야 합니다",
+    "COMPLETE": "연구가 완료되었습니다",
+}
+
+
+def local_time_label(value, *, local_timezone=None):
+    """Format a stored UTC timestamp for people without discarding provenance."""
+    if not value:
+        return "예정 시각 없음"
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Stored dashboard time must include a timezone.")
+    zone = local_timezone or datetime.now().astimezone().tzinfo
+    local = parsed.astimezone(zone)
+    return local.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def beginner_status(model):
+    """Return plain-language status while leaving the state machine untouched."""
+    state = model.get("state", "ERROR")
+    return {
+        "headline": STATE_LABELS.get(state, "연구 상태를 확인하세요"),
+        "next_action": model.get("next_action") or "상세 연구 진행을 확인하세요.",
+        "technical_state": state,
+        "technical_error": model.get("error_code", ""),
+    }
+
 
 def _utc_now(now=None):
     value = now or datetime.now(timezone.utc)
@@ -137,6 +170,8 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
         "ERROR": "오류 단계와 안전한 오류 코드를 확인하세요.",
         "COMPLETE": "최종 결과를 확인하세요.",
     }[state]
+    if state == "BLOCKED" and "ScheduleBusy" in reason:
+        next_action = "기존 연구 일정과 요청 상태를 확인하세요. 자동으로 다시 시작하거나 삭제하지 않습니다."
     if snapshot.get("safe_new_request_allowed"):
         next_action=("이전 일정은 끝났지만 VPH 표본이 없어 완료가 아닙니다. "
                      "이전 기록은 보존됩니다. 새 연구 시작은 새 요청 ID를 만듭니다.")
@@ -162,6 +197,8 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
         "stages": stages,
         "current_phase": (schedule or {}).get("phase", "ready"),
         "next_run_utc": (job or {}).get("next_run_utc", ""),
+        "next_run_local": local_time_label((job or {}).get("next_run_utc", "")),
+        "next_run_timezone": datetime.now().astimezone().tzname() or "local",
         "remaining_seconds": _remaining((job or {}).get("next_run_utc", ""), current),
         "last_success_stage": last_success,
         "error_stage": ("checkpoint" if error_code.endswith("mismatch") or error_code.endswith("invalid") or

@@ -490,21 +490,56 @@ class Studio(tk.Tk):
 
     def _easy_ui(self, tab):
         tab.columnconfigure(0, weight=1); tab.rowconfigure(2, weight=1)
-        operations=ttk.LabelFrame(tab,text="원클릭 연구 운영",padding=(10,7))
+        operations=ttk.LabelFrame(tab,text="처음 시작하기",padding=(10,7))
         operations.grid(row=0,column=0,columnspan=2,sticky="ew",padx=8,pady=(5,3))
         operations.columnconfigure(0,weight=1);operations.columnconfigure(1,weight=1)
         self.operator_config_summary=tk.StringVar(value="채널·장르·일정 설정을 선택하세요.")
         ttk.Label(operations,textvariable=self.operator_config_summary,wraplength=950).grid(
             row=0,column=0,sticky="ew",pady=(0,3))
-        ttk.Button(operations,text="설정 보기·변경",command=lambda:self.main_tabs.select(self.primary_pages["settings"])).grid(
+        ttk.Button(operations,text="채널·장르 설정",command=lambda:self.main_tabs.select(self.primary_pages["settings"])).grid(
             row=0,column=1,sticky="e",padx=4)
+        self.beginner_account_status=tk.StringVar(value="Google 계정 정보: 등록 전 · 자동 연구 사용 가능 여부: 확인 전")
+        ttk.Label(operations,textvariable=self.beginner_account_status,wraplength=1100).grid(
+            row=1,column=0,columnspan=2,sticky="ew",pady=(0,4))
         self.research_dashboard_summary=tk.StringVar(value="READY · 연구 설정과 연결 상태를 확인하세요.")
+        self.research_beginner_status=tk.StringVar(value="연구를 시작할 준비를 확인하세요")
+        self.research_beginner_action=tk.StringVar(value="다음 행동: 작업 채널을 선택하세요.")
+        ttk.Label(operations,textvariable=self.research_beginner_status,font=("Malgun Gothic",13,"bold"),
+                  wraplength=1100).grid(row=2,column=0,columnspan=2,sticky="ew",pady=(2,1))
+        ttk.Label(operations,textvariable=self.research_beginner_action,wraplength=1100).grid(
+            row=3,column=0,columnspan=2,sticky="ew",pady=(0,5))
+        primary=ttk.Frame(operations);primary.grid(row=4,column=0,columnspan=2,sticky="ew",pady=3)
+        for column in range(3):primary.columnconfigure(column,weight=1,uniform="beginner")
+        self.manual_research_button=ttk.Button(primary,text="수동 링크 연구 (최대 50개)",
+            command=self._open_manual_research,style="Accent.TButton")
+        self.manual_research_button.grid(row=0,column=0,sticky="ew",padx=2,pady=2)
+        self.beginner_results_button=ttk.Button(primary,text="후보·결과 보기",
+            command=lambda:self.main_tabs.select(self.primary_pages["results"]))
+        self.beginner_results_button.grid(row=0,column=1,sticky="ew",padx=2,pady=2)
+        self.beginner_settings_button=ttk.Button(primary,text="채널·장르 설정",
+            command=lambda:self.main_tabs.select(self.primary_pages["settings"]))
+        self.beginner_settings_button.grid(row=0,column=2,sticky="ew",padx=2,pady=2)
+        self.beginner_schedule_button=ttk.Button(primary,text="연구 일정 확인",
+            command=lambda:self.main_tabs.select(self.primary_pages["history"]))
+        self.beginner_schedule_button.grid(row=1,column=0,sticky="ew",padx=2,pady=2)
+        self.beginner_performance_button=ttk.Button(primary,text="연구 성과 간단 요약",
+            command=lambda:self.main_tabs.select(self.primary_pages["results"]))
+        self.beginner_performance_button.grid(row=1,column=1,sticky="ew",padx=2,pady=2)
+        self.easy_next=ttk.Button(primary,text="내 조사 채널 만들기",command=self.add_profile)
+        self.easy_next.grid(row=1,column=2,sticky="ew",padx=2,pady=2)
+
+        self.research_detail_button=ttk.Button(operations,text="상세 연구 진행 보기 ▾",
+            command=self._toggle_research_details)
+        self.research_detail_button.grid(row=5,column=0,columnspan=2,sticky="ew",pady=(5,2))
+        details=ttk.Frame(operations,padding=(2,4));self.research_detail_frame=details
+        details.grid(row=6,column=0,columnspan=2,sticky="ew")
+        details.columnconfigure(0,weight=1);details.columnconfigure(1,weight=1)
         self.research_dashboard_checkpoint=tk.StringVar(value="체크포인트: 아직 시작하지 않음")
         self.research_dashboard_results=tk.StringVar(value="결과: 후보 0 · FIT 0 · REVIEW 0 · EXCLUDE 0 · 결과 측정 전")
-        ttk.Label(operations,textvariable=self.research_dashboard_summary,font=("Malgun Gothic",11,"bold"),
-                  wraplength=1150).grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,3))
-        progress=ttk.Frame(operations)
-        progress.grid(row=2,column=0,columnspan=2,sticky="ew",pady=(0,4))
+        ttk.Label(details,textvariable=self.research_dashboard_summary,font=("Malgun Gothic",11,"bold"),
+                  wraplength=1150).grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,3))
+        progress=ttk.Frame(details)
+        progress.grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,4))
         progress.columnconfigure(0,weight=1);progress.columnconfigure(1,weight=1)
         self.research_schedule_progress=tk.StringVar(value="일정 경과율 0%")
         self.research_stage_progress=tk.StringVar(value="단계 진행률 0/9")
@@ -518,7 +553,7 @@ class Studio(tk.Tk):
         stage_titles={"setup":"설정","auth":"인증","search":"자동 검색","genre_evaluation":"장르 평가",
             "target_selection":"관측 대상","sample_1":"첫 표본","sample_2":"두 번째 표본",
             "vph":"VPH 계산","final_result":"최종 결과"}
-        stage_board=ttk.Frame(operations);stage_board.grid(row=3,column=0,columnspan=2,sticky="ew",pady=2)
+        stage_board=ttk.Frame(details);stage_board.grid(row=2,column=0,columnspan=2,sticky="ew",pady=2)
         for column in range(3):stage_board.columnconfigure(column,weight=1,uniform="stage")
         for index,key in enumerate(research_dashboard_presenter.STAGE_KEYS):
             value=tk.StringVar(value=f"○ {index+1}. {stage_titles[key]}\n대기")
@@ -526,13 +561,13 @@ class Studio(tk.Tk):
                           padx=7,pady=3,background="#f4f5f7",foreground="#30343b")
             card.grid(row=index//3,column=index%3,sticky="nsew",padx=2,pady=2)
             self.research_stage_cards[key]=value;self.research_stage_card_labels[key]=card
-        status_row=ttk.Frame(operations);status_row.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(3,1))
+        status_row=ttk.Frame(details);status_row.grid(row=3,column=0,columnspan=2,sticky="ew",pady=(3,1))
         status_row.columnconfigure(0,weight=1);status_row.columnconfigure(1,weight=1)
         ttk.Label(status_row,textvariable=self.research_dashboard_checkpoint,wraplength=570,justify="left").grid(
             row=0,column=0,sticky="nw",padx=(0,8))
         ttk.Label(status_row,textvariable=self.research_dashboard_results,wraplength=570,justify="left").grid(
             row=0,column=1,sticky="nw",padx=(8,0))
-        controls=ttk.Frame(operations);controls.grid(row=5,column=0,columnspan=2,sticky="ew",pady=(4,0))
+        controls=ttk.Frame(details);controls.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(4,0))
         for column in range(5):controls.columnconfigure(column,weight=1,uniform="control")
         self.dashboard_start_button=ttk.Button(controls,text="연구 시작",command=self._dashboard_start_research,style="Accent.TButton")
         self.dashboard_pause_button=ttk.Button(controls,text="일시정지",command=lambda:self._dashboard_control_research("pause"))
@@ -542,14 +577,9 @@ class Studio(tk.Tk):
         for column,button in enumerate((self.dashboard_start_button,self.dashboard_pause_button,
                 self.dashboard_resume_button,self.dashboard_stop_button,self.dashboard_results_button)):
             button.grid(row=0,column=column,sticky="ew",padx=2)
+        details.grid_remove()
+        self._research_details_visible=False
         self.research_dashboard_frame=operations
-        manual_modes=ttk.LabelFrame(tab,text="연구 모드 선택",padding=(10,7))
-        manual_modes.grid(row=1,column=0,columnspan=2,sticky="ew",padx=8,pady=3)
-        manual_modes.columnconfigure(0,weight=1);manual_modes.columnconfigure(1,weight=1);manual_modes.columnconfigure(2,weight=1)
-        self.manual_research_button=ttk.Button(manual_modes,text="A. 수동 링크 연구\n기본 추천 · 최대 50개",command=self._open_manual_research,style="Accent.TButton")
-        self.manual_research_button.grid(row=0,column=0,sticky="ew",padx=2)
-        ttk.Button(manual_modes,text="B. 자동 후보 탐색\n기존 기능",command=lambda:self._select_detail_tab(7)).grid(row=0,column=1,sticky="ew",padx=2)
-        ttk.Button(manual_modes,text="C. VPH 연구\n기존 기능",command=lambda:self._select_detail_tab(8)).grid(row=0,column=2,sticky="ew",padx=2)
         canvas=tk.Canvas(tab,highlightthickness=0,
                          background=ttk.Style(self).lookup("TFrame","background") or BG)
         scrollbar=ttk.Scrollbar(tab,orient="vertical",command=canvas.yview)
@@ -600,8 +630,6 @@ class Studio(tk.Tk):
         ttk.Label(content,textvariable=self.dashboard_browser_text,wraplength=1000).grid(row=10,column=0,columnspan=2,sticky="w",pady=3)
         self.dashboard_vph_text=tk.StringVar(value="VPH 연구: 자동 작업 없음")
         ttk.Label(content,textvariable=self.dashboard_vph_text,wraplength=1000).grid(row=11,column=0,columnspan=2,sticky="w",pady=3)
-        self.easy_next=ttk.Button(content,text="내 조사 채널 만들기",command=self.add_profile,style="Accent.TButton")
-        self.easy_next.grid(row=12,column=0,columnspan=2,sticky="ew",ipady=10,pady=8)
         actions=ttk.Frame(content);actions.grid(row=14,column=0,columnspan=2,sticky="ew",pady=4)
         actions.columnconfigure(0,weight=1)
         for index,(label,command,style_name) in enumerate((
@@ -637,6 +665,16 @@ class Studio(tk.Tk):
         self._easy_enter_button=None
         self.bind_all("<Return>",self._easy_enter,add="+")
         self.bind_all("<Escape>",self._easy_escape,add="+")
+
+    def _toggle_research_details(self):
+        visible=not getattr(self,"_research_details_visible",False)
+        self._research_details_visible=visible
+        if visible:
+            self.research_detail_frame.grid()
+            self.research_detail_button.configure(text="상세 연구 진행 닫기 ▴")
+        else:
+            self.research_detail_frame.grid_remove()
+            self.research_detail_button.configure(text="상세 연구 진행 보기 ▾")
 
     def _open_manual_research(self):
         profile=self.current_profile()
@@ -915,7 +953,8 @@ class Studio(tk.Tk):
     def _dashboard_auth_ready(self,profile_id):
         profile=store.get_profile(profile_id)
         key_available=bool(getattr(self,"api_key",None) and self.api_key.get().strip())
-        return bool(profile and (profile.get("google_account_id") or profile.get("connected_email") or key_available))
+        credential_present=bool(profile and oauth.is_connected(profile_id))
+        return bool(profile and (credential_present or key_available))
 
     def _dashboard_control_research(self,action):
         """Route a dashboard control only to the selected profile's persisted job."""
@@ -1012,6 +1051,8 @@ class Studio(tk.Tk):
             self._refresh_analytics_panel(None)
             self._refresh_research_dashboard(None)
             self.dashboard_selected_text.set("현재 선택: 조사 채널을 추가하거나 위 목록에서 선택하세요")
+            self.beginner_account_status.set(
+                "Google 계정 정보: 등록 전 · 자동 연구 사용 가능 여부: 채널 선택 후 확인")
             self.dashboard_today_text.set("오늘 저장·갱신한 후보: 0");self.dashboard_ai_text.set("AI 분석: 아직 없음")
             self.dashboard_review_text.set("사람 확인 필요: 0 · 사람 검증: 0")
             self.dashboard_schedule_text.set("연구 일정: 아직 설정되지 않았습니다")
@@ -1020,8 +1061,15 @@ class Studio(tk.Tk):
             self.dashboard_resource_text.set("컴퓨터 상태: 조사 채널을 선택하세요")
             self.dashboard_browser_text.set("연구용 창: 전용 모드 또는 직접 여는 수동 모드를 선택할 수 있어요")
             return
-        connected="연결됨" if oauth.is_connected(profile["id"]) else "연결 전"
-        self.dashboard_selected_text.set(f"현재 선택: {profile['name']} · {profile['market']} · {_genre_title_for_profile(profile)} · {profile['account_email'] or 'Google 미연결'} · {profile['youtube_channel_title'] or 'YouTube 채널 정보 없음'} ({connected})")
+        registered=bool(profile.get("account_email") or profile.get("google_account_id"))
+        token_present=oauth.is_connected(profile["id"])
+        connection_label="연결 정보 있음" if registered else "Google 정보 없음"
+        self.dashboard_selected_text.set(
+            f"현재 작업: {profile['name']} · {profile['market']} · {_genre_title_for_profile(profile)}")
+        self.beginner_account_status.set(
+            f"Google 계정 정보: {connection_label} · "
+            f"저장된 인증 자료: {'있음' if token_present else '없음'} · "
+            "자동 연구 사용 가능 여부: 실제 요청 직전에 별도 확인")
         schedule=profile.get("schedule_state")
         if schedule and schedule.get("state") in {"running","scheduled"}:
             try: profile["schedule_state"]=research_scheduler.get(schedule["id"],profile["id"])
@@ -1045,6 +1093,8 @@ class Studio(tk.Tk):
             return
         if not profile_id:
             self.research_dashboard_summary.set("READY · 연구 프로필을 선택하세요.")
+            self.research_beginner_status.set("먼저 작업 채널을 선택하세요")
+            self.research_beginner_action.set("다음 행동: 채널·장르 설정에서 프로필을 선택하세요.")
             self.research_schedule_progress.set("일정 경과율 0%")
             self.research_stage_progress.set("단계 진행률 0/9")
             self.research_schedule_bar.configure(value=0)
@@ -1059,6 +1109,9 @@ class Studio(tk.Tk):
                 profile_id,auth_ready=self._dashboard_auth_ready(profile_id))
         except (ValueError,sqlite3.Error,OSError):
             self.research_dashboard_summary.set("ERROR · 운영 상태를 안전하게 읽지 못했습니다.")
+            self.research_beginner_status.set("연구 상태를 확인해야 합니다")
+            self.research_beginner_action.set(
+                "다음 행동: 상세 연구 진행 보기에서 저장된 상태를 읽을 수 있는지 확인하세요.")
             self.research_schedule_progress.set("일정 경과율 확인 불가")
             self.research_stage_progress.set("단계 진행률 확인 불가")
             self.research_schedule_bar.configure(value=0)
@@ -1070,14 +1123,18 @@ class Studio(tk.Tk):
         remaining=model["remaining_seconds"]
         remaining_text="-" if remaining is None else f"{remaining//60}분 {remaining%60}초"
         next_time=model["next_run_utc"] or "-"
+        next_time_local=model.get("next_run_local") or "예정 시각 없음"
         phase_text={"research":"연구 중","break":"휴식 중","waiting":"예약 대기",
                     "paused":"일시정지","ready":"시작 전"}.get(model["current_phase"],model["current_phase"])
         if model["state"]=="WAITING_SAMPLE_2":
             phase_text="두 번째 표본 대기"
+        beginner=research_dashboard_presenter.beginner_status(model)
+        self.research_beginner_status.set(beginner["headline"])
+        self.research_beginner_action.set(f"다음 행동: {beginner['next_action']}")
         self.research_dashboard_summary.set(
             f"{model['state']} · 일정 {model['schedule_progress_percent']}% · "
             f"단계 {model['stage_progress_completed']}/{model['stage_progress_total']} · "
-            f"{phase_text} · 다음 동작 UTC {next_time} · 남은 시간 {remaining_text}")
+            f"{phase_text} · 다음 동작 {next_time_local} · 남은 시간 {remaining_text}")
         self.research_schedule_progress.set(f"일정 경과율 {model['schedule_progress_percent']}%")
         self.research_stage_progress.set(
             f"단계 진행률 {model['stage_progress_completed']}/{model['stage_progress_total']}")
@@ -1088,6 +1145,9 @@ class Studio(tk.Tk):
         self._set_research_stage_cards(model)
         checkpoint=(f"마지막 성공: {model['last_success_stage']} · 요청 {model['request_id'] or '-'} · "
             f"일정 {model['schedule_id'] or '-'} · 자동 재개 {'가능' if model['auto_resume'] else '불가'}")
+        if model.get("next_run_utc"):
+            checkpoint+=(f"\n저장 원본 시각: {model['next_run_utc']} · 원본 기준 UTC · "
+                         f"화면 표시 시간대: {model.get('next_run_timezone','local')}")
         if model["error_code"]:
             checkpoint+=(f"\n오류 단계: {model['error_stage'] or '-'} · 코드: {model['error_code']} · "
                 f"사유: {model['stop_reason'] or '-'} · 다음 조치: {model['next_action']}")
@@ -1156,7 +1216,7 @@ class Studio(tk.Tk):
         genre_title=_genre_title_for_profile(profile)
         linked=oauth.is_connected(profile_id)
         self.dashboard_channels.insert(parent,"end",iid=node,text=profile.get("name",profile_id),
-            values=(profile.get("market",""),genre_title,"연결됨" if linked else "연결 전"))
+            values=(profile.get("market",""),genre_title,"인증 자료 있음" if linked else "연결 전"))
         self._dashboard_tree_profiles[node]=profile_id
 
     def _dashboard_schedule_label(self,profile):

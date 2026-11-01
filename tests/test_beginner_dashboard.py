@@ -1,8 +1,9 @@
 import json
 import os
 import unittest
+from datetime import timedelta, timezone
 
-from mcrs import store
+from mcrs import research_dashboard_presenter, store
 from tests.support import WorkspaceTemp
 
 
@@ -47,6 +48,23 @@ class BeginnerDashboardDataTests(unittest.TestCase):
 
     def test_dashboard_summary_missing_profile_is_empty(self):
         self.assertIsNone(store.dashboard_summary("not-a-profile"))
+
+    def test_beginner_status_translates_technical_state_without_relaxing_controls(self):
+        model={"state":"BLOCKED","next_action":"기존 연구 일정을 확인하세요.",
+               "error_code":"ScheduleBusy","can_start":False}
+        text=research_dashboard_presenter.beginner_status(model)
+        self.assertEqual("현재 연구를 시작할 수 없습니다",text["headline"])
+        self.assertEqual("BLOCKED",text["technical_state"])
+        self.assertEqual("ScheduleBusy",text["technical_error"])
+        self.assertFalse(model["can_start"])
+
+    def test_local_time_label_keeps_explicit_timezone_conversion(self):
+        kst=timezone(timedelta(hours=9),name="KST")
+        label=research_dashboard_presenter.local_time_label(
+            "2026-11-01T00:30:00+00:00",local_timezone=kst)
+        self.assertEqual("2026-11-01 09:30 KST",label)
+        with self.assertRaises(ValueError):
+            research_dashboard_presenter.local_time_label("2026-11-01T00:30:00")
 
 
 if __name__=="__main__":

@@ -199,6 +199,14 @@ with WorkspaceTemp() as temp:
     assert app.dashboard_pause_button.cget("text")=="일시정지"
     assert app.dashboard_resume_button.cget("text")=="재개"
     assert app.dashboard_stop_button.cget("text")=="안전 중단"
+    assert not app.research_detail_frame.winfo_ismapped()
+    assert "상세 연구 진행 보기" in app.research_detail_button.cget("text")
+    assert app.beginner_results_button.cget("text")=="후보·결과 보기"
+    assert app.beginner_schedule_button.cget("text")=="연구 일정 확인"
+    app.main_tabs.select(app.home_page);app.update_idletasks()
+    app._toggle_research_details();app.update_idletasks()
+    assert app.research_detail_frame.winfo_ismapped()
+    app._toggle_research_details();app.update_idletasks()
     synthetic={"state":"ERROR","error_stage":"search","stages":{key:False for key in app.research_stage_cards},
                "can_start":False,"can_pause":False,"can_resume":False,"can_stop":False}
     app._set_research_stage_cards(synthetic)
@@ -211,12 +219,15 @@ with WorkspaceTemp() as temp:
         "READY","RUNNING","BREAK","WAITING_SAMPLE_2","BLOCKED","ERROR","COMPLETE"}
     waiting_model=research_dashboard_presenter.present(app.active_id)
     waiting_model.update(state="WAITING_SAMPLE_2",remaining_seconds=3901,
-                         next_run_utc="2026-10-23T07:00:00+00:00")
+                         next_run_utc="2026-10-23T07:00:00+00:00",
+                         next_run_local="2026-10-23 16:00 KST",next_run_timezone="KST")
     waiting_model["counts"].update(sample_1=1,sample_2=0)
     with patch("mcrs.gui.research_dashboard_presenter.present",return_value=waiting_model):
         app._refresh_research_dashboard(app.active_id)
     assert "두 번째 표본 대기" in app.research_dashboard_summary.get()
+    assert "2026-10-23 16:00 KST" in app.research_dashboard_summary.get()
     assert "2차 예정 UTC 2026-10-23T07:00:00+00:00" in app.research_dashboard_results.get()
+    assert "저장 원본 시각: 2026-10-23T07:00:00+00:00" in app.research_dashboard_checkpoint.get()
     assert "남은 65분 1초" in app.research_dashboard_results.get()
     assert float(app.research_schedule_bar.cget("value"))==waiting_model["schedule_progress_percent"]
     assert float(app.research_stage_bar.cget("value"))==100*waiting_model["stage_progress_completed"]/9
@@ -301,8 +312,10 @@ with WorkspaceTemp() as temp:
     app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
     app.select_profile()
     app.update_idletasks()
-    assert app.dashboard_selected_text.get().startswith("현재 선택: GUI 스모크 조사")
-    assert "shared@example.test" in app.dashboard_selected_text.get().casefold()
+    assert app.dashboard_selected_text.get().startswith("현재 작업: GUI 스모크 조사")
+    assert "JP" in app.dashboard_selected_text.get()
+    assert "Google 계정 정보: 연결 정보 있음" in app.beginner_account_status.get()
+    assert "실제 요청 직전에 별도 확인" in app.beginner_account_status.get()
     app.dashboard_channels.selection_set("profile:"+third)
     app._dashboard_open_profile()
     assert app.active_id==third
@@ -328,7 +341,11 @@ with WorkspaceTemp() as temp:
     assert app.research_dashboard_frame.winfo_rooty()>=easy_widget.winfo_rooty()
     assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= app._easy_canvas.winfo_rooty()+app._easy_canvas.winfo_height()
     assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= easy_widget.winfo_rooty()+measured_viewport
-    assert app.dashboard_start_button.winfo_ismapped()
+    assert not app.dashboard_start_button.winfo_ismapped()
+    for button in (app.manual_research_button,app.beginner_results_button,
+                   app.beginner_settings_button,app.beginner_schedule_button,
+                   app.beginner_performance_button,app.easy_next):
+        assert button.winfo_ismapped()
     initial_scroll=app._easy_canvas.yview()
     wheel_event=SimpleNamespace(widget=app.easy_dashboard,num=None,delta=-120)
     assert app._easy_mousewheel(wheel_event)=="break"
@@ -341,7 +358,9 @@ with WorkspaceTemp() as temp:
     app._select_detail_tab(1);app.update_idletasks()
     assert app._easy_mousewheel(wheel_event) is None
     app.main_tabs.select(app.home_page);app.update_idletasks()
-    for scaling in (1.0,1.25,1.5,2.0):
+    for width,height in ((1366,768),(1920,1080)):
+      app.geometry(f"{width}x{height}");app.update_idletasks()
+      for scaling in (1.25,1.5):
         app.tk.call("tk","scaling",scaling)
         app.update_idletasks()
         canvas=app._easy_canvas
@@ -363,13 +382,19 @@ with WorkspaceTemp() as temp:
         assert app.easy_next.cget("text")
         easy_widget=app.home_page
         assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= easy_widget.winfo_rooty()+easy_widget.winfo_height()
-        for card in app.research_stage_card_labels.values():
-            assert card.winfo_width()>0 and card.winfo_height()+2>=card.winfo_reqheight()
-        for button in (app.dashboard_start_button,app.dashboard_pause_button,
-                       app.dashboard_resume_button,app.dashboard_stop_button,app.dashboard_results_button):
+        for button in (app.manual_research_button,app.beginner_results_button,
+                       app.beginner_settings_button,app.beginner_schedule_button,
+                       app.beginner_performance_button,app.easy_next):
             assert button.winfo_width()>0 and button.winfo_height()+2>=button.winfo_reqheight()
-        app.dashboard_start_button.focus_set();app.update_idletasks()
-        assert app.focus_get() is app.dashboard_start_button
+        app.manual_research_button.focus_set();app.update_idletasks()
+        assert app.focus_get() is app.manual_research_button
+    app._toggle_research_details();app.update_idletasks()
+    for card in app.research_stage_card_labels.values():
+        assert card.winfo_width()>0 and card.winfo_height()+2>=card.winfo_reqheight()
+    for button in (app.dashboard_start_button,app.dashboard_pause_button,
+                   app.dashboard_resume_button,app.dashboard_stop_button,app.dashboard_results_button):
+        assert button.winfo_width()>0 and button.winfo_height()+2>=button.winfo_reqheight()
+    app._toggle_research_details();app.update_idletasks()
     vph_tab=app.frames[8]
     for scaling in (1.0,1.25,1.5,2.0):
         app.tk.call("tk","scaling",scaling);app._select_detail_tab(8);app.update()

@@ -143,6 +143,19 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         self.assertTrue(model["can_resume"])
         self.assertTrue(model["can_stop"])
 
+    def test_schedule_busy_uses_read_only_human_action_without_recovery(self):
+        store.create_vph_auto_start_intent("busy_request",self.settings,self.db)
+        store.claim_vph_auto_start_intent("busy_request",self.profile,self.settings,self.db)
+        store.update_vph_auto_start_intent(
+            "busy_request","blocked",self.db,reason="일정 생성 차단: ScheduleBusy")
+        model=presenter.present(self.profile,self.db,auth_ready=True)
+        self.assertEqual("BLOCKED",model["state"])
+        self.assertIn("기존 연구 일정",model["next_action"])
+        self.assertIn("자동으로 다시 시작하거나 삭제하지 않습니다",model["next_action"])
+        self.assertFalse(model["can_start"])
+        self.assertFalse(model["can_resume"])
+        self.assertFalse(model["can_stop"])
+
     def test_start_handler_rechecks_dashboard_before_creating_intent(self):
         app=Studio.__new__(Studio)
         app.active_id=self.profile
@@ -229,6 +242,18 @@ class ResearchDashboardPresenterTests(unittest.TestCase):
         ready=presenter.present(self.profile,self.db,auth_ready=True)
         self.assertFalse(not_ready["stages"]["auth"])
         self.assertTrue(ready["stages"]["auth"])
+
+    def test_gui_auth_readiness_does_not_treat_account_metadata_as_valid_token(self):
+        app=Studio.__new__(Studio)
+        app.api_key=MagicMock();app.api_key.get.return_value=""
+        metadata={"id":self.profile,"connected_email":"saved@example.test",
+                  "google_account_id":"saved-account"}
+        with patch("mcrs.gui.store.get_profile",return_value=metadata), \
+                patch("mcrs.gui.oauth.is_connected",return_value=False):
+            self.assertFalse(app._dashboard_auth_ready(self.profile))
+        with patch("mcrs.gui.store.get_profile",return_value=metadata), \
+                patch("mcrs.gui.oauth.is_connected",return_value=True):
+            self.assertTrue(app._dashboard_auth_ready(self.profile))
 
     def test_ready_is_not_complete_and_can_start(self):
         model=presenter.present(self.profile,self.db)
