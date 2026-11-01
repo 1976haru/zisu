@@ -90,6 +90,100 @@ def _utc(value: datetime | None = None) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def parse_local_start_time(value: str, *, now: datetime | None = None) -> datetime | None:
+    """Parse the same local HH:MM constraint used by the scheduler start UI."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    local_now = (now or datetime.now().astimezone()).astimezone()
+    try:
+        parsed = datetime.strptime(text, "%H:%M").time()
+    except ValueError:
+        raise ValueError("시작 시각은 HH:MM 형식으로 입력해 주세요.") from None
+    start = datetime.combine(local_now.date(), parsed, tzinfo=local_now.tzinfo)
+    if start < local_now:
+        raise ValueError("시작 시각은 오늘의 현재 시각 이후로 입력해 주세요.")
+    return start
+
+
+def _segment_count_bounds(total_minutes, research_range, break_range):
+    """Count possible research/rest segments without sampling or saving a plan."""
+    total = int(total_minutes)
+    states = {(0, "research"): (0, 0, 0, 0)}
+    completed = None
+    for elapsed in range(total):
+        for phase in ("research", "break"):
+            bounds = states.get((elapsed, phase))
+            if bounds is None:
+                continue
+            low, high = research_range if phase == "research" else break_range
+            for chosen in range(low, high + 1):
+                end = min(total, elapsed + chosen)
+                duration = end - elapsed
+                research_delta = int(phase == "research")
+                break_delta = int(phase == "break")
+                candidate = (
+                    bounds[0] + research_delta,
+                    bounds[1] + research_delta,
+                    bounds[2] + break_delta,
+                    bounds[3] + break_delta,
+                )
+                if end == total:
+                    if completed is None:
+                        completed = candidate
+                    else:
+                        completed = (min(completed[0], candidate[0]),
+                                     max(completed[1], candidate[1]),
+                                     min(completed[2], candidate[2]),
+                                     max(completed[3], candidate[3]))
+                    continue
+                next_phase = "break" if phase == "research" else "research"
+                key = (end, next_phase)
+                current = states.get(key)
+                if current is None:
+                    states[key] = candidate
+                else:
+                    states[key] = (min(current[0], candidate[0]),
+                                   max(current[1], candidate[1]),
+                                   min(current[2], candidate[2]),
+                                   max(current[3], candidate[3]))
+    if completed is None:
+        return 0, 0, 0, 0
+    return completed
+
+
+def preview_config(config: ScheduleConfig, *, now: datetime | None = None) -> dict:
+    """Read-only duration/cycle preview using the scheduler's validation policy."""
+    config.validate()
+    local_now = (now or datetime.now().astimezone()).astimezone()
+    start = config.start_at.astimezone() if config.start_at else local_now
+    if (start - local_now).total_seconds() < -60:
+        raise ValueError("시작 시각은 오늘의 현재 시각 이후로 입력해 주세요.")
+    total_minutes = config.total_hours * 60
+    if config.schedule_mode == "fixed":
+        plan = _build_schedule_plan(config, start)
+        research_count = sum(item["phase"] == "research" for item in plan)
+        break_count = sum(item["phase"] == "break" for item in plan)
+        bounds = (research_count, research_count, break_count, break_count)
+    else:
+        rmin = config.research_min_minutes if config.research_min_minutes is not None else config.research_minutes
+        rmax = config.research_max_minutes if config.research_max_minutes is not None else config.research_minutes
+        bmin = config.break_min_minutes if config.break_min_minutes is not None else config.break_minutes
+        bmax = config.break_max_minutes if config.break_max_minutes is not None else config.break_minutes
+        bounds = _segment_count_bounds(total_minutes, (rmin, rmax), (bmin, bmax))
+    return {
+        "start_at": start,
+        "end_at": start + timedelta(hours=config.total_hours),
+        "total_seconds": config.total_hours * 3600,
+        "schedule_mode": config.schedule_mode,
+        "research_count_min": bounds[0],
+        "research_count_max": bounds[1],
+        "break_count_min": bounds[2],
+        "break_count_max": bounds[3],
+        "approved_search_calls": config.approved_search_calls,
+    }
+
+
 def _stamp(value: datetime) -> str:
     return _utc(value).isoformat(timespec="seconds")
 

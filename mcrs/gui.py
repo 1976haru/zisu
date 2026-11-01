@@ -138,7 +138,7 @@ class CustomGenreDialog(tk.Toplevel):
 class ProfileDialog(tk.Toplevel):
     def __init__(self,root,initial=None):
         super().__init__(root)
-        self.title("작업 채널 또는 조사 계정 추가")
+        self.title(f"{initial['name']} 채널 설정 수정" if initial else "새 채널 추가")
         self.result = None
         self.transient(root); self.grab_set(); self.resizable(True,True); self.geometry("720x720")
         initial=initial or {}
@@ -520,13 +520,16 @@ class Studio(tk.Tk):
             command=lambda:self.main_tabs.select(self.primary_pages["settings"]))
         self.beginner_settings_button.grid(row=0,column=2,sticky="ew",padx=2,pady=2)
         self.beginner_schedule_button=ttk.Button(primary,text="연구 일정 확인",
-            command=lambda:self.main_tabs.select(self.primary_pages["history"]))
+            command=self._open_research_schedule)
         self.beginner_schedule_button.grid(row=1,column=0,sticky="ew",padx=2,pady=2)
         self.beginner_performance_button=ttk.Button(primary,text="연구 성과 간단 요약",
             command=lambda:self.main_tabs.select(self.primary_pages["results"]))
         self.beginner_performance_button.grid(row=1,column=1,sticky="ew",padx=2,pady=2)
         self.easy_next=ttk.Button(primary,text="내 조사 채널 만들기",command=self.add_profile)
         self.easy_next.grid(row=1,column=2,sticky="ew",padx=2,pady=2)
+        self.beginner_history_button=ttk.Button(primary,text="실행 이력·오류 확인",
+            command=self._open_execution_history)
+        self.beginner_history_button.grid(row=2,column=0,columnspan=3,sticky="ew",padx=2,pady=2)
 
         self.research_detail_button=ttk.Button(operations,text="상세 연구 진행 보기 ▾",
             command=self._toggle_research_details)
@@ -745,6 +748,14 @@ class Studio(tk.Tk):
                   wraplength=1000).grid(row=5,column=0,sticky="w",pady=6)
         ttk.Label(settings,text="설정 변경은 현재 프로필에만 적용됩니다. 진행 중인 연구의 프로필·체크포인트는 바꾸지 않습니다.",
                   wraplength=1000).grid(row=6,column=0,sticky="w",pady=8)
+        schedule_overview=ttk.LabelFrame(settings,text="저장 전 일정 예상",padding=8)
+        schedule_overview.grid(row=7,column=0,sticky="ew",pady=6)
+        ttk.Label(schedule_overview,textvariable=self.schedule_preview_text,wraplength=1000,
+                  justify="left").grid(row=0,column=0,columnspan=2,sticky="ew",pady=3)
+        ttk.Button(schedule_overview,text="현재 설정 미리보기",
+                   command=self._autopilot_schedule_preview).grid(row=1,column=0,sticky="w",padx=3,pady=3)
+        ttk.Button(schedule_overview,text="실행 이력·오류 열기",
+                   command=self._open_execution_history).grid(row=1,column=1,sticky="e",padx=3,pady=3)
 
         results=self.primary_pages["results"];results.columnconfigure(0,weight=1)
         ttk.Label(results,text="후보·연구 결과",font=("Malgun Gothic",18,"bold")).grid(row=0,column=0,sticky="w",pady=(8,10))
@@ -781,6 +792,19 @@ class Studio(tk.Tk):
             if detail_tabs is not None:
                 detail_tabs.select(frames[index])
 
+    def _open_research_schedule(self):
+        """Show the selected profile's schedule settings and a read-only preview."""
+        target=str(self.primary_pages["settings"])
+        if self.main_tabs.select()!=target:
+            self._suppress_primary_tab_save=target
+            self.main_tabs.select(target)
+            self.after_idle(lambda: setattr(self,"_suppress_primary_tab_save",None)
+                            if getattr(self,"_suppress_primary_tab_save",None)==target else None)
+        self._autopilot_schedule_preview()
+
+    def _open_execution_history(self):
+        self.main_tabs.select(self.primary_pages["history"])
+
     def _refresh_network_mode_status(self, profile=None):
         profile=profile or self.current_profile()
         observation=network_mode.status(profile)
@@ -816,7 +840,11 @@ class Studio(tk.Tk):
         self._refresh_network_mode_status(store.get_profile(profile["id"]))
 
     def _on_primary_tab_changed(self,_event=None):
-        self._save_ui_state()
+        selected=self.main_tabs.select()
+        if getattr(self,"_suppress_primary_tab_save",None)==selected:
+            self._suppress_primary_tab_save=None
+        else:
+            self._save_ui_state()
         if self.main_tabs.select()==str(self.home_page):
             self._refresh_easy_step()
             self._dashboard_refresh()
@@ -1155,14 +1183,10 @@ class Studio(tk.Tk):
             checkpoint=f"{model['history_label']} · {checkpoint}"
         self.research_dashboard_checkpoint.set(checkpoint)
         counts=model["counts"]
-        if model["state"]=="COMPLETE":
-            suffix=" · 최종 연구 완료"
-        elif model["state"]=="READY":
-            suffix=" · 결과 측정 전"
-        elif model["insufficient_measurement"]:
-            suffix=" · 실측 불충분"
-        else:
-            suffix=" · 연구 진행 중"
+        suffix=research_dashboard_presenter.result_status_label(
+            model["state"],model["insufficient_measurement"])
+        schedule_time=(f"자동 일정 경과 {research_dashboard_presenter.format_elapsed(model['schedule_elapsed_seconds'])} / "
+                       f"{research_dashboard_presenter.format_elapsed(model['schedule_total_seconds'])}")
         sample_state=f"표본 저장: 첫째 {counts['sample_1']} · 둘째 {counts['sample_2']}"
         if model["state"]=="WAITING_SAMPLE_2":
             sample_state+=f" · 2차 예정 UTC {next_time} (남은 {remaining_text})"
@@ -1175,7 +1199,7 @@ class Studio(tk.Tk):
             f"프로필 누적 후보 {counts['cumulative_candidates']} · 누적 관측 {counts['cumulative_observing']}\n"
             f"현재 연구 관측 {counts['observing']} · {sample_state}\n"
             f"VPH A/B {counts['vph_a']}/{counts['vph_b']} · UNKNOWN/REVIEW "
-            f"{counts['unknown']}/{counts['vph_review']}{suffix}")
+            f"{counts['unknown']}/{counts['vph_review']}\n{suffix} · {schedule_time}")
         self._refresh_operator_pages(model)
 
     def _set_research_stage_cards(self,model,error=False):
@@ -3265,6 +3289,9 @@ class Studio(tk.Tk):
         ttk.Button(schedule,text="연구 시간 설정",command=self._autopilot_schedule_preview).pack(side="left",padx=7)
         self.schedule_progress_text=tk.StringVar(value="예약 대기 · 8시간 / 연구 20분 / 휴식 20분")
         ttk.Label(tab,textvariable=self.schedule_progress_text,wraplength=1050).grid(row=4,column=0,sticky="w",pady=3)
+        self.schedule_preview_text=tk.StringVar(value="저장 전 예상 일정이 없습니다. 미리보기는 저장·예약 생성·외부 호출을 하지 않습니다.")
+        ttk.Label(schedule,textvariable=self.schedule_preview_text,wraplength=1050,
+                  justify="left").pack(fill="x",padx=6,pady=(4,2))
         self.autopilot_start_button=ttk.Button(tab,text="AI 자동 조사 시작",command=self._autopilot_start,
                                                 style="Accent.TButton")
         self.autopilot_start_button.configure(text="연구 시작")
@@ -3388,23 +3415,50 @@ class Studio(tk.Tk):
 
     def _autopilot_schedule_preview(self):
         try:
+            start_at=research_scheduler.parse_local_start_time(self.schedule_start_time.get())
             config=research_scheduler.ScheduleConfig(
                 profile_id=(self.current_profile() or {}).get("id",""),
                 total_hours=int(self.schedule_hours.get()),
                 research_minutes=int(self.schedule_research_minutes.get()),
-                break_minutes=int(self.schedule_break_minutes.get()),
+                break_minutes=int(self.schedule_break_minutes.get()),start_at=start_at,
                 approved_search_calls=int(self.ai_max_calls.get()),schedule_mode=self.schedule_mode.get(),
                 research_min_minutes=int(self.schedule_research_min.get()),
                 research_max_minutes=int(self.schedule_research_max.get()),
                 break_min_minutes=int(self.schedule_break_min.get()),
                 break_max_minutes=int(self.schedule_break_max.get()))
-            config.validate()
-        except (TypeError,ValueError):
-            messagebox.showerror("시간 설정 확인","전체 시간, 연구/휴식 간격과 검색 한도를 다시 확인해 주세요.",parent=self)
+            preview=research_scheduler.preview_config(config)
+        except (TypeError,ValueError) as exc:
+            message=str(exc)
+            if "profile" in message.casefold() or "프로필" in message:
+                guidance="먼저 조사 채널을 선택하세요."
+            elif "start time" in message.casefold() or "시작 시각" in message:
+                guidance="오늘 현재 시각 이후의 HH:MM 형식으로 입력하세요."
+            else:
+                guidance="전체 시간, 연구·휴식 분, 편성 범위와 검색 호출 상한을 확인하세요."
+            result=f"저장 전 예상 일정을 표시할 수 없습니다. 문제: {message} 수정 방법: {guidance}"
+            if hasattr(self,"schedule_preview_text"):
+                self.schedule_preview_text.set(result)
+            self.schedule_progress_text.set(result)
             return
-        start=self.schedule_start_time.get().strip() or "지금 시작"
-        self.schedule_progress_text.set(
-            f"설정됨 · {config.total_hours}시간 · 연구 {config.research_minutes}분 / 휴식 {config.break_minutes}분 · 시작 {start} · 검색 한도 {config.approved_search_calls}회")
+        start=preview["start_at"]
+        end=preview["end_at"]
+        zone=start.tzname() or "현지 시간"
+        start_label=f"{start.strftime('%Y-%m-%d %H:%M')} {zone}"
+        end_label=f"{end.strftime('%Y-%m-%d %H:%M')} {end.tzname() or zone}"
+        if config.schedule_mode=="fixed":
+            mode=f"고정 편성 · 연구 {config.research_minutes}분 / 휴식 {config.break_minutes}분"
+            cycle_text=(f"연구 {preview['research_count_min']}회 · 휴식 {preview['break_count_min']}회")
+        else:
+            mode=(f"무작위 편성 · 연구 {config.research_min_minutes}~{config.research_max_minutes}분 / "
+                  f"휴식 {config.break_min_minutes}~{config.break_max_minutes}분")
+            cycle_text=(f"가능한 범위: 연구 {preview['research_count_min']}~{preview['research_count_max']}회 · "
+                        f"휴식 {preview['break_count_min']}~{preview['break_count_max']}회")
+        result=(f"저장 전 예상 일정 · 아직 저장·예약되지 않았습니다.\n"
+                f"전체 {config.total_hours}시간 · {mode} · 검색 호출 상한 {config.approved_search_calls}회\n"
+                f"시작 {start_label} · 예상 종료 {end_label} · {cycle_text}\n"
+                "미리보기는 읽기 전용이며 DB 저장, API 호출, 자동 연구 시작을 하지 않습니다.")
+        self.schedule_preview_text.set(result)
+        self.schedule_progress_text.set(result)
 
     def _research_schedule_preferences(self):
         return {"total_hours":int(self.schedule_hours.get()),
@@ -3623,14 +3677,8 @@ class Studio(tk.Tk):
             try:
                 if not auto_request_id and not self.save_vph_observation_slots():
                     return
-                start_at=None
                 start_text="" if auto_request_id else self.schedule_start_time.get().strip()
-                if start_text:
-                    parsed=datetime.strptime(start_text,"%H:%M").time()
-                    local_now=datetime.now().astimezone()
-                    start_at=datetime.combine(local_now.date(),parsed,tzinfo=local_now.tzinfo)
-                    if start_at < local_now:
-                        raise ValueError("시작 시각은 오늘의 현재 시각 이후로 입력해 주세요.")
+                start_at=None if auto_request_id else research_scheduler.parse_local_start_time(start_text)
                 preferences=self._research_schedule_preferences()
                 if auto_settings:
                     preferences={key:auto_settings[key] for key in ("total_hours","research_minutes","break_minutes",

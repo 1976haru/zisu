@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from mcrs import manual_research, store
+from mcrs.manual_research_ui import decision_status, format_elapsed, link_preview_rows
 from tests.support import WorkspaceTemp
 
 
@@ -51,6 +52,34 @@ class ManualResearchTests(unittest.TestCase):
         preview=manual_research.preview_links("\n".join((url(3),url(1,"shorts"),url(3,"live"),url(2))))
         self.assertEqual(["v0000000003","v0000000001","v0000000002"],[r.video_id for r in preview.valid])
         self.assertEqual((3,1,"v0000000003"),preview.duplicates[0])
+
+    def test_preview_table_shows_valid_duplicate_and_error_rows_without_storage(self):
+        text="\n".join((url(1),url(1,"shorts"),"https://example.invalid/not-youtube"))
+        with mock.patch.object(store,"connect",side_effect=AssertionError("link preview accessed DB")), \
+             mock.patch("webbrowser.open") as browser:
+            preview=manual_research.preview_links(text)
+            rows=link_preview_rows(text,preview)
+        self.assertEqual(3,len(rows))
+        self.assertEqual("https://www.youtube.com/watch?v=v0000000001",rows[0][1])
+        self.assertEqual(("예","예 · 최초 1행"),(rows[1][2],rows[1][3]))
+        self.assertIn("공식 도메인",rows[2][4])
+        browser.assert_not_called()
+
+    def test_preview_table_supports_fifty_links_and_marks_overflow(self):
+        text="\n".join(url(i) for i in range(50))
+        preview=manual_research.preview_links(text)
+        rows=link_preview_rows(text,preview)
+        self.assertEqual(50,len(rows));self.assertEqual("예",rows[-1][2])
+        overflow=text+"\n"+url(50)
+        overflow_preview=manual_research.preview_links(overflow)
+        overflow_rows=link_preview_rows(overflow,overflow_preview)
+        self.assertEqual(52,len(overflow_rows))
+        self.assertIn("최대 50개",overflow_rows[0][4])
+
+    def test_manual_duration_and_automatic_vs_human_decisions_are_distinct(self):
+        self.assertEqual("8초",format_elapsed(8));self.assertEqual("01:00:08",format_elapsed(3608))
+        text=decision_status("검토","제외","completed")
+        self.assertEqual("자동 판정: 검토 필요 · 사람 판정: 제외 · 평가 저장: 완료",text)
 
     def test_tracking_removed_all_supported_forms(self):
         for kind in ("watch","short","shorts","live"):

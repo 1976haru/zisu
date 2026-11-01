@@ -41,6 +41,33 @@ def local_time_label(value, *, local_timezone=None):
     return local.strftime("%Y-%m-%d %H:%M %Z")
 
 
+def format_elapsed(seconds):
+    """Keep short in-app durations visible and longer ones unambiguous."""
+    value = max(0, int(seconds or 0))
+    if value < 60:
+        return f"{value}초"
+    hours, remainder = divmod(value, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def result_status_label(state, insufficient_measurement=False):
+    """Describe Autopilot state without implying work is active when blocked."""
+    labels = {
+        "READY": "자동 연구: 아직 시작하지 않음 · 결과 측정 전",
+        "RUNNING": "자동 연구: 진행 중",
+        "BREAK": "자동 연구: 휴식 중",
+        "WAITING_SAMPLE_2": "자동 연구: 두 번째 표본 대기",
+        "BLOCKED": "자동 연구: 시작 차단 · 저장된 작업 상태 확인 필요",
+        "ERROR": "자동 연구: 오류 확인 필요",
+        "COMPLETE": "자동 연구: 완료",
+    }
+    label = labels.get(state, "자동 연구: 상태 확인 필요")
+    if insufficient_measurement and state not in {"READY", "COMPLETE", "BLOCKED", "ERROR"}:
+        label += " · 표본 측정이 아직 충분하지 않음"
+    return label
+
+
 def beginner_status(model):
     """Return plain-language status while leaving the state machine untouched."""
     state = model.get("state", "ERROR")
@@ -192,6 +219,8 @@ def present(profile_id, path=None, *, now=None, auth_ready=None):
         "historical_cancelled": historical_cancelled,
         "history_label": "과거 연구 중단됨" if historical_cancelled else "",
         "schedule_progress_percent": schedule_progress,
+        "schedule_elapsed_seconds": elapsed,
+        "schedule_total_seconds": total,
         "stage_progress_completed": completed,
         "stage_progress_total": len(STAGE_KEYS),
         "stages": stages,

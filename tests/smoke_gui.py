@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from support import WorkspaceTemp
-from mcrs import store, vph, research_dashboard_presenter
+from mcrs import manual_research, store, vph, research_dashboard_presenter
 from mcrs.genres import REVIEW
 from mcrs.gui import Studio, ProfileDialog
 from mcrs.manual_research_ui import ManualResearchWindow
@@ -273,6 +273,7 @@ with WorkspaceTemp() as temp:
     assert "readonly" in app.oauth_client_combo.state()
     with patch.object(ProfileDialog,"wait_window",lambda self: None):
         dialog=ProfileDialog(app)
+        assert dialog.title()=="새 채널 추가"
         assert {key for key,var in dialog.related_vars.items() if var.get()} == {"CHILL_RAP","RNB_HIPHOP","CAFE_CHILL"}
         dialog.genre_display.set("Chill Rap")
         dialog._core_genre_changed()
@@ -284,6 +285,10 @@ with WorkspaceTemp() as temp:
         assert dialog.profile_scrollbar.winfo_exists()
         assert dialog.save_button.winfo_manager()=="pack"
         dialog.destroy()
+    with patch.object(ProfileDialog,"wait_window",lambda self: None):
+        edit_dialog=ProfileDialog(app,store.get_profile(first))
+        assert edit_dialog.title()=="GUI 스모크 조사 채널 설정 수정"
+        edit_dialog.destroy()
     def save_synthetic_channel(dialog):
         dialog.name.set("GUI manual JP channel")
         dialog.market.set("JP")
@@ -306,8 +311,74 @@ with WorkspaceTemp() as temp:
     assert "별도 판정" in manual_window.profile_summary.get()
     assert not any("A. 수동 링크 연구" in str(getattr(widget,"cget",lambda *_:"")("text")) for widget in manual_window.body.winfo_children())
     manual_window._close()
+    manual_window=ManualResearchWindow(app,store.get_profile(first),opener=lambda _url:None)
+    sample_text="\n".join(("https://www.youtube.com/watch?v=preview0001",
+        "https://youtu.be/preview0001","https://example.invalid/not-youtube"))
+    manual_window.links.insert("1.0",sample_text)
+    before_batches=manual_research.list_batches(first)
+    manual_window._preview()
+    preview_values=[manual_window.preview_tree.item(iid,"values") for iid in manual_window.preview_tree.get_children()]
+    assert len(preview_values)==3
+    assert preview_values[0][2]=="예" and preview_values[0][3]=="아니요"
+    assert "최초 1행" in preview_values[1][3]
+    assert preview_values[2][2]=="아니요" and "공식 도메인" in preview_values[2][4]
+    assert manual_research.list_batches(first)==before_batches
+    fifty_text="\n".join(f"https://www.youtube.com/watch?v=v{i:010d}" for i in range(50))
+    manual_window.links.delete("1.0","end");manual_window.links.insert("1.0",fifty_text)
+    manual_window._preview();assert len(manual_window.preview_tree.get_children())==50
+    # Each viewport/DPI combination remains scrollable; actual monitor appearance is a separate human check.
+    for viewport_width,viewport_height in ((1366,768),(1920,1080)):
+        for scaling in (1.25,1.5):
+            app.tk.call("tk","scaling",scaling)
+            manual_window.geometry(f"{min(1020,viewport_width-80)}x{min(650,viewport_height-100)}")
+            manual_window.update_idletasks()
+            assert manual_window._scroll_canvas.winfo_width()>0
+            assert manual_window._scroll_canvas.winfo_height()>0
+            bounds=manual_window._scroll_canvas.bbox("all")
+            assert bounds and bounds[3]>=manual_window._scroll_canvas.winfo_height()
+            manual_window._scroll_canvas.yview_moveto(1.0);manual_window.update_idletasks()
+            assert manual_window._scroll_canvas.yview()[1]>=0.99
+            manual_window._ensure_focus_visible(SimpleNamespace(widget=manual_window.save_button))
+            manual_window.update_idletasks()
+            assert manual_window.save_button.winfo_height()+2>=manual_window.save_button.winfo_reqheight()
+    manual_window.links.delete("1.0","end");manual_window.links.insert("1.0","https://www.youtube.com/watch?v=manual00001")
+    manual_window._create();assert manual_window.batch_id
+    manual_window.tree.selection_set("manual00001");manual_window._select()
+    manual_window.human_fit.set("제외")
+    manual_window.fields["notes"].insert("1.0","사람이 직접 제외")
+    manual_window._save()
+    saved_item=manual_research.get_item(manual_window.batch_id,first,"manual00001")
+    assert saved_item["auto_genre_decision"]=="검토" and saved_item["human_fit"]=="제외"
+    assert "자동 판정: 검토 필요" in manual_window.decision_summary.get()
+    assert "사람 판정: 제외" in manual_window.decision_summary.get()
+    assert "평가 저장: 완료" in manual_window.decision_summary.get()
+    manual_window._close()
     assert callable(app.open_google_wizard)
     assert app.manual_research_button.cget("state")!="disabled"
+    before_ui_state=store.load_ui_state()
+    with store.connect() as database:
+        schedules_before=database.execute("SELECT COUNT(*) FROM research_schedules").fetchone()[0]
+    with patch("mcrs.gui.research_scheduler.create") as create_schedule:
+        app.beginner_schedule_button.invoke();app.update()
+        assert app.main_tabs.select()==str(app.primary_pages["settings"])
+        assert "저장 전 예상 일정" in app.schedule_preview_text.get()
+        assert "아직 저장·예약되지 않았습니다" in app.schedule_preview_text.get()
+        create_schedule.assert_not_called()
+    with patch("mcrs.gui.oauth.is_connected") as oauth_check, \
+         patch("mcrs.gui.research_scheduler.create") as create_schedule:
+        app._autopilot_schedule_preview()
+        oauth_check.assert_not_called();create_schedule.assert_not_called()
+    assert store.load_ui_state()==before_ui_state
+    with store.connect() as database:
+        assert database.execute("SELECT COUNT(*) FROM research_schedules").fetchone()[0]==schedules_before
+    app.schedule_mode.set("random");app._autopilot_schedule_preview()
+    assert "무작위 편성" in app.schedule_preview_text.get() and "가능한 범위" in app.schedule_preview_text.get()
+    app.schedule_mode.set("fixed");app.schedule_hours.set("25");app._autopilot_schedule_preview()
+    assert "수정 방법" in app.schedule_preview_text.get()
+    app.schedule_hours.set("8")
+    app.beginner_history_button.invoke();app.update_idletasks()
+    assert app.main_tabs.select()==str(app.primary_pages["history"])
+    app.main_tabs.select(app.home_page);app.update_idletasks()
     assert app.ai_provider_choice.get()=="규칙만"
     app.profile_combo.current([profile["id"] for profile in app.profiles].index(first))
     app.select_profile()
@@ -344,7 +415,7 @@ with WorkspaceTemp() as temp:
     assert not app.dashboard_start_button.winfo_ismapped()
     for button in (app.manual_research_button,app.beginner_results_button,
                    app.beginner_settings_button,app.beginner_schedule_button,
-                   app.beginner_performance_button,app.easy_next):
+                   app.beginner_performance_button,app.easy_next,app.beginner_history_button):
         assert button.winfo_ismapped()
     initial_scroll=app._easy_canvas.yview()
     wheel_event=SimpleNamespace(widget=app.easy_dashboard,num=None,delta=-120)
@@ -384,7 +455,7 @@ with WorkspaceTemp() as temp:
         assert app.research_dashboard_frame.winfo_rooty()+app.research_dashboard_frame.winfo_height() <= easy_widget.winfo_rooty()+easy_widget.winfo_height()
         for button in (app.manual_research_button,app.beginner_results_button,
                        app.beginner_settings_button,app.beginner_schedule_button,
-                       app.beginner_performance_button,app.easy_next):
+                       app.beginner_performance_button,app.easy_next,app.beginner_history_button):
             assert button.winfo_width()>0 and button.winfo_height()+2>=button.winfo_reqheight()
         app.manual_research_button.focus_set();app.update_idletasks()
         assert app.focus_get() is app.manual_research_button

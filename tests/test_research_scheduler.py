@@ -23,6 +23,53 @@ class ResearchSchedulerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.__exit__(None, None, None)
 
+    def test_read_only_fixed_preview_matches_scheduler_plan_and_saves_nothing(self):
+        config=scheduler.ScheduleConfig(self.jp,total_hours=2,research_minutes=30,
+            break_minutes=15,approved_search_calls=3)
+        before=store.research_dashboard_snapshot(self.jp,self.db)
+        with patch.object(store,"initialize",side_effect=AssertionError("preview initialized DB")), \
+             patch.object(store,"connect",side_effect=AssertionError("preview opened DB")):
+            preview=scheduler.preview_config(config,now=self.now)
+        after=store.research_dashboard_snapshot(self.jp,self.db)
+        plan=scheduler._build_schedule_plan(config,self.now)
+        self.assertEqual(sum(row["phase"]=="research" for row in plan),preview["research_count_min"])
+        self.assertEqual(sum(row["phase"]=="research" for row in plan),preview["research_count_max"])
+        self.assertEqual(sum(row["phase"]=="break" for row in plan),preview["break_count_min"])
+        self.assertEqual(sum(row["phase"]=="break" for row in plan),preview["break_count_max"])
+        self.assertEqual(self.now+timedelta(hours=2),preview["end_at"])
+        self.assertEqual(before,after)
+
+    def test_random_preview_reports_exact_possible_count_bounds_without_sampling(self):
+        config=scheduler.ScheduleConfig(self.jp,total_hours=1,research_minutes=35,break_minutes=25,
+            schedule_mode="random",research_min_minutes=30,research_max_minutes=40,
+            break_min_minutes=20,break_max_minutes=30)
+        counts=[]
+        def enumerate_plans(elapsed,phase,research,breaks):
+            if elapsed>=60:
+                counts.append((research,breaks));return
+            low,high=(30,40) if phase=="research" else (20,30)
+            for chosen in range(low,high+1):
+                end=min(60,elapsed+chosen)
+                enumerate_plans(end,"break" if phase=="research" else "research",
+                    research+int(phase=="research"),breaks+int(phase=="break"))
+        enumerate_plans(0,"research",0,0)
+        with patch("mcrs.research_scheduler.random.SystemRandom",side_effect=AssertionError("preview sampled randomness")):
+            preview=scheduler.preview_config(config,now=self.now)
+        self.assertEqual((min(x[0] for x in counts),max(x[0] for x in counts)),
+                         (preview["research_count_min"],preview["research_count_max"]))
+        self.assertEqual((min(x[1] for x in counts),max(x[1] for x in counts)),
+                         (preview["break_count_min"],preview["break_count_max"]))
+        self.assertEqual("random",preview["schedule_mode"])
+
+    def test_shared_local_start_time_parser_rejects_invalid_or_past_times(self):
+        now=datetime(2026,10,18,9,0,tzinfo=datetime.now().astimezone().tzinfo)
+        parsed=scheduler.parse_local_start_time("10:30",now=now)
+        self.assertEqual((10,30),(parsed.hour,parsed.minute))
+        with self.assertRaisesRegex(ValueError,"HH:MM"):
+            scheduler.parse_local_start_time("25:99",now=now)
+        with self.assertRaisesRegex(ValueError,"현재 시각 이후"):
+            scheduler.parse_local_start_time("08:59",now=now)
+
     def test_six_hour_schedule_switches_research_and_break_and_completes(self):
         session = scheduler.create(scheduler.ScheduleConfig(self.jp), self.db, now=self.now)
         self.assertEqual(("running", "research", 12),
