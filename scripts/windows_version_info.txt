@@ -1,0 +1,25 @@
+# UTF-8 PyInstaller version resource for the V4.6.0 development package.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(4, 6, 0, 0),
+    prodvers=(4, 6, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x4,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [StringStruct('CompanyName', 'ZISU SIGNAL LAB'),
+         StringStruct('FileDescription', 'ZISU SIGNAL LAB - Channel Research Assistant'),
+         StringStruct('FileVersion', '4.6.0.0'),
+         StringStruct('InternalName', 'ZisuResearchStudio'),
+         StringStruct('OriginalFilename', 'ZisuResearchStudio.exe'),
+         StringStruct('ProductName', 'ZISU SIGNAL LAB'),
+         StringStruct('ProductVersion', '4.6.0.0'),
+         StringStruct('LegalCopyright', 'Copyright (c) ZISU SIGNAL LAB')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ])

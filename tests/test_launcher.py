@@ -6,9 +6,22 @@ from pathlib import Path
 from unittest.mock import patch
 import main
 ROOT=Path(__file__).resolve().parents[1]
-from mcrs.startup_probe import write_stage
+from mcrs.startup_probe import write_stage, safe_exception_details
 from support import WorkspaceTemp
 class LauncherTests(unittest.TestCase):
+    def test_startup_exception_diagnostic_records_safe_location_not_message_or_path(self):
+        try:
+            raise PermissionError(r"C:\private\client_secret.json should not be logged")
+        except PermissionError as exc:
+            details=safe_exception_details(exc)
+        self.assertEqual("PermissionError",details["error_type"])
+        self.assertEqual("test_startup_exception_diagnostic_records_safe_location_not_message_or_path",
+                         details["error_location"]["function"])
+        self.assertEqual("test_launcher",details["error_location"]["module"])
+        self.assertIsInstance(details["error_location"]["line"],int)
+        self.assertNotIn("private",repr(details).casefold())
+        self.assertNotIn("client_secret",repr(details).casefold())
+
     def test_offline_smoke_arguments_are_explicit_and_validated(self):
         with patch.dict(os.environ, {}, clear=True):
             main._apply_offline_smoke_arguments([
@@ -36,6 +49,35 @@ class LauncherTests(unittest.TestCase):
             self.assertGreaterEqual(payload["events"][-1]["launch_elapsed_ms"],0)
             self.assertNotIn("email",payload)
             self.assertNotIn("token",report.read_text(encoding="utf-8").lower())
+    def test_startup_report_retries_transient_windows_replace_lock_atomically(self):
+        with WorkspaceTemp() as root:
+            report=root/"locked-report.json"
+            real_replace=os.replace
+            attempts=[]
+            def transient(source,target):
+                attempts.append((Path(source),Path(target)))
+                if len(attempts)<3:
+                    raise PermissionError("simulated scanner lock")
+                return real_replace(source,target)
+            with patch.dict(os.environ,{"ZISU_EXE_SMOKE_REPORT":str(report)},clear=True), \
+                 patch("mcrs.startup_probe.os.replace",side_effect=transient), \
+                 patch("mcrs.startup_probe.time.sleep"):
+                write_stage("database_initializing")
+            self.assertEqual(3,len(attempts))
+            self.assertEqual("database_initializing",json.loads(report.read_text(encoding="utf-8"))["stage"])
+            self.assertFalse(list(root.glob("*.tmp")))
+
+    def test_startup_report_persistent_replace_lock_fails_and_leaves_old_complete_report(self):
+        with WorkspaceTemp() as root:
+            report=root/"locked-report.json"
+            report.write_text('{"stage":"previous_complete"}',encoding="utf-8")
+            with patch.dict(os.environ,{"ZISU_EXE_SMOKE_REPORT":str(report)},clear=True), \
+                 patch("mcrs.startup_probe.os.replace",side_effect=PermissionError("locked")), \
+                 patch("mcrs.startup_probe.time.sleep"):
+                with self.assertRaises(PermissionError):
+                    write_stage("database_initializing")
+            self.assertEqual("previous_complete",json.loads(report.read_text(encoding="utf-8"))["stage"])
+            self.assertFalse(list(root.glob("*.tmp")))
     def test_launcher_and_diagnostics_are_present(self):
         for f in ("실행하기.bat","START_ZISU.cmd","오류진단하기.bat","설치안내_문제해결.html","main.py","mcrs/gui.py"):
             self.assertTrue((ROOT/f).exists(),f)
@@ -54,18 +96,51 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("actions/setup-python@v7",workflow)
         self.assertIn("actions/upload-artifact@v7",workflow)
         self.assertIn("windows_exe_smoke.ps1",workflow)
+        self.assertIn("zisu-*-fresh-run-*/exe-smoke-report.json",workflow)
+        self.assertIn("zisu-*-fresh-run-*/exe-smoke-failure.json",workflow)
+        self.assertIn("zisu-*-warm-run-*/exe-smoke-report.json",workflow)
+        self.assertIn("zisu-*-warm-run-*/exe-smoke-failure.json",workflow)
+        self.assertIn("zisu-*-warmup/exe-smoke-report.json",workflow)
+        self.assertIn("zisu-*-warmup/exe-smoke-failure.json",workflow)
+        smoke=Path(ROOT,"scripts","windows_exe_smoke.ps1").read_text(encoding="utf-8")
+        self.assertIn("$current.stage -eq 'startup_failed'",smoke)
+        self.assertIn("result = 'STARTUP_FAILED'",smoke)
+        self.assertIn("result = 'GUI_CLOSE_TIMEOUT'",smoke)
+        self.assertIn("startup_error_location = $startupFailure.error_location",smoke)
+        self.assertIn("python tests/smoke_gui.py",workflow)
         self.assertIn("package_windows.ps1",workflow)
         self.assertIn("--onedir",workflow)
         self.assertIn("--onefile",workflow)
         self.assertIn("--collect-submodules google_auth_oauthlib",workflow)
         self.assertIn("--collect-data google_auth_oauthlib",workflow)
+        self.assertIn("--collect-all tzdata",workflow)
+        self.assertIn(".Replace('\\\\', '\\')",workflow)
+        self.assertIn("tzdata\\zoneinfo\\America\\Los_Angeles",workflow)
         self.assertIn("fresh_path_launches",workflow)
         self.assertIn("warm_process_launches",workflow)
         self.assertIn("startup-comparison.json",workflow)
         self.assertIn("ZISU 배포 日本語 path",workflow)
-        self.assertIn("V4.4.2-Windows.zip",workflow)
+        self.assertIn("ZISU-SIGNAL-LAB-V4.6.0-Windows.zip",workflow)
+        self.assertIn("ZISU-SIGNAL-LAB-V4.6.0-Windows",workflow)
         self.assertIn("validate_windows_release.ps1",workflow)
         self.assertIn("create_windows_sandbox_config.ps1",workflow)
+    def test_v460_brand_and_version_are_consistent_across_runtime_and_release_paths(self):
+        gui=(ROOT/"mcrs/gui.py").read_text(encoding="utf-8")
+        package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
+        workflow=(ROOT/".github/workflows/windows-build.yml").read_text(encoding="utf-8")
+        launcher=(ROOT/"ZISU_SIGNAL_LAB_Run.cmd").read_text(encoding="utf-8")
+        self.assertIn("DISPLAY_VERSION",gui)
+        self.assertIn("APP_VERSION",gui)
+        self.assertIn("ZISU-SIGNAL-LAB-V",package)
+        self.assertIn("ZISU-SIGNAL-LAB-V4.6.0-Windows.zip",workflow)
+        self.assertIn("ZISU SIGNAL LAB V4.6.0",launcher)
+        self.assertIn("ZISU-SIGNAL-LAB-Run.cmd",package)
+        self.assertIn("$normalizedEntries",package)
+        self.assertIn("$sourceOutsideRuntime",package)
+        release_script=(ROOT/"scripts/zisu_release_oneclick.ps1").read_text(encoding="utf-8")
+        self.assertIn("ZISU-SIGNAL-LAB-V4.6.0-Windows",release_script)
+        for contents in (gui,package,workflow,launcher):
+            self.assertNotIn("V4.5.5",contents)
     def test_release_scripts_are_present_and_forbid_sensitive_payloads(self):
         smoke=(ROOT/"scripts/windows_exe_smoke.ps1").read_text(encoding="utf-8")
         package=(ROOT/"scripts/package_windows.ps1").read_text(encoding="utf-8")
@@ -94,6 +169,9 @@ class LauncherTests(unittest.TestCase):
         command=(ROOT/"검증하기.cmd").read_text(encoding="utf-8")
         for marker in ("Get-FileHash", "RELEASE_SHA256SUMS.txt", "SHA256SUMS.txt", "_internal", "fresh-path", "profile_create_switch_isolation", "network_oauth", "ZISU Validation 한글_日本語"):
             self.assertIn(marker,validator)
+        self.assertIn("manifestPattern",validator)
+        self.assertIn("ZISU-SIGNAL-LAB-Run.cmd",validator)
+        self.assertIn("$sourceOutsideRuntime",validator)
         self.assertIn("WindowsSandbox.exe",sandbox)
         self.assertIn("<Networking>Disable</Networking>",sandbox)
         self.assertIn("validate_windows_release.ps1",command)

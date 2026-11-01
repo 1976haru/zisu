@@ -4,12 +4,28 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+import traceback
 
 _STARTED = time.perf_counter()
 _EVENTS = []
 _REPORT_TARGET = None
+
+
+def safe_exception_details(exc: BaseException) -> dict:
+    """Return exception type and code location without message or full paths."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    details = {"error_type": type(exc).__name__[:80]}
+    if frames:
+        frame = frames[-1]
+        details["error_location"] = {
+            "module": Path(frame.filename).stem[:80],
+            "function": frame.name[:80],
+            "line": int(frame.lineno),
+        }
+    return details
 
 
 def write_stage(stage: str, **details) -> None:
@@ -49,8 +65,25 @@ def write_stage(stage: str, **details) -> None:
         "events": list(_EVENTS),
         **details,
     }
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    temporary.replace(target)
+    # Windows scanners can briefly retain a just-closed file handle.  A unique
+    # sibling prevents a stale/locked fixed .tmp name from poisoning the next
+    # stage or process; os.replace keeps readers on the old or complete payload.
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        for attempt in range(5):
+            try:
+                os.replace(temporary, target)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # Never conceal the original write/replace failure with cleanup.
+            pass

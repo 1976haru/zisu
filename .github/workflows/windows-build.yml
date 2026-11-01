@@ -12,30 +12,58 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Install test and packaging dependencies
+        run: python -m pip install -r requirements-oauth.txt pyinstaller
       - name: Run unit tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Run isolated stress gate
         run: python tests/stress_v43.py
+      - name: Run Tkinter GUI assistant workflow smoke
+        run: python tests/smoke_gui.py
+      - name: Run V4.6 isolated acceptance matrix (Mock only)
+        run: python scripts/v46_offline_acceptance.py --output dist/v46-offline-acceptance.json
       - name: Compile Python sources
         run: python -m compileall -q mcrs tests main.py
-      - name: Install packager
-        run: python -m pip install -r requirements-oauth.txt pyinstaller
+      - name: Generate ZISU SIGNAL LAB Windows icon
+        run: python scripts/generate_brand_icon.py
       - name: Build onefile comparison executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --name ZisuResearchStudio --distpath dist/onefile --workpath build/onefile --specpath build/onefile main.py
+        shell: pwsh
+        run: |
+          $icon = (Resolve-Path 'assets/zisu_signal_lab.ico').Path
+          $versionFile = (Resolve-Path 'scripts/windows_version_info.txt').Path
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --icon $icon --version-file $versionFile --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --collect-all tzdata --name ZisuResearchStudio --distpath dist/onefile --workpath build/onefile --specpath build/onefile main.py
       - name: Build onedir release executable
-        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --name ZisuResearchStudio --distpath dist/onedir --workpath build/onedir --specpath build/onedir main.py
+        shell: pwsh
+        run: |
+          $icon = (Resolve-Path 'assets/zisu_signal_lab.ico').Path
+          $versionFile = (Resolve-Path 'scripts/windows_version_info.txt').Path
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --icon $icon --version-file $versionFile --collect-submodules google_auth_oauthlib --collect-data google_auth_oauthlib --collect-all tzdata --name ZisuResearchStudio --distpath dist/onedir --workpath build/onedir --specpath build/onedir main.py
       - name: Verify packaged OAuth modules
         shell: pwsh
         run: |
           pyi-archive_viewer -l -r dist\onefile\ZisuResearchStudio.exe | Out-File -Encoding utf8 onefile_archive_listing.txt
           pyi-archive_viewer -l -r dist\onedir\ZisuResearchStudio\ZisuResearchStudio.exe | Out-File -Encoding utf8 onedir_archive_listing.txt
-          foreach ($module in @('google_auth_oauthlib', 'google.oauth2.credentials', 'requests')) {
+          foreach ($module in @('google_auth_oauthlib', 'google.oauth2.credentials', 'requests', 'mcrs.offline_soak')) {
             if (-not (Select-String -LiteralPath onefile_archive_listing.txt -Pattern $module -Quiet)) {
               throw "Required module missing from onefile comparison: $module"
             }
             if (-not (Select-String -LiteralPath onedir_archive_listing.txt -Pattern $module -Quiet)) {
               throw "Required module missing from onedir release: $module"
             }
+          }
+          # archive_viewer quotes archive names and escapes path separators as \\\\.
+          # Normalize the display representation before checking the exact resource path.
+          $onefileArchive = (Get-Content -LiteralPath 'onefile_archive_listing.txt' -Raw -Encoding utf8).Replace('\\', '\').Replace('/', '\')
+          if (-not $onefileArchive.Contains('tzdata\zoneinfo\America\Los_Angeles')) {
+            throw 'Pacific timezone data missing from onefile archive.'
+          }
+          $onedirTimezone = 'dist/onedir/ZisuResearchStudio/_internal/tzdata/zoneinfo/America/Los_Angeles'
+          if (-not (Test-Path -LiteralPath $onedirTimezone -PathType Leaf)) {
+            throw "Pacific timezone data missing from onedir release: $onedirTimezone"
+          }
+          $versionInfo = (Get-Item -LiteralPath 'dist/onedir/ZisuResearchStudio/ZisuResearchStudio.exe').VersionInfo
+          if ($versionInfo.ProductName -ne 'ZISU SIGNAL LAB' -or $versionInfo.ProductVersion -notlike '4.6.0.*') {
+            throw "Unexpected product version metadata: $($versionInfo.ProductName) / $($versionInfo.ProductVersion)"
           }
       - name: Write SHA-256 manifest
         shell: pwsh
@@ -49,7 +77,7 @@ jobs:
         shell: pwsh
         run: |
           $target = Join-Path $env:RUNNER_TEMP 'ZISU 배포 日本語 path'
-          Expand-Archive -LiteralPath dist/release/ZISU-Research-Studio-V4.4.2-Windows.zip -DestinationPath $target
+          Expand-Archive -LiteralPath dist/release/ZISU-SIGNAL-LAB-V4.6.0-Windows.zip -DestinationPath $target
           $expected = (Get-Content -LiteralPath (Join-Path $target 'SHA256SUMS.txt') -Raw).Trim().Split(' ')[0]
           $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $target 'ZisuResearchStudio.exe')).Hash.ToLowerInvariant()
           if ($expected -ne $actual) { throw 'Packaged EXE hash mismatch.' }
@@ -92,16 +120,75 @@ jobs:
           $dirTime = ($onedir.fresh_path_launches + $onedir.warm_process_launches | Measure-Object launch_to_gui_ready_ms -Average -Minimum -Maximum)
           $dirFiles = @(Get-Item (Join-Path $target 'ZisuResearchStudio.exe')) + @(Get-ChildItem -LiteralPath (Join-Path $target '_internal') -File -Recurse)
           $dirBytes = ($dirFiles | Measure-Object Length -Sum).Sum
-          $zipBytes = (Get-Item dist/release/ZISU-Research-Studio-V4.4.2-Windows.zip).Length
+          $zipBytes = (Get-Item dist/release/ZISU-SIGNAL-LAB-V4.6.0-Windows.zip).Length
           Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY "## EXE startup comparison`n`n- Onefile GUI ready average/min/max: $([math]::Round($oneTime.Average)) / $([math]::Round($oneTime.Minimum)) / $([math]::Round($oneTime.Maximum)) ms; EXE: $($oneExe.Length) bytes`n- Onedir GUI ready average/min/max: $([math]::Round($dirTime.Average)) / $([math]::Round($dirTime.Minimum)) / $([math]::Round($dirTime.Maximum)) ms; EXE+runtime: $dirBytes bytes; release ZIP: $zipBytes bytes`n- Measurements: 3 fresh-path and 3 warm-process launches per layout (plus one warm-up); OS: $($onedir.fresh_path_launches[0].os.product_name), build $($onedir.fresh_path_launches[0].os.os_build). OS file cache was not flushed.`n"
+      - name: Run packaged onefile and onedir offline scheduler QA (30 seconds each)
+        shell: pwsh
+        run: |
+          $archive = (Resolve-Path -LiteralPath 'dist/release/ZISU-SIGNAL-LAB-V4.6.0-Windows.zip').Path
+          $target = Join-Path $env:RUNNER_TEMP 'ZISU packaged QA 日本語 path'
+          if (Test-Path -LiteralPath $target) { throw "Refusing to reuse packaged QA target: $target" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $target
+          $manifest = Join-Path $target 'SHA256SUMS.txt'
+          $packagedExe = Join-Path $target 'ZisuResearchStudio.exe'
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $packagedExe -PathType Leaf)) {
+            throw 'Packaged QA archive is missing its manifest or executable.'
+          }
+          $expected = (Get-Content -LiteralPath $manifest -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedExe).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw 'Packaged QA EXE hash mismatch.' }
+          function Invoke-OfflineQaShort($name, $exe) {
+            $runRoot = Join-Path $env:RUNNER_TEMP ("zisu-qa-short-{0}-{1}" -f $name, [guid]::NewGuid().ToString('N'))
+            $data = Join-Path $runRoot 'data'
+            $reports = Join-Path $runRoot 'reports'
+            $arguments = @('--qa-offline-soak', '--qa-short', '--short-duration-seconds', '30', '--duration-hours', '6',
+              '--data-dir', ('"{0}"' -f $data), '--report-dir', ('"{0}"' -f $reports))
+            $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru -Wait -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) { throw "$name packaged offline QA exited with $($process.ExitCode). Report: $reports" }
+            $reportPath = Join-Path $reports 'offline-soak-report.json'
+            if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { throw "$name QA report is missing: $reportPath" }
+            $report = Get-Content -LiteralPath $reportPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($report.result -ne 'SHORT_QA_PASS' -or $report.mode -ne 'accelerated_virtual_6h' -or
+                -not $report.frozen_executable -or -not $report.pass_criteria.same_exe_process_active_scheduler -or
+                $report.pass_criteria.six_hour_wall_clock -or $report.external_network_attempts -ne 0 -or
+                $report.database_integrity -ne 'ok' -or -not $report.checkpoint_verified -or
+                -not $report.genre_configuration_preserved -or -not $report.profile_isolation_verified -or
+                -not $report.mock_search_only_in_research -or $report.mock_search_calls -lt 1 -or
+                -not $report.pass_criteria.no_missing_sample_intervals -or $report.sample_count -ne 73 -or
+                $report.database_errors -ne 0 -or $report.exception_count -ne 0 -or
+                $report.final_schedule_state -ne 'completed' -or -not $report.quota_not_exceeded -or
+                $report.phase_transition_observations.research -lt 1 -or
+                $report.phase_transition_observations.break -lt 1 -or
+                $report.actual_monotonic_elapsed_seconds -lt 30) {
+              throw "$name packaged offline QA evidence did not satisfy its short-mode contract: $reportPath"
+            }
+            Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY ("- {0} packaged QA: {1}, actual seconds {2}, virtual schedule seconds {3}, mock searches {4}`n" -f
+              $name, $report.result, $report.actual_monotonic_elapsed_seconds, $report.virtual_schedule_elapsed_seconds, $report.mock_search_calls)
+          }
+          Invoke-OfflineQaShort 'onefile' (Resolve-Path 'dist/onefile/ZisuResearchStudio.exe').Path
+          Invoke-OfflineQaShort 'onedir' (Resolve-Path (Join-Path $target 'ZisuResearchStudio.exe')).Path
+      - name: Upload isolated EXE startup failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exe-startup-failure-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/zisu-*-fresh-run-*/exe-smoke-failure.json
+            ${{ runner.temp }}/zisu-*-fresh-run-*/exe-smoke-report.json
+            ${{ runner.temp }}/zisu-*-warm-run-*/exe-smoke-failure.json
+            ${{ runner.temp }}/zisu-*-warm-run-*/exe-smoke-report.json
+            ${{ runner.temp }}/zisu-*-warmup/exe-smoke-failure.json
+            ${{ runner.temp }}/zisu-*-warmup/exe-smoke-report.json
+          if-no-files-found: ignore
       - name: Upload Windows release package
         uses: actions/upload-artifact@v7
         with:
-          name: ZisuResearchStudio-Windows
+          name: ZISU-SIGNAL-LAB-V4.6.0-Windows
           path: |
             dist/onedir/ZisuResearchStudio/**
             dist/SHA256SUMS.txt
-            dist/release/ZISU-Research-Studio-V4.4.2-Windows.zip
+            dist/release/ZISU-SIGNAL-LAB-V4.6.0-Windows.zip
             dist/release/RELEASE_SHA256SUMS.txt
             scripts/windows_exe_smoke.ps1
             scripts/validate_windows_release.ps1
@@ -109,4 +196,8 @@ jobs:
             검증하기.cmd
             WindowsSandbox_검증하기.cmd
             dist/startup-comparison.json
+            dist/v46-offline-acceptance.json
+            ${{ runner.temp }}/zisu-qa-short-*/reports/offline-soak-report.json
+            ${{ runner.temp }}/zisu-qa-short-*/reports/metrics.csv
+            ${{ runner.temp }}/zisu-qa-short-*/reports/events.jsonl
           if-no-files-found: error
